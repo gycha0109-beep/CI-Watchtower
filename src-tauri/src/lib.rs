@@ -718,7 +718,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
     let queued_count: i64 = repositories.iter().filter(|r| r.enabled).map(|r| r.queued_count).sum();
     let unassigned_runs = unassigned_runs(&conn, 30)?;
     let unassigned_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM workflow_runs wr LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id WHERE ra.run_id IS NULL AND wr.ignored=0 AND wr.status!='completed'",
+        "SELECT COUNT(*) FROM workflow_runs wr LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id WHERE ra.run_id IS NULL AND wr.ignored=0",
         [],
         |row| row.get(0),
     )?;
@@ -1305,10 +1305,23 @@ fn save_track(input: TrackInput, state: State<'_, AppState>) -> std::result::Res
 
 #[tauri::command]
 fn delete_track(id: i64, state: State<'_, AppState>) -> std::result::Result<(), String> {
-    let conn = db(&state).map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM watch_tracks WHERE id=?", params![id])
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    let result = (|| -> Result<()> {
+        let mut conn = db(&state)?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE workflow_runs
+             SET resolution_status='unassigned'
+             WHERE run_id IN (SELECT run_id FROM run_assignments WHERE track_id=?)",
+            params![id],
+        )?;
+        let deleted = tx.execute("DELETE FROM watch_tracks WHERE id=?", params![id])?;
+        if deleted == 0 {
+            return Err(anyhow!("삭제할 트랙을 찾지 못했습니다."));
+        }
+        tx.commit()?;
+        Ok(())
+    })();
+    result.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

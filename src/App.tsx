@@ -3,6 +3,7 @@ import { api } from './api';
 import type { Dashboard, DashboardTrack, MonitoredRepository, Settings, TrackInput, WorkflowRunSummary } from './types';
 
 type TrackFormState = Omit<TrackInput, 'longCiMinutes'> & { longCiMinutes: number | '' };
+type ViewFilter = 'all' | 'unassigned' | number;
 
 const emptyTrack = (): TrackFormState => ({
   name: '',
@@ -44,12 +45,23 @@ function repositoryState(repo: MonitoredRepository) {
   return 'IDLE';
 }
 
+function trackActivity(item: DashboardTrack) {
+  const running = item.runs.filter(run => run.status === 'in_progress').length;
+  const queued = item.runs.filter(run => ['queued', 'requested', 'pending', 'waiting'].includes(run.status)).length;
+  const red = item.runs.filter(run =>
+    run.status === 'completed' &&
+    ['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale'].includes(run.conclusion ?? '')
+  ).length;
+  return { running, queued, red };
+}
+
 function App() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [trackForm, setTrackForm] = useState<TrackFormState>(emptyTrack());
   const [repoInput, setRepoInput] = useState('');
   const [token, setToken] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [selectedView, setSelectedView] = useState<ViewFilter>('all');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -72,10 +84,23 @@ function App() {
     return () => window.clearInterval(id);
   }, [refresh]);
 
+  useEffect(() => {
+    if (typeof selectedView !== 'number' || !dashboard) return;
+    if (!dashboard.tracks.some(item => item.track.id === selectedView)) {
+      setSelectedView('all');
+    }
+  }, [dashboard, selectedView]);
+
   const congestionText = useMemo(() => {
     if (!dashboard) return '—';
     return dashboard.congestionLevel.toUpperCase();
   }, [dashboard]);
+
+  const visibleTracks = useMemo(() => {
+    if (!dashboard || selectedView === 'unassigned') return [];
+    if (selectedView === 'all') return dashboard.tracks;
+    return dashboard.tracks.filter(item => item.track.id === selectedView);
+  }, [dashboard, selectedView]);
 
   const act = async (work: () => Promise<unknown>, message?: string, poll = false) => {
     try {
@@ -99,10 +124,11 @@ function App() {
     };
     if (!payload.name || !payload.trackKey || payload.longCiMinutes <= 0) return;
     await act(async () => {
-      await api.saveTrack(payload);
+      const savedId = await api.saveTrack(payload);
       setTrackForm(emptyTrack());
       setEditingId(null);
-    }, '트랙을 저장했습니다.', true);
+      setSelectedView(savedId);
+    }, editingId ? '트랙을 수정했습니다.' : '트랙을 추가했습니다.', true);
   };
 
   const submitRepository = async (e: FormEvent) => {
@@ -123,7 +149,23 @@ function App() {
       trackKey: item.track.trackKey,
       longCiMinutes: item.track.longCiMinutes,
     });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    setSelectedView(item.track.id);
+    document.querySelector('.controls-panel')?.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const removeTrack = async (item: DashboardTrack) => {
+    const confirmed = window.confirm(
+      `"${item.track.name}" 트랙을 삭제하시겠습니까?\n\n기존 GitHub Run 자체는 삭제되지 않으며, 이 트랙의 귀속 정보와 학습 fingerprint가 제거됩니다.`
+    );
+    if (!confirmed) return;
+    await act(async () => {
+      await api.deleteTrack(item.track.id);
+      if (editingId === item.track.id) {
+        setEditingId(null);
+        setTrackForm(emptyTrack());
+      }
+      if (selectedView === item.track.id) setSelectedView('all');
+    }, `${item.track.name} 트랙을 삭제했습니다.`);
   };
 
   const saveToken = async (e: FormEvent) => {
@@ -160,7 +202,9 @@ function App() {
       <section className="summary-grid five">
         <div className="summary-card"><span>Running</span><strong>{dashboard?.runningCount ?? 0}</strong></div>
         <div className="summary-card"><span>Queued</span><strong>{dashboard?.queuedCount ?? 0}</strong></div>
-        <div className="summary-card"><span>Unassigned</span><strong>{dashboard?.unassignedCount ?? 0}</strong></div>
+        <button className="summary-card summary-button" onClick={() => setSelectedView('unassigned')}>
+          <span>Unassigned</span><strong>{dashboard?.unassignedCount ?? 0}</strong>
+        </button>
         <div className={`summary-card congestion ${dashboard?.congestionLevel ?? 'safe'}`}><span>Queue</span><strong>{congestionText}</strong></div>
         <div className="summary-card"><span>GitHub PAT</span><strong>{dashboard?.tokenConfigured ? 'READY' : 'MISSING'}</strong></div>
       </section>
@@ -184,6 +228,34 @@ function App() {
               {editingId && <button type="button" className="ghost" onClick={() => { setEditingId(null); setTrackForm(emptyTrack()); }}>취소</button>}
             </div>
           </form>
+
+          <div className="sidebar-section track-manager">
+            <div className="sidebar-section-head">
+              <h2>등록된 트랙</h2>
+              <span>{dashboard?.tracks.length ?? 0}</span>
+            </div>
+            <div className="managed-track-list">
+              {(dashboard?.tracks.length ?? 0) === 0 && <p className="muted-copy">등록된 트랙이 없습니다.</p>}
+              {dashboard?.tracks.map(item => {
+                const [label, cls] = statusLabel(item);
+                return (
+                  <div className={`managed-track-item ${selectedView === item.track.id ? 'selected' : ''}`} key={item.track.id}>
+                    <button className="managed-track-main" onClick={() => setSelectedView(item.track.id)}>
+                      <span className={cls}>{label}</span>
+                      <span className="managed-track-copy">
+                        <b>{item.track.name}</b>
+                        <small className="mono">{item.track.trackKey} · {item.track.longCiMinutes}m</small>
+                      </span>
+                    </button>
+                    <div className="managed-track-actions">
+                      <button className="ghost tiny" onClick={() => editTrack(item)}>수정</button>
+                      <button className="danger-ghost tiny" onClick={() => void removeTrack(item)}>삭제</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
 
           <hr />
           <h2>감시 저장소</h2>
@@ -239,44 +311,75 @@ function App() {
         </section>
 
         <section className="tracks-column">
-          <section className="panel inbox-panel">
-            <div className="section-head">
+          <section className="panel track-filter-panel">
+            <div className="filter-head">
               <div>
-                <p className="eyebrow">ATTRIBUTION INBOX</p>
-                <h2>미귀속 CI</h2>
+                <p className="eyebrow">TRACK VIEW</p>
+                <h2>트랙 필터</h2>
               </div>
-              <strong>{dashboard?.unassignedCount ?? 0}</strong>
+              <span className="filter-help">한 트랙의 CI만 즉시 좁혀서 볼 수 있습니다.</span>
             </div>
-            {(dashboard?.unassignedRuns.length ?? 0) === 0 ? (
-              <p className="muted-copy">현재 확인이 필요한 미귀속 CI가 없습니다.</p>
-            ) : dashboard?.unassignedRuns.map(run => (
-              <div className="unassigned-run" key={run.id}>
-                <div className="unassigned-main">
-                  <span className={`dot ${runDot(run)}`} />
-                  <div>
-                    <b>{run.workflowName}</b>
-                    <p>{run.repository} · {run.event} · {run.headBranch ?? 'detached'} · <span className="mono">{run.headSha.slice(0, 8)}</span></p>
-                    <p className="reason">{run.resolutionStatus === 'conflict' ? `TRACK CONFLICT · ${run.attributionReason ?? '명시 신호 충돌'}` : (run.attributionReason ?? '명시적 Track Key를 찾지 못했습니다.')}</p>
-                  </div>
-                </div>
-                <div className="assignment-actions">
-                  {(dashboard?.tracks ?? []).map(item => (
-                    <button key={item.track.id} className="ghost small" onClick={() => void act(() => api.assignRun(run.id, item.track.id), `${item.track.name}에 귀속했습니다.`)}>
-                      {item.track.name}
-                    </button>
-                  ))}
-                  <button className="danger-ghost small" onClick={() => void act(() => api.ignoreRun(run.id))}>무시</button>
-                  <button className="ghost small" onClick={() => void api.openExternal(run.htmlUrl)}>Actions</button>
-                </div>
-              </div>
-            ))}
+            <div className="filter-chips">
+              <button className={`filter-chip ${selectedView === 'all' ? 'active' : ''}`} onClick={() => setSelectedView('all')}>
+                전체 <span>{dashboard?.tracks.length ?? 0}</span>
+              </button>
+              {dashboard?.tracks.map(item => {
+                const activity = trackActivity(item);
+                const activeCount = activity.running + activity.queued;
+                return (
+                  <button key={item.track.id} className={`filter-chip ${selectedView === item.track.id ? 'active' : ''}`} onClick={() => setSelectedView(item.track.id)}>
+                    {item.track.name}
+                    {activeCount > 0 && <span className="chip-live">{activeCount}</span>}
+                    {activeCount === 0 && activity.red > 0 && <span className="chip-red">RED</span>}
+                  </button>
+                );
+              })}
+              <button className={`filter-chip unassigned ${selectedView === 'unassigned' ? 'active' : ''}`} onClick={() => setSelectedView('unassigned')}>
+                미귀속 <span>{dashboard?.unassignedCount ?? 0}</span>
+              </button>
+            </div>
           </section>
 
-          {(dashboard?.tracks.length ?? 0) === 0 && (
-            <div className="panel empty-state"><h2>등록된 트랙이 없습니다.</h2><p>Track Key와 장기 CI 기준만 등록하십시오.</p></div>
+          {selectedView === 'unassigned' && (
+            <section className="panel inbox-panel">
+              <div className="section-head">
+                <div>
+                  <p className="eyebrow">ATTRIBUTION INBOX</p>
+                  <h2>미귀속 CI</h2>
+                </div>
+                <strong>{dashboard?.unassignedCount ?? 0}</strong>
+              </div>
+              {(dashboard?.unassignedRuns.length ?? 0) === 0 ? (
+                <p className="muted-copy">현재 확인이 필요한 미귀속 CI가 없습니다.</p>
+              ) : dashboard?.unassignedRuns.map(run => (
+                <div className="unassigned-run" key={run.id}>
+                  <div className="unassigned-main">
+                    <span className={`dot ${runDot(run)}`} />
+                    <div>
+                      <b>{run.workflowName}</b>
+                      <p>{run.repository} · {run.event} · {run.headBranch ?? 'detached'} · <span className="mono">{run.headSha.slice(0, 8)}</span></p>
+                      <p className="reason">{run.resolutionStatus === 'conflict' ? `TRACK CONFLICT · ${run.attributionReason ?? '명시 신호 충돌'}` : (run.attributionReason ?? '명시적 Track Key를 찾지 못했습니다.')}</p>
+                    </div>
+                  </div>
+                  <div className="assignment-actions">
+                    {(dashboard?.tracks ?? []).map(item => (
+                      <button key={item.track.id} className="ghost small" onClick={() => void act(() => api.assignRun(run.id, item.track.id), `${item.track.name}에 귀속했습니다.`)}>
+                        {item.track.name}
+                      </button>
+                    ))}
+                    <button className="danger-ghost small" onClick={() => void act(() => api.ignoreRun(run.id))}>무시</button>
+                    <button className="ghost small" onClick={() => void api.openExternal(run.htmlUrl)}>Actions</button>
+                  </div>
+                </div>
+              ))}
+            </section>
           )}
 
-          {dashboard?.tracks.map(item => {
+          {selectedView !== 'unassigned' && visibleTracks.length === 0 && (
+            <div className="panel empty-state"><h2>표시할 트랙이 없습니다.</h2><p>왼쪽에서 Track Key를 등록하십시오.</p></div>
+          )}
+
+          {visibleTracks.map(item => {
             const [label, cls] = statusLabel(item);
             return (
               <article className="panel track-card" key={item.track.id}>
@@ -288,7 +391,7 @@ function App() {
                   </div>
                   <div className="track-actions">
                     <button className="icon-btn" onClick={() => editTrack(item)}>수정</button>
-                    <button className="icon-btn danger" onClick={() => void act(() => api.deleteTrack(item.track.id))}>삭제</button>
+                    <button className="icon-btn danger" onClick={() => void removeTrack(item)}>삭제</button>
                   </div>
                 </div>
 
