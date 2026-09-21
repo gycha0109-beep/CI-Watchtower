@@ -634,7 +634,11 @@ fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<Wo
 fn unassigned_runs(conn: &Connection, limit: i64) -> Result<Vec<WorkflowRunSummary>> {
     let now = Utc::now();
     let mut stmt = conn.prepare(
-        "SELECT wr.run_id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,NULL,NULL,NULL
+        "SELECT wr.run_id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,
+                CASE WHEN wr.resolution_status='conflict' THEN 'explicit_conflict'
+                     ELSE (SELECT re.signal_type FROM run_evidence re WHERE re.run_id=wr.run_id ORDER BY re.score DESC LIMIT 1) END,
+                (SELECT 'Track Key 후보: ' || group_concat(track_key, ', ') FROM (SELECT DISTINCT re.track_key track_key FROM run_evidence re WHERE re.run_id=wr.run_id AND re.score>=90)),
+                (SELECT MAX(re.score) FROM run_evidence re WHERE re.run_id=wr.run_id)
          FROM workflow_runs wr
          JOIN monitored_repositories mr ON mr.id=wr.repository_id
          LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
