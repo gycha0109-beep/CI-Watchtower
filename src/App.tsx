@@ -256,7 +256,7 @@ function App() {
                   <div>
                     <b>{run.workflowName}</b>
                     <p>{run.repository} · {run.event} · {run.headBranch ?? 'detached'} · <span className="mono">{run.headSha.slice(0, 8)}</span></p>
-                    <p className="reason">{run.resolutionStatus === 'conflict' ? 'TRACK CONFLICT' : '명시적 Track Key를 찾지 못했습니다.'}</p>
+                    <p className="reason">{run.resolutionStatus === 'conflict' ? `TRACK CONFLICT · ${run.attributionReason ?? '명시 신호 충돌'}` : (run.attributionReason ?? '명시적 Track Key를 찾지 못했습니다.')}</p>
                   </div>
                 </div>
                 <div className="assignment-actions">
