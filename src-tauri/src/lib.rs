@@ -197,6 +197,14 @@ struct Resolution {
     evidence: Vec<Evidence>,
 }
 
+#[derive(Debug, Clone)]
+struct Fingerprint {
+    track_key: String,
+    signal_type: String,
+    pattern: String,
+    weight: i64,
+}
+
 fn db(state: &AppState) -> Result<Connection> {
     Connection::open(&state.db_path).context("open sqlite")
 }
@@ -789,47 +797,53 @@ async fn github_prs_for_run(
     pulls
 }
 
-fn fingerprint_evidence(conn: &Connection, repository_id: i64, run: &GithubRun, tracks: &[Track]) -> Result<Vec<Evidence>> {
+fn load_fingerprints(conn: &Connection, repository_id: i64) -> Result<Vec<Fingerprint>> {
+    let mut stmt = conn.prepare(
+        "SELECT wt.track_key,tf.signal_type,tf.pattern,tf.weight
+         FROM track_fingerprints tf
+         JOIN watch_tracks wt ON wt.id=tf.track_id
+         WHERE tf.active=1 AND wt.active=1 AND (tf.repository_id IS NULL OR tf.repository_id=?)",
+    )?;
+    let rows = stmt.query_map(params![repository_id], |row| {
+        Ok(Fingerprint {
+            track_key: row.get(0)?,
+            signal_type: row.get(1)?,
+            pattern: row.get(2)?,
+            weight: row.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn fingerprint_evidence(fingerprints: &[Fingerprint], run: &GithubRun) -> Vec<Evidence> {
     let mut out = Vec::new();
-    for track in tracks {
-        let mut stmt = conn.prepare(
-            "SELECT signal_type,pattern,weight FROM track_fingerprints
-             WHERE track_id=? AND active=1 AND (repository_id IS NULL OR repository_id=?)",
-        )?;
-        let rows = stmt.query_map(params![track.id, repository_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (signal_type, pattern, weight) = row?;
-            let haystack = match signal_type.as_str() {
-                "workflow_name" => run.name.as_str(),
-                "workflow_path" => run.path.as_deref().unwrap_or_default(),
-                _ => continue,
-            };
-            if haystack.to_lowercase().contains(&pattern.to_lowercase()) {
-                out.push(Evidence {
-                    track_key: track.track_key.clone(),
-                    signal_type,
-                    score: weight.min(60),
-                    value: pattern,
-                });
-            }
+    for fingerprint in fingerprints {
+        let haystack = match fingerprint.signal_type.as_str() {
+            "workflow_name" => run.name.as_str(),
+            "workflow_path" => run.path.as_deref().unwrap_or_default(),
+            _ => continue,
+        };
+        if haystack
+            .to_lowercase()
+            .contains(&fingerprint.pattern.to_lowercase())
+        {
+            out.push(Evidence {
+                track_key: fingerprint.track_key.clone(),
+                signal_type: fingerprint.signal_type.clone(),
+                score: fingerprint.weight.min(60),
+                value: fingerprint.pattern.clone(),
+            });
         }
     }
-    Ok(out)
+    out
 }
 
 async fn resolve_run(
     client: &Client,
-    conn: &Connection,
     repo: &str,
-    repository_id: i64,
     run: &GithubRun,
     tracks: &[Track],
+    fingerprints: &[Fingerprint],
     commit_cache: &mut HashMap<String, Option<String>>,
     pr_cache: &mut HashMap<String, Vec<GithubPull>>,
 ) -> Result<Resolution> {
@@ -880,7 +894,7 @@ async fn resolve_run(
         }
     }
 
-    evidence.extend(fingerprint_evidence(conn, repository_id, run, tracks)?);
+    evidence.extend(fingerprint_evidence(fingerprints, run));
 
     let known: HashMap<&str, i64> = tracks.iter().map(|t| (t.track_key.as_str(), t.id)).collect();
     let explicit_keys: HashSet<String> = evidence
@@ -1169,6 +1183,10 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     }
                 }
 
+                let fingerprints = {
+                    let conn = db(state)?;
+                    load_fingerprints(&conn, repository.id)?
+                };
                 let mut commit_cache = HashMap::new();
                 let mut pr_cache = HashMap::new();
                 for run in &runs {
@@ -1186,18 +1204,17 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     if !should_resolve {
                         continue;
                     }
-                    let conn = db(state)?;
                     let resolution = resolve_run(
                         &client,
-                        &conn,
                         &repository.repo,
-                        repository.id,
                         run,
                         &tracks,
+                        &fingerprints,
                         &mut commit_cache,
                         &mut pr_cache,
                     )
                     .await?;
+                    let conn = db(state)?;
                     persist_resolution(&conn, run.id, &resolution, &now_str)?;
                 }
             }
