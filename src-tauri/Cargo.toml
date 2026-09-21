@@ -1,0 +1,27 @@
+[package]
+name = "ci-watchtower"
+version = "0.1.0"
+description = "GitHub Actions track monitor for parallel ChatGPT development work"
+authors = ["gycha0109-beep"]
+edition = "2021"
+
+[lib]
+name = "ci_watchtower_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.5", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+keyring = "3"
+anyhow = "1"
+urlencoding = "2"
+open = "5"
