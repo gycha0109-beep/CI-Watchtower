@@ -260,7 +260,7 @@ function App() {
                   </div>
                 </div>
                 <div className="assignment-actions">
-                  {dashboard.tracks.map(item => (
+                  {(dashboard?.tracks ?? []).map(item => (
                     <button key={item.track.id} className="ghost small" onClick={() => void act(() => api.assignRun(run.id, item.track.id), `${item.track.name}에 귀속했습니다.`)}>
                       {item.track.name}
                     </button>
