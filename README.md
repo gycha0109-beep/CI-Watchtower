@@ -1,146 +1,166 @@
 # CI Watchtower
 
-Windows 시스템 트레이에 상주하면서 GitHub Actions를 **ChatGPT 작업 트랙 단위**로 감시하는 로컬 데스크톱 앱입니다.
+Windows 시스템 트레이에서 GitHub Actions를 **개발 Track Key 단위**로 자동 분류하고 감시하는 로컬 데스크톱 앱입니다.
 
-핵심 목적은 긴 CI를 ChatGPT 세션이 붙잡고 기다리지 않게 만드는 것입니다.
+v0.2부터 PR 번호나 branch HEAD를 감시 대상으로 직접 등록하지 않습니다. 사용자는 감시할 repository와 Track Key만 등록하고, Watchtower는 repository 전체의 최근 Actions Run을 수집한 뒤 명시적 Track Key 신호를 기준으로 각 트랙에 귀속합니다.
 
-```text
-ChatGPT 작업
-→ PR/Branch에 CI 발생
-→ CI Watchtower가 별도 감시
-→ ChatGPT 세션 종료/전환
-→ GREEN / RED / 장기 실행 / Queue 혼잡 알림
-→ 해당 트랙으로 복귀
-```
-
-## MVP 기능
-
-- 트랙 등록 / 수정 / 삭제
-- 트랙별 GitHub `owner/repo`
-- Branch 또는 PR 기준 추적
-- 선택적인 workflow 이름 필터
-- **장기 CI 기준시간을 트랙마다 사용자가 분 단위 숫자로 직접 입력**
-- 현재 head SHA의 workflow run 전체 추적
-- `queued / in_progress / completed` 상태 표시
-- 대상 workflow가 전부 `success`면 `GREEN`
-- `failure / cancelled / timed_out / action_required / startup_failure / stale` 중 하나라도 있으면 `RED`
-- 모든 run이 끝났지만 `success` 외 conclusion만 있는 경우 별도 `DONE` 상태
-- Windows native notification
-- 시스템 트레이 상주 / 창 닫기 시 트레이로 숨김
-- 감시 중인 repository 전체의 Running / Queued 수량 (repo-wide)
-- Queue 혼잡 임계값 사용자 설정
-- 장기 CI 기준 초과 알림(동일 run 중복 알림 방지)
-- CI 완료 GREEN/RED 알림(동일 SHA 중복 알림 방지)
-- 최근 20회 평균 CI 소요시간
-- GitHub PR / Actions 바로가기
-- GREEN 완료 트랙 자동 정리 옵션
-- 같은 repo/branch 또는 PR을 여러 트랙이 감시할 경우 polling cycle 내부 조회 결과 재사용
-- 활성 트랙 / 유휴 상태 adaptive polling
-- SQLite 로컬 상태 저장
-- GitHub PAT을 OS credential store에 저장. 설정 파일/SQLite 평문 저장 금지
-
-## 기술 기준
-
-2026-09-21 확인 기준:
-
-- Tauri CLI 2.11.5 / Tauri 2.11.x
-- React 19.3.0
-- Vite 8.3.0
-- TypeScript 7.0.2
-- Rust backend
-- SQLite (`rusqlite`, bundled SQLite)
-- Windows Credential Manager 등 OS keyring (`keyring` crate)
-- GitHub REST API
-
-## GitHub PAT
-
-Fine-grained Personal Access Token을 권장합니다.
-
-Repository access는 CI를 감시할 저장소만 선택하고 다음 권한만 부여하십시오.
-
-- **Actions: Read** — workflow run 상태 조회
-- **Contents: Read** — branch의 현재 head SHA 확인
-- **Pull requests: Read** — PR 번호 기반 감시를 사용할 때 필요
-- **Metadata: Read** — GitHub가 기본적으로 제공하는 repository metadata read
-
-쓰기 권한은 필요하지 않습니다.
-
-PAT은 앱의 SQLite/JSON/config에 저장하지 않습니다. Rust의 OS keyring adapter를 통해 Windows에서는 Credential Manager 계열 저장소를 사용합니다.
-
-## 동작 방식
-
-### Branch 트랙
+## v0.2 핵심 구조
 
 ```text
-repo + branch
-→ GET /repos/{owner}/{repo}/commits/{branch}
-→ head SHA
-→ GET /repos/{owner}/{repo}/actions/runs?head_sha={sha}
-→ 현재 SHA의 workflow run 집합
+Monitored repositories
+  ├─ gycha0109-beep/Saju
+  └─ gycha0109-beep/MyeongHa
+              ↓
+       Repository Run Collector
+              ↓
+          Run ID pinning
+              ↓
+          Track Resolver
+       ┌──────┼─────────┐
+       saju   ops   frontend-integration
 ```
 
-### PR 트랙
+Repository는 감시 대상, Track은 분류 대상, GitHub Actions Run ID는 실제 추적 대상입니다. main HEAD가 이동하거나 트랙이 다른 repository로 이동해도 이미 발견한 Run은 Run ID로 계속 추적합니다.
+
+## Track 등록
+
+트랙에는 다음 세 값만 필요합니다.
 
 ```text
-repo + PR number
-→ GET /repos/{owner}/{repo}/pulls/{pr}
-→ PR head SHA
-→ GET /repos/{owner}/{repo}/actions/runs?head_sha={sha}
-→ 현재 SHA의 workflow run 집합
+트랙 이름: 프론트 연동
+Track Key: frontend-integration
+장기 CI: 8분
 ```
 
-workflow 필터를 입력하면 run 이름에 대해 case-insensitive substring 필터를 적용합니다. 여러 필터는 쉼표로 구분할 수 있습니다.
+Track Key는 repository나 ChatGPT 대화 번호가 바뀌어도 같은 작업축이면 유지합니다.
 
 예:
 
+- `frontend-integration`
+- `saju`
+- `face-reading`
+- `face-research`
+- `ops`
+- `commerce`
+- `pipeline-reliability`
+
+## Producer Contract
+
+개발 작업은 가능한 한 GitHub에 Track Key 흔적을 남깁니다.
+
+### Branch
+
 ```text
-CI,integration
+feat/frontend-integration/reader-scene
+fix/ops/privacy-recovery
+research/face-research/repeatability
 ```
 
-### GREEN / RED 판정
+### PR body / commit footer
 
 ```text
-대상 run 없음
-→ WAITING
-
-하나라도 in_progress
-→ RUNNING
-
-하나라도 queued/requested/pending
-→ QUEUED
-
-failure-like conclusion 하나 이상
-→ RED
-
-모든 run completed + 모든 conclusion=success
-→ GREEN
-
-모든 run completed + success 외 non-failure conclusion 포함
-→ DONE
+Watchtower-Track: frontend-integration
 ```
 
-## Polling / Queue 보호
+### workflow_dispatch
+
+dispatch workflow는 선택 입력값을 받을 수 있게 구성합니다.
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      watchtower_track:
+        description: CI Watchtower Track Key
+        required: false
+        type: string
+
+run-name: "[WT:${{ inputs.watchtower_track }}] ${{ github.workflow }}"
+```
+
+Run 이름에 `[WT:<track-key>]`가 노출되면 Watchtower가 PR 연결 여부와 관계없이 직접 귀속할 수 있습니다.
+
+## Resolver 우선순위
+
+명시 신호를 우선합니다.
+
+1. Run 이름의 `[WT:<track-key>]`
+2. PR 본문의 `Watchtower-Track:`
+3. commit footer의 `Watchtower-Track:`
+4. branch segment의 Track Key
+5. 사용자가 이전에 수동 귀속해서 학습된 workflow fingerprint
+
+명시 신호가 서로 다른 Track Key를 가리키면 자동 귀속하지 않고 `conflict`로 둡니다. 확정 근거가 없으면 `미귀속 CI` Inbox에 남깁니다.
+
+Workflow 이름 하나만으로는 자동 확정하지 않습니다.
+
+## 미귀속 CI
+
+미귀속 Inbox에서 Run을 기존 트랙에 수동 연결하거나 무시할 수 있습니다.
+
+수동 연결 시 해당 repository의 workflow 이름을 weight 50 보조 fingerprint로 학습합니다. 이 fingerprint 단독으로는 자동 귀속 임계값 70을 넘지 못하므로 잘못된 자동 귀속을 방지합니다.
+
+## Run ID / rerun
+
+발견된 Run은 branch의 최신 HEAD와 분리하여 Run ID로 저장합니다.
+
+```text
+Run ID 35627433295
+Attempt 1 → failure
+Attempt 2 → success
+```
+
+`run_attempt`을 별도로 기록하고 알림 dedupe 키도 `track + run_id + run_attempt + event` 기준으로 관리합니다.
+
+## Queue / 상태
+
+Repository 전체 최근 Run에서 다음 상태를 집계합니다.
+
+- Running: `in_progress`
+- Queued: `queued / requested / pending / waiting`
+- GREEN: 완료 + success
+- RED: failure / cancelled / timed_out / action_required / startup_failure / stale
+- DONE: 그 외 terminal conclusion
+
+Repository 조회 실패 시 이전 Running/Queued 값을 그대로 보여주지 않고 0으로 초기화하며 오류를 저장합니다.
+
+## Polling
 
 기본값:
 
 ```text
-활성 트랙 있음: 25초
+활성 상태: 25초
 유휴 상태: 90초
 Queue 혼잡: queued 6개 이상
 ```
 
-세 값은 앱 UI에서 변경할 수 있습니다.
+한 repository에서 최근 100개 Run을 한 번 가져온 뒤 로컬 DB에 upsert합니다. commit/PR evidence 조회는 polling cycle 안에서 SHA 기준으로 캐시합니다.
 
-하나의 polling cycle에서 동일 `repo + branch` 또는 `repo + PR` source는 한 번만 GitHub에서 읽고, 여러 ChatGPT 트랙이 결과를 공유합니다. 또한 각 감시 repository의 최근 Actions run은 repository당 한 번만 읽어 repo-wide Running/Queued 수를 계산합니다. 따라서 다른 SHA에 밀려 있는 queue도 혼잡 경고에 포함하면서, 같은 PR을 여러 트랙에서 본다고 API 요청이 트랙 수만큼 증폭되지는 않습니다.
+## GitHub PAT
 
-## 알림
+Fine-grained PAT 권장 권한:
 
-- `[트랙] CI 완료 — GREEN`
-- `[트랙] CI 완료 — RED`
-- `[트랙] 장기 CI 감지` — 해당 트랙에서 직접 입력한 분 기준 초과
-- `GitHub Actions Queue 혼잡`
+- Actions: Read
+- Contents: Read
+- Pull requests: Read
+- Metadata: Read
 
-Tauri의 Windows native notification은 **설치된 앱에서 정상 앱 이름/아이콘으로 표시**됩니다. 개발 실행에서는 PowerShell 이름/아이콘 등으로 보일 수 있습니다.
+PAT은 SQLite나 설정 파일에 저장하지 않습니다. Windows에서는 OS Credential Manager backend를 사용합니다. 저장 후 즉시 다시 읽어 값이 동일한지 검증합니다.
+
+## 로컬 DB v0.2
+
+주요 테이블:
+
+- `watch_tracks`
+- `monitored_repositories`
+- `workflow_runs`
+- `run_attempts`
+- `run_assignments`
+- `run_evidence`
+- `track_fingerprints`
+- `notifications_v2`
+
+기존 v0.1 `tracks` 데이터는 최초 실행 시 v0.2 구조로 보존 migration합니다. 알려진 트랙 이름은 안정적인 Track Key로 변환하고 기존 repository는 전역 감시 저장소로 승격합니다.
 
 ## 실행
 
@@ -162,39 +182,16 @@ Release installer:
 npm run tauri build
 ```
 
-## 로컬 데이터
+## v0.2 Acceptance
 
-앱 데이터 디렉터리에 다음만 저장합니다.
-
-```text
-ci-watchtower.sqlite3
-```
-
-내용:
-
-- track registry
-- 현재 track state
-- run history
-- notification dedupe keys
-- polling / queue settings
-
-**GitHub PAT은 이 DB에 저장하지 않습니다.**
-
-## 검증
-
-PR과 `main` push에서 두 workflow를 사용합니다.
-
-- `Fast Check` — Ubuntu에서 frontend TypeScript/Vite build를 빠르게 검증합니다.
-- `CI` — Windows에서 frontend build + Rust tests + Tauri installer build를 수행하고 MSI/EXE를 artifact로 업로드합니다.
-
-Windows installer를 받으려면 성공한 `CI` run의 `ci-watchtower-windows` artifact를 다운로드하십시오.
-
-실제 private repo PAT을 설정한 뒤 다음 smoke test를 수행합니다.
-
-1. queued → running → green
-2. failed run → red
-3. 사용자 지정 장기 CI 기준 초과
-4. queue threshold crossing
-5. 앱 창을 닫아도 tray polling 지속
-6. GREEN 자동 정리
-7. PAT 삭제 후 API 호출 fail-closed
+- branch Track Key 자동 귀속
+- PR `Watchtower-Track` 자동 귀속
+- `[WT:key]` workflow_dispatch 자동 귀속
+- Saju ↔ MyeongHa 이동 후 동일 Track 유지
+- main HEAD 변경 후 기존 Run 추적 유지
+- rerun attempt 별 상태/알림 분리
+- 명시 신호 충돌 시 conflict
+- 근거 부족 시 미귀속 Inbox
+- 수동 귀속 후 fingerprint 학습
+- `waiting` 포함 Queue 집계
+- Windows tray 감시 및 native notification

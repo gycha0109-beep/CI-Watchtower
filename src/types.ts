@@ -1,22 +1,45 @@
-export type TrackSourceMode = 'branch' | 'pr';
-
 export interface Track {
   id: number;
   name: string;
-  repo: string;
-  sourceMode: TrackSourceMode;
-  branch: string | null;
-  prNumber: number | null;
-  workflowFilter: string | null;
+  trackKey: string;
   longCiMinutes: number;
-  archived: boolean;
+  active: boolean;
   createdAt: string;
   updatedAt: string;
 }
 
+export interface TrackInput {
+  id?: number;
+  name: string;
+  trackKey: string;
+  longCiMinutes: number;
+}
+
+export interface MonitoredRepository {
+  id: number;
+  repo: string;
+  enabled: boolean;
+  runningCount: number;
+  queuedCount: number;
+  lastPolledAt: string | null;
+  lastError: string | null;
+}
+
+export interface RepositoryInput {
+  id?: number;
+  repo: string;
+  enabled: boolean;
+}
+
 export interface WorkflowRunSummary {
   id: number;
-  name: string;
+  repository: string;
+  workflowName: string;
+  displayTitle: string;
+  event: string;
+  headBranch: string | null;
+  headSha: string;
+  runAttempt: number;
   status: string;
   conclusion: string | null;
   htmlUrl: string;
@@ -24,6 +47,10 @@ export interface WorkflowRunSummary {
   runStartedAt: string | null;
   updatedAt: string;
   elapsedSeconds: number;
+  attributionSource: string | null;
+  attributionReason: string | null;
+  confidence: number | null;
+  resolutionStatus: 'assigned' | 'unassigned' | 'conflict' | 'ignored' | string;
 }
 
 export type TrackHealth =
@@ -32,25 +59,14 @@ export type TrackHealth =
   | 'running'
   | 'green'
   | 'red'
-  | 'completed_other'
-  | 'error';
-
-export interface TrackState {
-  trackId: number;
-  health: TrackHealth;
-  headSha: string | null;
-  prUrl: string | null;
-  latestRunUrl: string | null;
-  checkedAt: string | null;
-  message: string | null;
-  elapsedSeconds: number;
-  averageDurationSeconds: number | null;
-  runs: WorkflowRunSummary[];
-}
+  | 'completed_other';
 
 export interface DashboardTrack {
   track: Track;
-  state: TrackState;
+  health: TrackHealth;
+  elapsedSeconds: number;
+  averageDurationSeconds: number | null;
+  runs: WorkflowRunSummary[];
 }
 
 export interface Settings {
@@ -63,19 +79,11 @@ export interface Settings {
 export interface Dashboard {
   runningCount: number;
   queuedCount: number;
+  unassignedCount: number;
   congestionLevel: 'safe' | 'busy' | 'congested';
   tokenConfigured: boolean;
   settings: Settings;
+  repositories: MonitoredRepository[];
   tracks: DashboardTrack[];
-}
-
-export interface TrackInput {
-  id?: number;
-  name: string;
-  repo: string;
-  sourceMode: TrackSourceMode;
-  branch?: string | null;
-  prNumber?: number | null;
-  workflowFilter?: string | null;
-  longCiMinutes: number;
+  unassignedRuns: WorkflowRunSummary[];
 }
