@@ -171,6 +171,23 @@ export interface RepositoryScopeStats {
   projectRunCount: number;
 }
 
+export interface ProducerContractStats {
+  repositoryId: number;
+  projectId: number;
+  sampledRuns: number;
+  projectWideRuns: number;
+  explicitRuns: number;
+  runNameRuns: number;
+  prMarkerRuns: number;
+  commitMarkerRuns: number;
+  branchRuns: number;
+  heuristicRuns: number;
+  manualRuns: number;
+  compatibilityRuns: number;
+  unresolvedRuns: number;
+  otherRuns: number;
+}
+
 export interface Dashboard {
   runningCount: number;
   queuedCount: number;
@@ -183,6 +200,7 @@ export interface Dashboard {
   tracks: DashboardTrack[];
   projectWorkflowRules: ProjectWorkflowRule[];
   repositoryScopeStats: RepositoryScopeStats[];
+  producerContractStats: ProducerContractStats[];
   projectRuns: WorkflowRunSummary[];
   unassignedRuns: WorkflowRunSummary[];
 }
