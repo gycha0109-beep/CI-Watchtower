@@ -255,6 +255,20 @@ fn db(state: &AppState) -> Result<Connection> {
     Connection::open(&state.db_path).context("open sqlite")
 }
 
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !names.iter().any(|name| name == column) {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 fn init_db(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -284,8 +298,18 @@ fn init_db(path: &Path) -> Result<()> {
           )
         );
 
+        CREATE TABLE IF NOT EXISTS projects (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          project_key TEXT NOT NULL UNIQUE,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS watch_tracks (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER REFERENCES projects(id) ON DELETE RESTRICT,
           name TEXT NOT NULL,
           track_key TEXT NOT NULL UNIQUE,
           long_ci_minutes INTEGER NOT NULL CHECK(long_ci_minutes > 0),
@@ -297,6 +321,7 @@ fn init_db(path: &Path) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS monitored_repositories (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER REFERENCES projects(id) ON DELETE RESTRICT,
           repo TEXT NOT NULL UNIQUE,
           enabled INTEGER NOT NULL DEFAULT 1,
           running_count INTEGER NOT NULL DEFAULT 0,
@@ -374,6 +399,23 @@ fn init_db(path: &Path) -> Result<()> {
           UNIQUE(track_id, signal_type, pattern, repository_id)
         );
 
+        CREATE TABLE IF NOT EXISTS project_workflow_rules (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          repository_id INTEGER REFERENCES monitored_repositories(id) ON DELETE CASCADE,
+          workflow_name TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          UNIQUE(project_id, repository_id, workflow_name)
+        );
+
+        CREATE TABLE IF NOT EXISTS track_aliases (
+          alias_key TEXT PRIMARY KEY,
+          track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS notifications_v2 (
           track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
           run_id INTEGER NOT NULL,
@@ -393,11 +435,14 @@ fn init_db(path: &Path) -> Result<()> {
         );
         "#,
     )?;
+    ensure_column(&conn, "watch_tracks", "project_id", "INTEGER")?;
+    ensure_column(&conn, "monitored_repositories", "project_id", "INTEGER")?;
     conn.execute(
         "INSERT OR IGNORE INTO app_settings(id, queue_congestion_threshold, active_poll_seconds, idle_poll_seconds, auto_archive_completed, queue_congested) VALUES(1,?,?,?,?,0)",
         params![DEFAULT_QUEUE_THRESHOLD, DEFAULT_ACTIVE_POLL_SECONDS, DEFAULT_IDLE_POLL_SECONDS, 0],
     )?;
     migrate_legacy(&conn)?;
+    migrate_project_scope(&conn)?;
     Ok(())
 }
 
