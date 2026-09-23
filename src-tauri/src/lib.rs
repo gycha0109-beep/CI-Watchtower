@@ -1378,6 +1378,121 @@ fn fingerprint_evidence(fingerprints: &[Fingerprint], run: &GithubRun) -> Vec<Ev
     out
 }
 
+fn canonical_evidence_key(key: &str, aliases: &HashMap<String, String>) -> String {
+    aliases.get(key).cloned().unwrap_or_else(|| key.to_string())
+}
+
+fn resolve_evidence(
+    tracks: &[Track],
+    aliases: &HashMap<String, String>,
+    mut evidence: Vec<Evidence>,
+) -> Resolution {
+    let alias_evidence: Vec<Evidence> = evidence
+        .iter()
+        .filter_map(|item| {
+            aliases.get(&item.track_key).map(|canonical| Evidence {
+                track_key: canonical.clone(),
+                signal_type: format!("{}_alias", item.signal_type),
+                score: item.score,
+                value: format!("{} → {}", item.track_key, canonical),
+            })
+        })
+        .collect();
+    evidence.extend(alias_evidence);
+
+    let known: HashMap<&str, i64> = tracks.iter().map(|t| (t.track_key.as_str(), t.id)).collect();
+
+    for priority_score in [100_i64, 98, 96, 90] {
+        let priority_items: Vec<&Evidence> = evidence
+            .iter()
+            .filter(|item| item.score == priority_score && !item.signal_type.ends_with("_alias"))
+            .collect();
+        if priority_items.is_empty() {
+            continue;
+        }
+
+        let priority_keys: HashSet<String> = priority_items
+            .iter()
+            .map(|item| canonical_evidence_key(&item.track_key, aliases))
+            .collect();
+
+        if priority_keys.len() > 1 {
+            let mut keys = priority_keys.into_iter().collect::<Vec<_>>();
+            keys.sort();
+            return Resolution {
+                status: "conflict".into(),
+                track_id: None,
+                confidence: None,
+                source: Some("explicit_conflict".into()),
+                reason: Some(format!(
+                    "동일 우선순위 Track Key가 충돌합니다: {}",
+                    keys.join(", ")
+                )),
+                evidence,
+            };
+        }
+
+        let key = priority_keys.into_iter().next().expect("priority key");
+        if let Some(track_id) = known.get(key.as_str()).copied() {
+            let best = priority_items
+                .iter()
+                .find(|item| canonical_evidence_key(&item.track_key, aliases) == key)
+                .expect("priority evidence");
+            return Resolution {
+                status: "assigned".into(),
+                track_id: Some(track_id),
+                confidence: Some(priority_score),
+                source: Some(best.signal_type.clone()),
+                reason: Some(format!("{} → {}", best.signal_type, key)),
+                evidence,
+            };
+        }
+
+        if priority_score >= 96 {
+            return Resolution {
+                status: "unassigned".into(),
+                track_id: None,
+                confidence: Some(priority_score),
+                source: priority_items.first().map(|item| item.signal_type.clone()),
+                reason: Some(format!("등록되지 않은 Track Key 발견: {}", key)),
+                evidence,
+            };
+        }
+    }
+
+    let mut scores: HashMap<String, i64> = HashMap::new();
+    for item in &evidence {
+        let key = canonical_evidence_key(&item.track_key, aliases);
+        if known.contains_key(key.as_str()) {
+            *scores.entry(key).or_default() += item.score;
+        }
+    }
+    let mut ranked: Vec<(String, i64)> = scores.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    if let Some((key, score)) = ranked.first() {
+        let second = ranked.get(1).map(|v| v.1).unwrap_or(0);
+        if *score >= 70 && *score - second >= 30 {
+            return Resolution {
+                status: "assigned".into(),
+                track_id: known.get(key.as_str()).copied(),
+                confidence: Some((*score).min(100)),
+                source: Some("inference".into()),
+                reason: Some(format!("복합 신호 {}점 (2위 {}점)", score, second)),
+                evidence,
+            };
+        }
+    }
+
+    Resolution {
+        status: "unassigned".into(),
+        track_id: None,
+        confidence: ranked.first().map(|v| v.1.min(100)),
+        source: None,
+        reason: Some("확정 가능한 Track Key 근거가 없습니다.".into()),
+        evidence,
+    }
+}
+
 async fn resolve_run(
     client: &Client,
     repo: &str,
@@ -1432,7 +1547,7 @@ async fn resolve_run(
             evidence.push(Evidence {
                 track_key: key,
                 signal_type: "pr_marker".into(),
-                score: 100,
+                score: 98,
                 value: format!("PR #{}", pr.number),
             });
         }
@@ -1443,7 +1558,7 @@ async fn resolve_run(
             evidence.push(Evidence {
                 track_key: key,
                 signal_type: "commit_marker".into(),
-                score: 95,
+                score: 96,
                 value: run.head_sha.clone(),
             });
         }
@@ -1451,104 +1566,7 @@ async fn resolve_run(
 
     evidence.extend(fingerprint_evidence(fingerprints, run));
 
-    let alias_evidence: Vec<Evidence> = evidence
-        .iter()
-        .filter_map(|item| {
-            aliases.get(&item.track_key).map(|canonical| Evidence {
-                track_key: canonical.clone(),
-                signal_type: format!("{}_alias", item.signal_type),
-                score: item.score,
-                value: format!("{} → {}", item.track_key, canonical),
-            })
-        })
-        .collect();
-    evidence.extend(alias_evidence);
-
-    let known: HashMap<&str, i64> = tracks.iter().map(|t| (t.track_key.as_str(), t.id)).collect();
-    let max_explicit_score = evidence
-        .iter()
-        .filter(|e| e.score >= 90 && known.contains_key(e.track_key.as_str()))
-        .map(|e| e.score)
-        .max();
-    let explicit_keys: HashSet<String> = match max_explicit_score {
-        Some(max_score) => evidence
-            .iter()
-            .filter(|e| e.score == max_score && known.contains_key(e.track_key.as_str()))
-            .map(|e| e.track_key.clone())
-            .collect(),
-        None => HashSet::new(),
-    };
-
-    if explicit_keys.len() > 1 {
-        return Ok(Resolution {
-            status: "conflict".into(),
-            track_id: None,
-            confidence: None,
-            source: Some("explicit_conflict".into()),
-            reason: Some(format!(
-                "동일 우선순위 Track Key가 충돌합니다: {}",
-                explicit_keys.into_iter().collect::<Vec<_>>().join(", ")
-            )),
-            evidence,
-        });
-    }
-
-    if let Some(key) = explicit_keys.iter().next() {
-        let best = evidence
-            .iter()
-            .filter(|e| &e.track_key == key)
-            .max_by_key(|e| e.score)
-            .expect("explicit evidence");
-        return Ok(Resolution {
-            status: "assigned".into(),
-            track_id: known.get(key.as_str()).copied(),
-            confidence: Some(best.score),
-            source: Some(best.signal_type.clone()),
-            reason: Some(format!("{} → {}", best.signal_type, key)),
-            evidence,
-        });
-    }
-
-    let mut scores: HashMap<String, i64> = HashMap::new();
-    for item in &evidence {
-        if known.contains_key(item.track_key.as_str()) {
-            *scores.entry(item.track_key.clone()).or_default() += item.score;
-        }
-    }
-    let mut ranked: Vec<(String, i64)> = scores.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
-    if let Some((key, score)) = ranked.first() {
-        let second = ranked.get(1).map(|v| v.1).unwrap_or(0);
-        if *score >= 70 && *score - second >= 30 {
-            return Ok(Resolution {
-                status: "assigned".into(),
-                track_id: known.get(key.as_str()).copied(),
-                confidence: Some((*score).min(100)),
-                source: Some("inference".into()),
-                reason: Some(format!("복합 신호 {}점 (2위 {}점)", score, second)),
-                evidence,
-            });
-        }
-    }
-
-    let unknown_explicit: Vec<String> = evidence
-        .iter()
-        .filter(|e| e.score >= 90 && !known.contains_key(e.track_key.as_str()) && !aliases.contains_key(&e.track_key))
-        .map(|e| e.track_key.clone())
-        .collect();
-    let reason = if unknown_explicit.is_empty() {
-        "확정 가능한 Track Key 근거가 없습니다.".to_string()
-    } else {
-        format!("등록되지 않은 Track Key 발견: {}", unknown_explicit.join(", "))
-    };
-    Ok(Resolution {
-        status: "unassigned".into(),
-        track_id: None,
-        confidence: ranked.first().map(|v| v.1.min(100)),
-        source: None,
-        reason: Some(reason),
-        evidence,
-    })
+    return Ok(resolve_evidence(tracks, aliases, evidence));
 }
 
 fn persist_resolution(conn: &Connection, run_id: i64, resolution: &Resolution, now: &str) -> Result<()> {
@@ -2563,6 +2581,109 @@ mod tests {
         assert_eq!(legacy_track_key("프론트 연동 4", 1), "frontend-integration");
         assert_eq!(legacy_track_key("운영 32", 2), "ops");
         assert_eq!(legacy_track_key("관상 연구 및 검증 2", 3), "face-research");
+    }
+
+    fn evidence(key: &str, signal_type: &str, score: i64) -> Evidence {
+        Evidence {
+            track_key: key.into(),
+            signal_type: signal_type.into(),
+            score,
+            value: signal_type.into(),
+        }
+    }
+
+    #[test]
+    fn unknown_run_name_marker_fails_closed_over_known_branch() {
+        let tracks = vec![track(1, "ops")];
+        let resolution = resolve_evidence(
+            &tracks,
+            &HashMap::new(),
+            vec![
+                evidence("unknown-track", "run_name", 100),
+                evidence("ops", "branch", 90),
+            ],
+        );
+        assert_eq!(resolution.status, "unassigned");
+        assert_eq!(resolution.track_id, None);
+        assert_eq!(resolution.confidence, Some(100));
+    }
+
+    #[test]
+    fn run_name_precedes_pr_marker() {
+        let tracks = vec![track(1, "ops"), track(2, "saju")];
+        let resolution = resolve_evidence(
+            &tracks,
+            &HashMap::new(),
+            vec![
+                evidence("ops", "run_name", 100),
+                evidence("saju", "pr_marker", 98),
+            ],
+        );
+        assert_eq!(resolution.status, "assigned");
+        assert_eq!(resolution.track_id, Some(1));
+        assert_eq!(resolution.source.as_deref(), Some("run_name"));
+    }
+
+    #[test]
+    fn pr_marker_precedes_commit_marker() {
+        let tracks = vec![track(1, "ops"), track(2, "saju")];
+        let resolution = resolve_evidence(
+            &tracks,
+            &HashMap::new(),
+            vec![
+                evidence("ops", "pr_marker", 98),
+                evidence("saju", "commit_marker", 96),
+            ],
+        );
+        assert_eq!(resolution.status, "assigned");
+        assert_eq!(resolution.track_id, Some(1));
+        assert_eq!(resolution.source.as_deref(), Some("pr_marker"));
+    }
+
+    #[test]
+    fn commit_marker_precedes_branch() {
+        let tracks = vec![track(1, "ops"), track(2, "saju")];
+        let resolution = resolve_evidence(
+            &tracks,
+            &HashMap::new(),
+            vec![
+                evidence("ops", "commit_marker", 96),
+                evidence("saju", "branch", 90),
+            ],
+        );
+        assert_eq!(resolution.status, "assigned");
+        assert_eq!(resolution.track_id, Some(1));
+        assert_eq!(resolution.source.as_deref(), Some("commit_marker"));
+    }
+
+    #[test]
+    fn same_priority_pr_markers_conflict() {
+        let tracks = vec![track(1, "ops"), track(2, "saju")];
+        let resolution = resolve_evidence(
+            &tracks,
+            &HashMap::new(),
+            vec![
+                evidence("ops", "pr_marker", 98),
+                evidence("saju", "pr_marker", 98),
+            ],
+        );
+        assert_eq!(resolution.status, "conflict");
+        assert_eq!(resolution.track_id, None);
+        assert_eq!(resolution.source.as_deref(), Some("explicit_conflict"));
+    }
+
+    #[test]
+    fn historical_alias_is_canonicalized_before_precedence() {
+        let tracks = vec![track(1, "ops")];
+        let aliases = HashMap::from([("privacy-recovery".into(), "ops".into())]);
+        let resolution = resolve_evidence(
+            &tracks,
+            &aliases,
+            vec![evidence("privacy-recovery", "run_name", 100)],
+        );
+        assert_eq!(resolution.status, "assigned");
+        assert_eq!(resolution.track_id, Some(1));
+        assert_eq!(resolution.confidence, Some(100));
     }
 
     #[test]
