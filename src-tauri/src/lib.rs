@@ -1119,6 +1119,33 @@ async fn github_prs_for_run(
     pulls
 }
 
+fn load_project_aliases(conn: &Connection, project_id: i64) -> Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare(
+        "SELECT ta.alias_key,wt.track_key
+         FROM track_aliases ta
+         JOIN watch_tracks wt ON wt.id=ta.track_id
+         WHERE ta.active=1 AND wt.active=1 AND wt.project_id=?",
+    )?;
+    let rows = stmt.query_map(params![project_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+}
+
+fn project_rule_matches(
+    rules: &[ProjectWorkflowRule],
+    project_id: i64,
+    repository_id: i64,
+    workflow_name: &str,
+) -> bool {
+    rules.iter().any(|rule| {
+        rule.active
+            && rule.project_id == project_id
+            && rule.workflow_name == workflow_name
+            && (rule.repository_id.is_none() || rule.repository_id == Some(repository_id))
+    })
+}
+
 fn load_fingerprints(conn: &Connection, repository_id: i64) -> Result<Vec<Fingerprint>> {
     let mut stmt = conn.prepare(
         "SELECT wt.track_key,tf.signal_type,tf.pattern,tf.weight
@@ -1164,11 +1191,26 @@ async fn resolve_run(
     client: &Client,
     repo: &str,
     run: &GithubRun,
+    project_id: i64,
+    repository_id: i64,
     tracks: &[Track],
+    project_rules: &[ProjectWorkflowRule],
+    aliases: &HashMap<String, String>,
     fingerprints: &[Fingerprint],
     commit_cache: &mut HashMap<String, Option<String>>,
     pr_cache: &mut HashMap<String, Vec<GithubPull>>,
 ) -> Result<Resolution> {
+    if project_rule_matches(project_rules, project_id, repository_id, &run.name) {
+        return Ok(Resolution {
+            status: "project".into(),
+            track_id: None,
+            confidence: Some(100),
+            source: Some("project_workflow".into()),
+            reason: Some(format!("프로젝트 공용 CI: {}", run.name)),
+            evidence: Vec::new(),
+        });
+    }
+
     let mut evidence = Vec::new();
 
     if let Some(key) = run.display_title.as_deref().and_then(extract_marker) {
@@ -1218,12 +1260,33 @@ async fn resolve_run(
 
     evidence.extend(fingerprint_evidence(fingerprints, run));
 
+    let alias_evidence: Vec<Evidence> = evidence
+        .iter()
+        .filter_map(|item| {
+            aliases.get(&item.track_key).map(|canonical| Evidence {
+                track_key: canonical.clone(),
+                signal_type: format!("{}_alias", item.signal_type),
+                score: item.score,
+                value: format!("{} → {}", item.track_key, canonical),
+            })
+        })
+        .collect();
+    evidence.extend(alias_evidence);
+
     let known: HashMap<&str, i64> = tracks.iter().map(|t| (t.track_key.as_str(), t.id)).collect();
-    let explicit_keys: HashSet<String> = evidence
+    let max_explicit_score = evidence
         .iter()
         .filter(|e| e.score >= 90 && known.contains_key(e.track_key.as_str()))
-        .map(|e| e.track_key.clone())
-        .collect();
+        .map(|e| e.score)
+        .max();
+    let explicit_keys: HashSet<String> = match max_explicit_score {
+        Some(max_score) => evidence
+            .iter()
+            .filter(|e| e.score == max_score && known.contains_key(e.track_key.as_str()))
+            .map(|e| e.track_key.clone())
+            .collect(),
+        None => HashSet::new(),
+    };
 
     if explicit_keys.len() > 1 {
         return Ok(Resolution {
@@ -1232,7 +1295,7 @@ async fn resolve_run(
             confidence: None,
             source: Some("explicit_conflict".into()),
             reason: Some(format!(
-                "명시적 Track Key가 충돌합니다: {}",
+                "동일 우선순위 Track Key가 충돌합니다: {}",
                 explicit_keys.into_iter().collect::<Vec<_>>().join(", ")
             )),
             evidence,
@@ -1279,7 +1342,7 @@ async fn resolve_run(
 
     let unknown_explicit: Vec<String> = evidence
         .iter()
-        .filter(|e| e.score >= 90 && !known.contains_key(e.track_key.as_str()))
+        .filter(|e| e.score >= 90 && !known.contains_key(e.track_key.as_str()) && !aliases.contains_key(&e.track_key))
         .map(|e| e.track_key.clone())
         .collect();
     let reason = if unknown_explicit.is_empty() {
