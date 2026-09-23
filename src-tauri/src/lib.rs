@@ -409,6 +409,9 @@ fn init_db(path: &Path) -> Result<()> {
           UNIQUE(project_id, repository_id, workflow_name)
         );
 
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_project_workflow_rules_scope
+          ON project_workflow_rules(project_id, COALESCE(repository_id,0), workflow_name);
+
         CREATE TABLE IF NOT EXISTS track_aliases (
           alias_key TEXT PRIMARY KEY,
           track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
@@ -1824,10 +1827,15 @@ fn save_project_workflow_rule(
         }
         let now = Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
-             VALUES(?,?,?,1,?)
-             ON CONFLICT(project_id,repository_id,workflow_name) DO UPDATE SET active=1",
+            "INSERT OR IGNORE INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
+             VALUES(?,?,?,1,?)",
             params![input.project_id, input.repository_id, workflow_name, now],
+        )?;
+        conn.execute(
+            "UPDATE project_workflow_rules SET active=1
+             WHERE project_id=? AND workflow_name=?
+               AND ((repository_id IS NULL AND ? IS NULL) OR repository_id=?)",
+            params![input.project_id, workflow_name, input.repository_id, input.repository_id],
         )?;
         let id: i64 = conn.query_row(
             "SELECT id FROM project_workflow_rules
@@ -2044,10 +2052,14 @@ fn assign_run_to_project(
         if learn_rule {
             let now = Utc::now().to_rfc3339();
             conn.execute(
-                "INSERT INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
-                 VALUES(?,NULL,?,1,?)
-                 ON CONFLICT(project_id,repository_id,workflow_name) DO UPDATE SET active=1",
+                "INSERT OR IGNORE INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
+                 VALUES(?,NULL,?,1,?)",
                 params![project_id, workflow_name, now],
+            )?;
+            conn.execute(
+                "UPDATE project_workflow_rules SET active=1
+                 WHERE project_id=? AND repository_id IS NULL AND workflow_name=?",
+                params![project_id, workflow_name],
             )?;
             conn.execute(
                 "DELETE FROM run_assignments
