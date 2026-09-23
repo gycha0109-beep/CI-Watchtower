@@ -139,6 +139,38 @@ struct WorkflowRunSummary {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct RunAttributionEvidence {
+    track_key: String,
+    signal_type: String,
+    score: i64,
+    value: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunAttributionDetail {
+    run_id: i64,
+    project_id: i64,
+    repository_id: i64,
+    repository: String,
+    workflow_name: String,
+    resolution_status: String,
+    assigned_track_id: Option<i64>,
+    assigned_track_name: Option<String>,
+    assigned_track_key: Option<String>,
+    source: Option<String>,
+    reason: Option<String>,
+    confidence: Option<i64>,
+    manual: Option<bool>,
+    last_resolution_attempt_at: Option<String>,
+    project_rule_id: Option<i64>,
+    project_rule_repository_id: Option<i64>,
+    evidence: Vec<RunAttributionEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DashboardTrack {
     track: Track,
     health: String,
@@ -1283,6 +1315,141 @@ fn list_project_workflow_rules(conn: &Connection) -> Result<Vec<ProjectWorkflowR
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+fn load_run_attribution_detail(conn: &Connection, run_id: i64) -> Result<RunAttributionDetail> {
+    let (
+        run_id,
+        project_id,
+        repository_id,
+        repository,
+        workflow_name,
+        resolution_status,
+        assigned_track_id,
+        assigned_track_name,
+        assigned_track_key,
+        assignment_source,
+        assignment_reason,
+        assignment_confidence,
+        assignment_manual,
+        last_resolution_attempt_at,
+    ): (
+        i64,
+        i64,
+        i64,
+        String,
+        String,
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT wr.run_id,mr.project_id,mr.id,mr.repo,wr.workflow_name,wr.resolution_status,
+                    wt.id,wt.name,wt.track_key,ra.source,ra.reason,ra.confidence,ra.manual,
+                    wr.last_resolution_attempt_at
+             FROM workflow_runs wr
+             JOIN monitored_repositories mr ON mr.id=wr.repository_id
+             LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
+             LEFT JOIN watch_tracks wt ON wt.id=ra.track_id
+             WHERE wr.run_id=?",
+            params![run_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("Run을 찾지 못했습니다."))?;
+
+    let mut evidence_stmt = conn.prepare(
+        "SELECT track_key,signal_type,score,value,created_at
+         FROM run_evidence
+         WHERE run_id=?
+         ORDER BY score DESC,id ASC",
+    )?;
+    let evidence = evidence_stmt
+        .query_map(params![run_id], |row| {
+            Ok(RunAttributionEvidence {
+                track_key: row.get(0)?,
+                signal_type: row.get(1)?,
+                score: row.get(2)?,
+                value: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let project_rule: Option<(i64, Option<i64>)> = if resolution_status == "project" {
+        conn.query_row(
+            "SELECT id,repository_id
+             FROM project_workflow_rules
+             WHERE project_id=?
+               AND workflow_name=?
+               AND active=1
+               AND (repository_id IS NULL OR repository_id=?)
+             ORDER BY CASE WHEN repository_id=? THEN 0 ELSE 1 END,id
+             LIMIT 1",
+            params![project_id, workflow_name, repository_id, repository_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+    } else {
+        None
+    };
+
+    let (project_rule_id, project_rule_repository_id) = project_rule
+        .map(|(id, repository_id)| (Some(id), repository_id))
+        .unwrap_or((None, None));
+
+    let (source, reason, confidence) = if resolution_status == "project" {
+        (
+            Some("project_workflow".into()),
+            Some("프로젝트 공용 CI 규칙".into()),
+            Some(100),
+        )
+    } else {
+        (assignment_source, assignment_reason, assignment_confidence)
+    };
+
+    Ok(RunAttributionDetail {
+        run_id,
+        project_id,
+        repository_id,
+        repository,
+        workflow_name,
+        resolution_status,
+        assigned_track_id,
+        assigned_track_name,
+        assigned_track_key,
+        source,
+        reason,
+        confidence,
+        manual: assignment_manual.map(|value| value != 0),
+        last_resolution_attempt_at,
+        project_rule_id,
+        project_rule_repository_id,
+        evidence,
+    })
+}
+
 fn run_summary_from_row(row: &rusqlite::Row<'_>, now: DateTime<Utc>) -> rusqlite::Result<WorkflowRunSummary> {
     let status: String = row.get(10)?;
     let created_at: String = row.get(14)?;
@@ -2286,6 +2453,15 @@ fn get_dashboard(state: State<'_, AppState>) -> std::result::Result<Dashboard, S
 }
 
 #[tauri::command]
+fn get_run_attribution(
+    run_id: i64,
+    state: State<'_, AppState>,
+) -> std::result::Result<RunAttributionDetail, String> {
+    let conn = db(&state).map_err(|e| e.to_string())?;
+    load_run_attribution_detail(&conn, run_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn poll_now(app: AppHandle) -> std::result::Result<Dashboard, String> {
     poll_all(&app).await.map_err(|e| e.to_string())?;
     let state = app.state::<AppState>();
@@ -2888,6 +3064,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_dashboard,
+            get_run_attribution,
             poll_now,
             save_project,
             delete_project,
@@ -3631,6 +3808,137 @@ mod tests {
         assert_eq!(patterns, HashSet::from(["global-two"]));
 
         assert!(load_fingerprints(&conn, 1, 202).is_err());
+    }
+
+    #[test]
+    fn attribution_detail_exposes_final_decision_and_ordered_evidence() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE monitored_repositories(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               repo TEXT NOT NULL
+             );
+             CREATE TABLE watch_tracks(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               name TEXT NOT NULL,
+               track_key TEXT NOT NULL
+             );
+             CREATE TABLE workflow_runs(
+               run_id INTEGER PRIMARY KEY,
+               repository_id INTEGER NOT NULL,
+               workflow_name TEXT NOT NULL,
+               resolution_status TEXT NOT NULL,
+               last_resolution_attempt_at TEXT
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               manual INTEGER NOT NULL,
+               assigned_at TEXT NOT NULL
+             );
+             CREATE TABLE run_evidence(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               run_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               signal_type TEXT NOT NULL,
+               score INTEGER NOT NULL,
+               value TEXT NOT NULL,
+               created_at TEXT NOT NULL
+             );
+             CREATE TABLE project_workflow_rules(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               repository_id INTEGER,
+               workflow_name TEXT NOT NULL,
+               active INTEGER NOT NULL
+             );
+             INSERT INTO monitored_repositories VALUES(100,1,'example/repo');
+             INSERT INTO watch_tracks VALUES(10,1,'운영','ops');
+             INSERT INTO workflow_runs VALUES(1000,100,'CI','assigned','2026-09-24T02:00:00Z');
+             INSERT INTO run_assignments VALUES(1000,10,100,'manual','사용자 수동 귀속',1,'2026-09-24T02:01:00Z');
+             INSERT INTO run_evidence(run_id,track_key,signal_type,score,value,created_at) VALUES
+               (1000,'ops','branch',90,'feat/ops/a','2026-09-24T02:00:00Z'),
+               (1000,'ops','run_name',100,'[WT:ops] CI','2026-09-24T02:00:00Z');"
+        ).unwrap();
+
+        let detail = load_run_attribution_detail(&conn, 1000).unwrap();
+        assert_eq!(detail.project_id, 1);
+        assert_eq!(detail.repository, "example/repo");
+        assert_eq!(detail.assigned_track_key.as_deref(), Some("ops"));
+        assert_eq!(detail.source.as_deref(), Some("manual"));
+        assert_eq!(detail.confidence, Some(100));
+        assert_eq!(detail.manual, Some(true));
+        assert_eq!(detail.evidence.len(), 2);
+        assert_eq!(detail.evidence[0].signal_type, "run_name");
+        assert_eq!(detail.evidence[0].score, 100);
+        assert_eq!(detail.evidence[1].signal_type, "branch");
+    }
+
+    #[test]
+    fn attribution_detail_identifies_repository_specific_project_rule() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE monitored_repositories(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               repo TEXT NOT NULL
+             );
+             CREATE TABLE watch_tracks(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               name TEXT NOT NULL,
+               track_key TEXT NOT NULL
+             );
+             CREATE TABLE workflow_runs(
+               run_id INTEGER PRIMARY KEY,
+               repository_id INTEGER NOT NULL,
+               workflow_name TEXT NOT NULL,
+               resolution_status TEXT NOT NULL,
+               last_resolution_attempt_at TEXT
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               manual INTEGER NOT NULL,
+               assigned_at TEXT NOT NULL
+             );
+             CREATE TABLE run_evidence(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               run_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               signal_type TEXT NOT NULL,
+               score INTEGER NOT NULL,
+               value TEXT NOT NULL,
+               created_at TEXT NOT NULL
+             );
+             CREATE TABLE project_workflow_rules(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               repository_id INTEGER,
+               workflow_name TEXT NOT NULL,
+               active INTEGER NOT NULL
+             );
+             INSERT INTO monitored_repositories VALUES(100,1,'example/repo');
+             INSERT INTO workflow_runs VALUES(1000,100,'Governance','project','2026-09-24T02:00:00Z');
+             INSERT INTO project_workflow_rules VALUES(7,1,NULL,'Governance',1);
+             INSERT INTO project_workflow_rules VALUES(8,1,100,'Governance',1);"
+        ).unwrap();
+
+        let detail = load_run_attribution_detail(&conn, 1000).unwrap();
+        assert_eq!(detail.resolution_status, "project");
+        assert_eq!(detail.source.as_deref(), Some("project_workflow"));
+        assert_eq!(detail.confidence, Some(100));
+        assert_eq!(detail.project_rule_id, Some(8));
+        assert_eq!(detail.project_rule_repository_id, Some(100));
+        assert!(detail.evidence.is_empty());
     }
 
     #[test]

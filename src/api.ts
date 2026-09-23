@@ -4,12 +4,15 @@ import type {
   ProjectInput,
   ProjectWorkflowRuleInput,
   RepositoryInput,
+  RunAttributionDetail,
   Settings,
   TrackInput,
 } from './types';
 
 export const api = {
   getDashboard: () => invoke<Dashboard>('get_dashboard'),
+  getRunAttribution: (runId: number) =>
+    invoke<RunAttributionDetail>('get_run_attribution', { runId }),
   pollNow: () => invoke<Dashboard>('poll_now'),
   saveProject: (input: ProjectInput) => invoke<number>('save_project', { input }),
   deleteProject: (id: number) => invoke<void>('delete_project', { id }),

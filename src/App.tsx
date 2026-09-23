@@ -5,6 +5,7 @@ import type {
   DashboardTrack,
   MonitoredRepository,
   Project,
+  RunAttributionDetail,
   Settings,
   TrackInput,
   WorkflowRunSummary,
@@ -111,6 +112,9 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [auditRun, setAuditRun] = useState<WorkflowRunSummary | null>(null);
+  const [auditDetail, setAuditDetail] = useState<RunAttributionDetail | null>(null);
+  const [auditLoadingId, setAuditLoadingId] = useState<number | null>(null);
 
   const refresh = useCallback(async (poll = false) => {
     try {
@@ -346,6 +350,28 @@ function App() {
     }
   };
 
+  const inspectAttribution = async (run: WorkflowRunSummary) => {
+    if (auditRun?.id === run.id) {
+      setAuditRun(null);
+      setAuditDetail(null);
+      return;
+    }
+    try {
+      setError(null);
+      setAuditRun(run);
+      setAuditDetail(null);
+      setAuditLoadingId(run.id);
+      setAuditDetail(await api.getRunAttribution(run.id));
+    } catch (e) {
+      setAuditRun(null);
+      setAuditDetail(null);
+      setError(String(e));
+    } finally {
+      setAuditLoadingId(null);
+    }
+  };
+
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -539,6 +565,52 @@ function App() {
             </div>
           </section>
 
+          {auditRun && (
+            <section className="panel attribution-audit-panel">
+              <div className="attribution-audit-head">
+                <div>
+                  <p className="eyebrow">ATTRIBUTION AUDIT</p>
+                  <h2>{auditRun.workflowName}</h2>
+                  <p className="muted-copy">{auditRun.repository} · Run #{auditRun.id} · <span className="mono">{auditRun.headSha.slice(0, 8)}</span></p>
+                </div>
+                <div className="row-actions">
+                  <button className="ghost small" onClick={() => void api.openExternal(auditRun.htmlUrl)}>Actions</button>
+                  <button className="ghost small" onClick={() => { setAuditRun(null); setAuditDetail(null); }}>닫기</button>
+                </div>
+              </div>
+              {auditLoadingId === auditRun.id || !auditDetail ? (
+                <p className="muted-copy">귀속 근거를 불러오는 중입니다.</p>
+              ) : (
+                <>
+                  <div className="audit-summary-grid">
+                    <div><span>최종 상태</span><b>{auditDetail.resolutionStatus}</b></div>
+                    <div><span>최종 귀속</span><b>{auditDetail.assignedTrackName ? `${auditDetail.assignedTrackName} / ${auditDetail.assignedTrackKey}` : auditDetail.resolutionStatus === 'project' ? 'Project-wide CI' : '미귀속'}</b></div>
+                    <div><span>판정 소스</span><b>{auditDetail.source ?? '—'}</b></div>
+                    <div><span>신뢰도</span><b>{auditDetail.confidence ?? 0}</b></div>
+                    <div><span>수동 보호</span><b>{auditDetail.manual === true ? 'YES' : auditDetail.manual === false ? 'NO' : '—'}</b></div>
+                  </div>
+                  <div className="audit-reason">
+                    <span>최종 판정 이유</span>
+                    <p>{auditDetail.reason ?? '확정 판정 이유가 기록되지 않았습니다.'}</p>
+                    {auditDetail.projectRuleId != null && <small>Project rule #{auditDetail.projectRuleId} · {auditDetail.projectRuleRepositoryId == null ? '프로젝트 전체 범위' : 'Repository 전용 범위'}</small>}
+                  </div>
+                  <div className="audit-evidence-list">
+                    <div className="audit-evidence-head"><b>관측 근거</b><span>{auditDetail.evidence.length}건</span></div>
+                    {auditDetail.evidence.length === 0 ? (
+                      <p className="muted-copy">저장된 resolver evidence가 없습니다. Project-wide 규칙 또는 수동 판정 자체가 최종 근거일 수 있습니다.</p>
+                    ) : auditDetail.evidence.map((item, index) => (
+                      <div className="audit-evidence-row" key={`${item.signalType}-${item.trackKey}-${index}`}>
+                        <span className="audit-score">{item.score}</span>
+                        <span><b>{item.signalType}</b><small className="mono">{item.trackKey}</small></span>
+                        <code>{item.value}</code>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </section>
+          )}
+
           {selectedView === 'project' && (
             <section className="panel inbox-panel">
               <div className="section-head">
@@ -550,11 +622,13 @@ function App() {
                 <strong>{scopedProjectRunCount}</strong>
               </div>
               {scopedProjectRunCount === 0 ? <p className="muted-copy">현재 범위에 공용 CI가 없습니다.</p> : visibleProjectRuns.length === 0 ? <p className="muted-copy">현재 범위에 공용 CI가 있지만 표시 한도를 벗어났습니다.</p> : visibleProjectRuns.map(run => (
-                <button className="run-row project-run-row" key={run.id} onClick={() => void api.openExternal(run.htmlUrl)}>
+                <div className={`run-row project-run-row ${auditRun?.id === run.id ? 'audit-selected' : ''}`} key={run.id}>
                   <span className={`dot ${runDot(run)}`} />
-                  <span className="run-main"><b>{run.workflowName}</b><small>{projectById.get(run.projectId)?.name} · {run.repository} · {run.headBranch ?? 'detached'} · <span className="mono">{run.headSha.slice(0, 8)}</span></small></span>
-                  <span className="run-state">{run.status}{run.conclusion ? ` · ${run.conclusion}` : ''}</span><span>{formatDuration(run.elapsedSeconds)}</span>
-                </button>
+                  <button className="run-main run-link" onClick={() => void api.openExternal(run.htmlUrl)}><b>{run.workflowName}</b><small>{projectById.get(run.projectId)?.name} · {run.repository} · {run.headBranch ?? 'detached'} · <span className="mono">{run.headSha.slice(0, 8)}</span></small></button>
+                  <span className="run-state">{run.status}{run.conclusion ? ` · ${run.conclusion}` : ''}</span>
+                  <span>{formatDuration(run.elapsedSeconds)}</span>
+                  <button className="audit-trigger" onClick={() => void inspectAttribution(run)}>근거 · project</button>
+                </div>
               ))}
             </section>
           )}
@@ -576,6 +650,7 @@ function App() {
                     ))}
                     <button className="ghost small project-action" onClick={() => void act(() => api.assignRunToProject(run.id, run.projectId, true), '동일 Workflow를 프로젝트 공용 CI로 분류했습니다.', true)}>공용 CI로 분류</button>
                     <button className="danger-ghost small" onClick={() => void act(() => api.ignoreRun(run.id))}>무시</button>
+                    <button className="ghost small audit-action" onClick={() => void inspectAttribution(run)}>{auditRun?.id === run.id ? '근거 닫기' : '귀속 근거'}</button>
                     <button className="ghost small" onClick={() => void api.openExternal(run.htmlUrl)}>Actions</button>
                   </div>
                 </div>
@@ -602,11 +677,13 @@ function App() {
                 </div>
                 <div className="runs-list">
                   {item.runs.length === 0 ? <p className="muted-copy">현재 Repository 필터에 표시할 Run이 없습니다.</p> : item.runs.map(run => (
-                    <button className="run-row v2" key={run.id} onClick={() => void api.openExternal(run.htmlUrl)}>
+                    <div className={`run-row v2 ${auditRun?.id === run.id ? 'audit-selected' : ''}`} key={run.id}>
                       <span className={`dot ${runDot(run)}`} />
-                      <span className="run-main"><b>{run.workflowName}</b><small>{run.repository} · {run.headBranch ?? 'detached'} · <span className="mono">{run.headSha.slice(0, 8)}</span></small></span>
-                      <span className="run-state">{run.status}{run.conclusion ? ` · ${run.conclusion}` : ''}</span><span>{formatDuration(run.elapsedSeconds)}</span><span className="attribution">{run.attributionSource ?? 'resolver'} · {run.confidence ?? 0}</span>
-                    </button>
+                      <button className="run-main run-link" onClick={() => void api.openExternal(run.htmlUrl)}><b>{run.workflowName}</b><small>{run.repository} · {run.headBranch ?? 'detached'} · <span className="mono">{run.headSha.slice(0, 8)}</span></small></button>
+                      <span className="run-state">{run.status}{run.conclusion ? ` · ${run.conclusion}` : ''}</span>
+                      <span>{formatDuration(run.elapsedSeconds)}</span>
+                      <button className="attribution audit-trigger" onClick={() => void inspectAttribution(run)}>근거 · {run.attributionSource ?? 'resolver'} · {run.confidence ?? 0}</button>
+                    </div>
                   ))}
                 </div>
               </article>
