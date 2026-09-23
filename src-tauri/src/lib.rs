@@ -147,6 +147,25 @@ struct RunAttributionEvidence {
     created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReconciliationAuditEntry {
+    id: i64,
+    trigger: String,
+    from_status: String,
+    from_track_key: Option<String>,
+    from_source: Option<String>,
+    from_confidence: Option<i64>,
+    to_status: String,
+    to_track_key: Option<String>,
+    to_source: Option<String>,
+    to_confidence: Option<i64>,
+    to_reason: Option<String>,
+    previous_evidence: Vec<Evidence>,
+    evidence: Vec<Evidence>,
+    reconciled_at: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RunAttributionDetail {
@@ -167,6 +186,7 @@ struct RunAttributionDetail {
     project_rule_id: Option<i64>,
     project_rule_repository_id: Option<i64>,
     evidence: Vec<RunAttributionEvidence>,
+    reconciliation_history: Vec<ReconciliationAuditEntry>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -268,7 +288,7 @@ struct GithubCommitInner {
     message: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Evidence {
     track_key: String,
     signal_type: String,
@@ -487,6 +507,28 @@ fn init_db(path: &Path) -> Result<()> {
           migrated_at TEXT NOT NULL,
           UNIQUE(migration_key, run_id, track_id)
         );
+
+        CREATE TABLE IF NOT EXISTS resolution_reconciliation_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id INTEGER NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+          repository_id INTEGER NOT NULL,
+          trigger TEXT NOT NULL,
+          from_status TEXT NOT NULL,
+          from_track_key TEXT,
+          from_source TEXT,
+          from_confidence INTEGER,
+          to_status TEXT NOT NULL,
+          to_track_key TEXT,
+          to_source TEXT,
+          to_confidence INTEGER,
+          to_reason TEXT,
+          previous_evidence_json TEXT NOT NULL,
+          evidence_json TEXT NOT NULL,
+          reconciled_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_resolution_reconciliation_run
+          ON resolution_reconciliation_audit(run_id, reconciled_at DESC);
 
         CREATE TABLE IF NOT EXISTS notifications_v2 (
           track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
@@ -1429,6 +1471,38 @@ fn load_run_attribution_detail(conn: &Connection, run_id: i64) -> Result<RunAttr
         (assignment_source, assignment_reason, assignment_confidence)
     };
 
+    let mut history_stmt = conn.prepare(
+        "SELECT id,trigger,from_status,from_track_key,from_source,from_confidence,
+                to_status,to_track_key,to_source,to_confidence,to_reason,
+                previous_evidence_json,evidence_json,reconciled_at
+         FROM resolution_reconciliation_audit
+         WHERE run_id=?
+         ORDER BY id DESC
+         LIMIT 20",
+    )?;
+    let reconciliation_history = history_stmt
+        .query_map(params![run_id], |row| {
+            let previous_json: String = row.get(11)?;
+            let evidence_json: String = row.get(12)?;
+            Ok(ReconciliationAuditEntry {
+                id: row.get(0)?,
+                trigger: row.get(1)?,
+                from_status: row.get(2)?,
+                from_track_key: row.get(3)?,
+                from_source: row.get(4)?,
+                from_confidence: row.get(5)?,
+                to_status: row.get(6)?,
+                to_track_key: row.get(7)?,
+                to_source: row.get(8)?,
+                to_confidence: row.get(9)?,
+                to_reason: row.get(10)?,
+                previous_evidence: serde_json::from_str(&previous_json).unwrap_or_default(),
+                evidence: serde_json::from_str(&evidence_json).unwrap_or_default(),
+                reconciled_at: row.get(13)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
     Ok(RunAttributionDetail {
         run_id,
         project_id,
@@ -1447,6 +1521,7 @@ fn load_run_attribution_detail(conn: &Connection, run_id: i64) -> Result<RunAttr
         project_rule_id,
         project_rule_repository_id,
         evidence,
+        reconciliation_history,
     })
 }
 
@@ -2071,17 +2146,65 @@ async fn resolve_run(
     return Ok(resolve_evidence(tracks, aliases, evidence));
 }
 
-fn persist_resolution(conn: &Connection, run_id: i64, resolution: &Resolution, now: &str) -> Result<()> {
-    let manual: Option<i64> = conn
+fn persist_resolution_with_trigger(
+    conn: &Connection,
+    run_id: i64,
+    resolution: &Resolution,
+    now: &str,
+    trigger: Option<&str>,
+) -> Result<()> {
+    let previous: Option<(i64, String, Option<String>, Option<String>, Option<i64>, Option<i64>)> = conn
         .query_row(
-            "SELECT manual FROM run_assignments WHERE run_id=?",
+            "SELECT wr.repository_id,wr.resolution_status,wt.track_key,ra.source,ra.confidence,ra.manual
+             FROM workflow_runs wr
+             LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
+             LEFT JOIN watch_tracks wt ON wt.id=ra.track_id
+             WHERE wr.run_id=?",
             params![run_id],
-            |row| row.get(0),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
         )
         .optional()?;
+    let Some((
+        repository_id,
+        previous_status,
+        previous_track_key,
+        previous_source,
+        previous_confidence,
+        manual,
+    )) = previous else {
+        return Err(anyhow!("Run을 찾지 못했습니다."));
+    };
     if manual == Some(1) {
         return Ok(());
     }
+
+    let previous_evidence: Vec<Evidence> = {
+        let mut stmt = conn.prepare(
+            "SELECT track_key,signal_type,score,value
+             FROM run_evidence
+             WHERE run_id=?
+             ORDER BY score DESC,id ASC",
+        )?;
+        stmt.query_map(params![run_id], |row| {
+            Ok(Evidence {
+                track_key: row.get(0)?,
+                signal_type: row.get(1)?,
+                score: row.get(2)?,
+                value: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
     conn.execute("DELETE FROM run_evidence WHERE run_id=?", params![run_id])?;
     for item in &resolution.evidence {
         conn.execute(
@@ -2115,7 +2238,59 @@ fn persist_resolution(conn: &Connection, run_id: i64, resolution: &Resolution, n
             params![run_id],
         )?;
     }
+
+    if let Some(trigger) = trigger {
+        let next_track_key: Option<String> = if let Some(track_id) = resolution.track_id {
+            conn.query_row(
+                "SELECT track_key FROM watch_tracks WHERE id=?",
+                params![track_id],
+                |row| row.get(0),
+            )
+            .optional()?
+        } else {
+            None
+        };
+        let decision_changed =
+            previous_status != resolution.status || previous_track_key != next_track_key;
+        if decision_changed {
+            conn.execute(
+                "INSERT INTO resolution_reconciliation_audit(
+                   run_id,repository_id,trigger,
+                   from_status,from_track_key,from_source,from_confidence,
+                   to_status,to_track_key,to_source,to_confidence,to_reason,
+                   previous_evidence_json,evidence_json,reconciled_at
+                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![
+                    run_id,
+                    repository_id,
+                    trigger,
+                    previous_status,
+                    previous_track_key,
+                    previous_source,
+                    previous_confidence,
+                    resolution.status,
+                    next_track_key,
+                    resolution.source,
+                    resolution.confidence,
+                    resolution.reason,
+                    serde_json::to_string(&previous_evidence)?,
+                    serde_json::to_string(&resolution.evidence)?,
+                    now
+                ],
+            )?;
+        }
+    }
     Ok(())
+}
+
+fn persist_resolution(
+    conn: &Connection,
+    run_id: i64,
+    resolution: &Resolution,
+    now: &str,
+) -> Result<()> {
+    persist_resolution_with_trigger(conn, run_id, resolution, now, None)
+}
 }
 
 fn upsert_run(conn: &Connection, repository_id: i64, run: &GithubRun, now: &str) -> Result<()> {
@@ -2410,7 +2585,13 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     )
                     .await?;
                     let conn = db(state)?;
-                    persist_resolution(&conn, run.id, &resolution, &now_str)?;
+                    persist_resolution_with_trigger(
+                        &conn,
+                        run.id,
+                        &resolution,
+                        &now_str,
+                        Some("historical_reconcile"),
+                    )?;
                 }
             }
         }
@@ -3392,6 +3573,171 @@ mod tests {
         ).unwrap();
         assert_eq!(row.0, "unassigned");
         assert_eq!(row.1.as_deref(), Some("2026-09-24T01:00:00Z"));
+    }
+
+    #[test]
+    fn historical_reconciliation_records_decision_transition() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE workflow_runs(
+               run_id INTEGER PRIMARY KEY,
+               repository_id INTEGER NOT NULL,
+               resolution_status TEXT NOT NULL,
+               last_resolution_attempt_at TEXT
+             );
+             CREATE TABLE watch_tracks(
+               id INTEGER PRIMARY KEY,
+               track_key TEXT NOT NULL
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               manual INTEGER NOT NULL,
+               assigned_at TEXT NOT NULL
+             );
+             CREATE TABLE run_evidence(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               run_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               signal_type TEXT NOT NULL,
+               score INTEGER NOT NULL,
+               value TEXT NOT NULL,
+               created_at TEXT NOT NULL
+             );
+             CREATE TABLE resolution_reconciliation_audit(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               run_id INTEGER NOT NULL,
+               repository_id INTEGER NOT NULL,
+               trigger TEXT NOT NULL,
+               from_status TEXT NOT NULL,
+               from_track_key TEXT,
+               from_source TEXT,
+               from_confidence INTEGER,
+               to_status TEXT NOT NULL,
+               to_track_key TEXT,
+               to_source TEXT,
+               to_confidence INTEGER,
+               to_reason TEXT,
+               previous_evidence_json TEXT NOT NULL,
+               evidence_json TEXT NOT NULL,
+               reconciled_at TEXT NOT NULL
+             );
+             INSERT INTO workflow_runs VALUES(500,100,'unassigned',NULL);
+             INSERT INTO watch_tracks VALUES(7,'ops');
+             INSERT INTO run_evidence(run_id,track_key,signal_type,score,value,created_at)
+               VALUES(500,'ops','workflow_name',50,'CI','2026-09-24T00:00:00Z');"
+        ).unwrap();
+
+        let resolution = Resolution {
+            status: "assigned".into(),
+            track_id: Some(7),
+            confidence: Some(100),
+            source: Some("run_name".into()),
+            reason: Some("run_name → ops".into()),
+            evidence: vec![evidence("ops", "run_name", 100)],
+        };
+        persist_resolution_with_trigger(
+            &conn,
+            500,
+            &resolution,
+            "2026-09-24T02:00:00Z",
+            Some("historical_reconcile"),
+        ).unwrap();
+
+        let row: (String, String, Option<String>, Option<String>, String) = conn.query_row(
+            "SELECT trigger,from_status,to_track_key,to_source,evidence_json
+             FROM resolution_reconciliation_audit
+             WHERE run_id=500",
+            [],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+        ).unwrap();
+        assert_eq!(row.0, "historical_reconcile");
+        assert_eq!(row.1, "unassigned");
+        assert_eq!(row.2.as_deref(), Some("ops"));
+        assert_eq!(row.3.as_deref(), Some("run_name"));
+        let evidence: Vec<Evidence> = serde_json::from_str(&row.4).unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].score, 100);
+    }
+
+    #[test]
+    fn historical_reconciliation_does_not_log_unchanged_decision() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE workflow_runs(
+               run_id INTEGER PRIMARY KEY,
+               repository_id INTEGER NOT NULL,
+               resolution_status TEXT NOT NULL,
+               last_resolution_attempt_at TEXT
+             );
+             CREATE TABLE watch_tracks(
+               id INTEGER PRIMARY KEY,
+               track_key TEXT NOT NULL
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               manual INTEGER NOT NULL,
+               assigned_at TEXT NOT NULL
+             );
+             CREATE TABLE run_evidence(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               run_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               signal_type TEXT NOT NULL,
+               score INTEGER NOT NULL,
+               value TEXT NOT NULL,
+               created_at TEXT NOT NULL
+             );
+             CREATE TABLE resolution_reconciliation_audit(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               run_id INTEGER NOT NULL,
+               repository_id INTEGER NOT NULL,
+               trigger TEXT NOT NULL,
+               from_status TEXT NOT NULL,
+               from_track_key TEXT,
+               from_source TEXT,
+               from_confidence INTEGER,
+               to_status TEXT NOT NULL,
+               to_track_key TEXT,
+               to_source TEXT,
+               to_confidence INTEGER,
+               to_reason TEXT,
+               previous_evidence_json TEXT NOT NULL,
+               evidence_json TEXT NOT NULL,
+               reconciled_at TEXT NOT NULL
+             );
+             INSERT INTO workflow_runs VALUES(501,100,'unassigned',NULL);"
+        ).unwrap();
+
+        let resolution = Resolution {
+            status: "unassigned".into(),
+            track_id: None,
+            confidence: Some(40),
+            source: None,
+            reason: Some("확정 가능한 Track Key 근거가 없습니다.".into()),
+            evidence: vec![evidence("ops", "workflow_name", 40)],
+        };
+        persist_resolution_with_trigger(
+            &conn,
+            501,
+            &resolution,
+            "2026-09-24T02:00:00Z",
+            Some("historical_reconcile"),
+        ).unwrap();
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM resolution_reconciliation_audit WHERE run_id=501",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]
