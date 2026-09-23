@@ -224,6 +224,7 @@ struct Dashboard {
     project_workflow_rules: Vec<ProjectWorkflowRule>,
     repository_scope_stats: Vec<RepositoryScopeStats>,
     producer_contract_stats: Vec<ProducerContractStats>,
+    producer_contract_runs: Vec<ProducerContractRun>,
     project_runs: Vec<WorkflowRunSummary>,
     unassigned_runs: Vec<WorkflowRunSummary>,
 }
@@ -254,6 +255,14 @@ struct ProducerContractStats {
     compatibility_runs: i64,
     unresolved_runs: i64,
     other_runs: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProducerContractRun {
+    run: WorkflowRunSummary,
+    bucket: String,
+    contract_compliant: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1773,6 +1782,86 @@ fn producer_contract_stats(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+fn producer_contract_runs(
+    conn: &Connection,
+    sample_per_repository: i64,
+) -> Result<Vec<ProducerContractRun>> {
+    let now = Utc::now();
+    let mut stmt = conn.prepare(
+        "WITH recent AS (
+           SELECT wr.run_id,mr.project_id,mr.id AS repository_id,mr.repo,
+                  wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,
+                  wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,
+                  wr.created_at,wr.run_started_at,wr.updated_at,
+                  CASE
+                    WHEN wr.resolution_status='project' THEN 'project_workflow'
+                    WHEN wr.resolution_status='conflict' THEN 'explicit_conflict'
+                    ELSE ra.source
+                  END AS attribution_source,
+                  CASE
+                    WHEN wr.resolution_status='project' THEN '프로젝트 공용 CI 규칙'
+                    WHEN ra.reason IS NOT NULL THEN ra.reason
+                    ELSE (
+                      SELECT 'Track Key 후보: ' || group_concat(track_key, ', ')
+                      FROM (
+                        SELECT DISTINCT re.track_key track_key
+                        FROM run_evidence re
+                        WHERE re.run_id=wr.run_id AND re.score>=90
+                      )
+                    )
+                  END AS attribution_reason,
+                  CASE
+                    WHEN wr.resolution_status='project' THEN 100
+                    WHEN ra.confidence IS NOT NULL THEN ra.confidence
+                    ELSE (SELECT MAX(re.score) FROM run_evidence re WHERE re.run_id=wr.run_id)
+                  END AS confidence,
+                  COALESCE(ra.manual,0) AS manual,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY wr.repository_id
+                    ORDER BY wr.created_at DESC,wr.run_id DESC
+                  ) AS repository_rank
+           FROM workflow_runs wr
+           JOIN monitored_repositories mr ON mr.id=wr.repository_id
+           LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
+           WHERE wr.ignored=0
+         )
+         SELECT run_id,project_id,repository_id,repo,workflow_name,display_title,event,
+                head_branch,head_sha,run_attempt,status,conclusion,html_url,resolution_status,
+                created_at,run_started_at,updated_at,attribution_source,attribution_reason,confidence,
+                CASE
+                  WHEN resolution_status='project' THEN 'project'
+                  WHEN resolution_status='assigned' AND manual=0
+                       AND attribution_source IN ('run_name','pr_marker','commit_marker','branch')
+                    THEN attribution_source
+                  WHEN resolution_status='assigned' AND manual=0 AND attribution_source='inference'
+                    THEN 'inference'
+                  WHEN resolution_status='assigned' AND manual=1 THEN 'manual'
+                  WHEN resolution_status='assigned' AND manual=0 AND attribution_source='track_alias'
+                    THEN 'track_alias'
+                  WHEN resolution_status IN ('unassigned','conflict') THEN resolution_status
+                  ELSE 'other'
+                END AS bucket,
+                CASE
+                  WHEN resolution_status='project' THEN 1
+                  WHEN resolution_status='assigned' AND manual=0
+                       AND attribution_source IN ('run_name','pr_marker','commit_marker','branch')
+                    THEN 1
+                  ELSE 0
+                END AS contract_compliant
+         FROM recent
+         WHERE repository_rank<=?
+         ORDER BY created_at DESC,run_id DESC",
+    )?;
+    let rows = stmt.query_map(params![sample_per_repository.max(1)], |row| {
+        Ok(ProducerContractRun {
+            run: run_summary_from_row(row, now)?,
+            bucket: row.get(20)?,
+            contract_compliant: row.get::<_, i64>(21)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn track_health(runs: &[WorkflowRunSummary]) -> String {
     if runs.is_empty() {
         return "waiting".into();
@@ -1845,6 +1934,8 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
     let repository_scope_stats = repository_scope_stats(&conn)?;
     let producer_contract_stats =
         producer_contract_stats(&conn, PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY)?;
+    let producer_contract_runs =
+        producer_contract_runs(&conn, PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY)?;
     let mut project_runs = Vec::new();
     let mut unassigned_runs = Vec::new();
     for repository in &repositories {
@@ -1889,6 +1980,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         project_workflow_rules,
         repository_scope_stats,
         producer_contract_stats,
+        producer_contract_runs,
         project_runs,
         unassigned_runs,
     })
@@ -4476,6 +4568,27 @@ mod tests {
                 + row.other_runs,
             row.sampled_runs
         );
+
+        let contract_runs = producer_contract_runs(&conn, 50).unwrap();
+        let repository_runs: Vec<&ProducerContractRun> = contract_runs
+            .iter()
+            .filter(|item| item.run.repository_id == repository_id)
+            .collect();
+        assert_eq!(repository_runs.len(), 8);
+        assert_eq!(
+            repository_runs.iter().filter(|item| item.contract_compliant).count(),
+            4
+        );
+        let drift_buckets: Vec<&str> = repository_runs
+            .iter()
+            .filter(|item| !item.contract_compliant)
+            .map(|item| item.bucket.as_str())
+            .collect();
+        assert!(drift_buckets.contains(&"inference"));
+        assert!(drift_buckets.contains(&"manual"));
+        assert!(drift_buckets.contains(&"track_alias"));
+        assert!(drift_buckets.contains(&"unassigned"));
+        assert!(!repository_runs.iter().any(|item| item.run.id == 9_100_009));
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
