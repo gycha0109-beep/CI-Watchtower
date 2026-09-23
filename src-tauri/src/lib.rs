@@ -4598,7 +4598,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO run_assignments(
                    run_id,track_id,confidence,source,reason,manual,assigned_at
-                 ) VALUES(?,?,?,?,0,?)",
+                 ) VALUES(?,?,?,?,?,0,?)",
                 params![
                     run_id,
                     ops_track_id,
