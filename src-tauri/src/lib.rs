@@ -509,7 +509,9 @@ fn migrate_track_key_scope(conn: &Connection) -> Result<()> {
     )?;
     let legacy_global_unique = table_sql
         .to_ascii_lowercase()
-        .replace(['\n', '\r', '\t'], " ")
+        .replace('\n', " ")
+        .replace('\r', " ")
+        .replace('\t', " ")
         .contains("track_key text not null unique");
     if !legacy_global_unique {
         conn.execute(
