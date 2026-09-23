@@ -1012,8 +1012,10 @@ fn average_duration(conn: &Connection, track_id: i64) -> Result<Option<i64>> {
 fn build_dashboard(state: &AppState) -> Result<Dashboard> {
     let conn = db(state)?;
     let settings = load_settings(&conn)?;
+    let projects = list_projects(&conn, true)?;
     let repositories = list_repositories(&conn, false)?;
     let tracks = list_tracks(&conn, true)?;
+    let project_workflow_rules = list_project_workflow_rules(&conn)?;
     let mut dashboard_tracks = Vec::with_capacity(tracks.len());
     for track in tracks {
         let runs = runs_for_track(&conn, track.id, 30)?;
@@ -1034,9 +1036,15 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
     }
     let running_count: i64 = repositories.iter().filter(|r| r.enabled).map(|r| r.running_count).sum();
     let queued_count: i64 = repositories.iter().filter(|r| r.enabled).map(|r| r.queued_count).sum();
-    let unassigned_runs = unassigned_runs(&conn, 30)?;
+    let project_runs = project_runs(&conn, 200)?;
+    let unassigned_runs = unassigned_runs(&conn, 200)?;
     let unassigned_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM workflow_runs wr LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id WHERE ra.run_id IS NULL AND wr.ignored=0",
+        "SELECT COUNT(*)
+         FROM workflow_runs wr
+         LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
+         WHERE ra.run_id IS NULL
+           AND wr.ignored=0
+           AND wr.resolution_status IN ('unassigned','conflict')",
         [],
         |row| row.get(0),
     )?;
@@ -1054,8 +1062,11 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         congestion_level: congestion_level.into(),
         token_configured: token_configured(),
         settings,
+        projects,
         repositories,
         tracks: dashboard_tracks,
+        project_workflow_rules,
+        project_runs,
         unassigned_runs,
     })
 }
