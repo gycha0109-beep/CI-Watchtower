@@ -631,7 +631,7 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
             .query_row(
                 "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='ops' LIMIT 1",
                 params![myeongha_project_id],
-                |row| row.get(0),
+                |row| row.get::<_, i64>(0),
             )
             .optional()?
         {
@@ -644,7 +644,7 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
             .query_row(
                 "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='product-commerce' LIMIT 1",
                 params![myeongha_project_id],
-                |row| row.get(0),
+                |row| row.get::<_, i64>(0),
             )
             .optional()?
         {
