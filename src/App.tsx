@@ -65,6 +65,35 @@ function trackActivity(item: DashboardTrack) {
   return { running, queued, red };
 }
 
+function scopedTrack(item: DashboardTrack, runs: WorkflowRunSummary[]): DashboardTrack {
+  const running = runs.filter(run => run.status === 'in_progress');
+  const queued = runs.filter(run => ['queued', 'requested', 'pending', 'waiting'].includes(run.status));
+  const latest = runs[0];
+  const health: DashboardTrack['health'] = running.length > 0
+    ? 'running'
+    : queued.length > 0
+      ? 'queued'
+      : !latest
+        ? 'waiting'
+        : latest.status === 'completed'
+          ? latest.conclusion === 'success'
+            ? 'green'
+            : ['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale'].includes(latest.conclusion ?? '')
+              ? 'red'
+              : 'completed_other'
+          : 'waiting';
+
+  return {
+    ...item,
+    runs,
+    health,
+    elapsedSeconds: [...running, ...queued].reduce(
+      (max, run) => Math.max(max, run.elapsedSeconds),
+      0,
+    ),
+  };
+}
+
 function App() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [trackForm, setTrackForm] = useState<TrackFormState>(emptyTrack());
@@ -144,7 +173,7 @@ function App() {
     const base = selectedView === 'all'
       ? tracksInProject
       : tracksInProject.filter(item => item.track.id === selectedView);
-    return base.map(item => ({ ...item, runs: item.runs.filter(runInScope) }));
+    return base.map(item => scopedTrack(item, item.runs.filter(runInScope)));
   }, [runInScope, selectedView, tracksInProject]);
 
   const visibleProjectRuns = useMemo(
@@ -156,6 +185,16 @@ function App() {
     () => (dashboard?.unassignedRuns ?? []).filter(runInScope),
     [dashboard, runInScope],
   );
+
+  const scopeStats = useMemo(
+    () => (dashboard?.repositoryScopeStats ?? []).filter(item =>
+      (selectedProject === 'all' || item.projectId === selectedProject) &&
+      (selectedRepository === 'all' || item.repositoryId === selectedRepository)
+    ),
+    [dashboard, selectedProject, selectedRepository],
+  );
+  const scopedUnassignedCount = scopeStats.reduce((sum, item) => sum + item.unassignedCount, 0);
+  const scopedProjectRunCount = scopeStats.reduce((sum, item) => sum + item.projectRunCount, 0);
 
   const runningCount = repositoriesInScope.reduce((sum, repo) => sum + repo.runningCount, 0);
   const queuedCount = repositoriesInScope.reduce((sum, repo) => sum + repo.queuedCount, 0);
@@ -344,10 +383,10 @@ function App() {
         <div className="summary-card"><span>Running</span><strong>{runningCount}</strong></div>
         <div className="summary-card"><span>Queued</span><strong>{queuedCount}</strong></div>
         <button className="summary-card summary-button" onClick={() => setSelectedView('unassigned')}>
-          <span>Unassigned</span><strong>{dashboard?.unassignedCount ?? 0}</strong>
+          <span>Unassigned</span><strong>{scopedUnassignedCount}</strong>
         </button>
         <button className="summary-card summary-button" onClick={() => setSelectedView('project')}>
-          <span>Project CI</span><strong>{visibleProjectRuns.length}</strong>
+          <span>Project CI</span><strong>{scopedProjectRunCount}</strong>
         </button>
         <div className={`summary-card congestion ${congestionText.toLowerCase()}`}><span>Queue</span><strong>{congestionText}</strong></div>
       </section>
@@ -484,9 +523,9 @@ function App() {
             </div>
             <div className="filter-chips">
               <button className={`filter-chip ${selectedView === 'all' ? 'active' : ''}`} onClick={() => setSelectedView('all')}>전체 <span>{tracksInProject.length}</span></button>
-              <button className={`filter-chip project-wide ${selectedView === 'project' ? 'active' : ''}`} onClick={() => setSelectedView('project')}>공용 CI <span>{visibleProjectRuns.length}</span></button>
+              <button className={`filter-chip project-wide ${selectedView === 'project' ? 'active' : ''}`} onClick={() => setSelectedView('project')}>공용 CI <span>{scopedProjectRunCount}</span></button>
               {tracksInProject.map(item => {
-                const activity = trackActivity(item);
+                const activity = trackActivity(scopedTrack(item, item.runs.filter(runInScope)));
                 const activeCount = activity.running + activity.queued;
                 return (
                   <button key={item.track.id} className={`filter-chip ${selectedView === item.track.id ? 'active' : ''}`} onClick={() => setSelectedView(item.track.id)}>
@@ -496,14 +535,21 @@ function App() {
                   </button>
                 );
               })}
-              <button className={`filter-chip unassigned ${selectedView === 'unassigned' ? 'active' : ''}`} onClick={() => setSelectedView('unassigned')}>미귀속 <span>{visibleUnassignedRuns.length}</span></button>
+              <button className={`filter-chip unassigned ${selectedView === 'unassigned' ? 'active' : ''}`} onClick={() => setSelectedView('unassigned')}>미귀속 <span>{scopedUnassignedCount}</span></button>
             </div>
           </section>
 
           {selectedView === 'project' && (
             <section className="panel inbox-panel">
-              <div className="section-head"><div><p className="eyebrow">PROJECT-WIDE CI</p><h2>공용 CI</h2></div><strong>{visibleProjectRuns.length}</strong></div>
-              {visibleProjectRuns.length === 0 ? <p className="muted-copy">현재 범위에 공용 CI가 없습니다.</p> : visibleProjectRuns.map(run => (
+              <div className="section-head">
+                <div>
+                  <p className="eyebrow">PROJECT-WIDE CI</p>
+                  <h2>공용 CI</h2>
+                  <p className="muted-copy">표시 {visibleProjectRuns.length}건 · 현재 범위 전체 {scopedProjectRunCount}건 · 저장소별 최대 최근 200건 표시</p>
+                </div>
+                <strong>{scopedProjectRunCount}</strong>
+              </div>
+              {scopedProjectRunCount === 0 ? <p className="muted-copy">현재 범위에 공용 CI가 없습니다.</p> : visibleProjectRuns.length === 0 ? <p className="muted-copy">현재 범위에 공용 CI가 있지만 표시 한도를 벗어났습니다.</p> : visibleProjectRuns.map(run => (
                 <button className="run-row project-run-row" key={run.id} onClick={() => void api.openExternal(run.htmlUrl)}>
                   <span className={`dot ${runDot(run)}`} />
                   <span className="run-main"><b>{run.workflowName}</b><small>{projectById.get(run.projectId)?.name} · {run.repository} · {run.headBranch ?? 'detached'} · <span className="mono">{run.headSha.slice(0, 8)}</span></small></span>
@@ -516,9 +562,9 @@ function App() {
           {selectedView === 'unassigned' && (
             <section className="panel inbox-panel">
               <div className="section-head">
-                <div><p className="eyebrow">ATTRIBUTION INBOX</p><h2>미귀속 CI</h2><p className="muted-copy">현재 범위 {visibleUnassignedRuns.length}건 · 전체 DB {dashboard?.unassignedCount ?? 0}건 · 최대 최근 200건 표시</p></div>
+                <div><p className="eyebrow">ATTRIBUTION INBOX</p><h2>미귀속 CI</h2><p className="muted-copy">표시 {visibleUnassignedRuns.length}건 · 현재 범위 전체 {scopedUnassignedCount}건 · 저장소별 최대 최근 200건 표시</p></div>
               </div>
-              {visibleUnassignedRuns.length === 0 ? <p className="muted-copy">현재 확인이 필요한 미귀속 CI가 없습니다.</p> : visibleUnassignedRuns.map(run => (
+              {scopedUnassignedCount === 0 ? <p className="muted-copy">현재 확인이 필요한 미귀속 CI가 없습니다.</p> : visibleUnassignedRuns.length === 0 ? <p className="muted-copy">현재 범위에 미귀속 CI가 있지만 표시 한도를 벗어났습니다.</p> : visibleUnassignedRuns.map(run => (
                 <div className="unassigned-run" key={run.id}>
                   <div className="unassigned-main">
                     <span className={`dot ${runDot(run)}`} />
@@ -551,7 +597,7 @@ function App() {
                 </div>
                 <div className="metrics-row three">
                   <div><span>현재 경과</span><b>{formatDuration(item.elapsedSeconds)}</b></div>
-                  <div><span>최근 20회 평균</span><b>{formatDuration(item.averageDurationSeconds)}</b></div>
+                  <div><span>트랙 전체 최근 20회 평균</span><b>{formatDuration(item.averageDurationSeconds)}</b></div>
                   <div><span>장기 기준</span><b>{item.track.longCiMinutes}m</b></div>
                 </div>
                 <div className="runs-list">
