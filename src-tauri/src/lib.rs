@@ -3292,6 +3292,211 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    fn legacy_v02_db_path(label: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "ci-watchtower-{label}-{}-{nonce}.sqlite3",
+            std::process::id()
+        ))
+    }
+
+    fn seed_legacy_v02_database(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            PRAGMA foreign_keys=ON;
+
+            CREATE TABLE tracks (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              repo TEXT NOT NULL,
+              source_mode TEXT NOT NULL CHECK(source_mode IN ('branch','pr')),
+              branch TEXT,
+              pr_number INTEGER,
+              workflow_filter TEXT,
+              long_ci_minutes INTEGER NOT NULL CHECK(long_ci_minutes > 0),
+              archived INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              CHECK (
+                (source_mode='branch' AND branch IS NOT NULL AND pr_number IS NULL)
+                OR
+                (source_mode='pr' AND pr_number IS NOT NULL AND branch IS NULL)
+              )
+            );
+
+            CREATE TABLE watch_tracks (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              track_key TEXT NOT NULL UNIQUE,
+              long_ci_minutes INTEGER NOT NULL CHECK(long_ci_minutes > 0),
+              active INTEGER NOT NULL DEFAULT 1,
+              legacy_track_id INTEGER UNIQUE,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE monitored_repositories (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              repo TEXT NOT NULL UNIQUE,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              running_count INTEGER NOT NULL DEFAULT 0,
+              queued_count INTEGER NOT NULL DEFAULT 0,
+              last_polled_at TEXT,
+              last_successful_poll_at TEXT,
+              last_error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE workflow_runs (
+              run_id INTEGER PRIMARY KEY,
+              repository_id INTEGER NOT NULL REFERENCES monitored_repositories(id) ON DELETE CASCADE,
+              workflow_id INTEGER NOT NULL,
+              workflow_name TEXT NOT NULL,
+              workflow_path TEXT,
+              display_title TEXT NOT NULL,
+              event TEXT NOT NULL,
+              head_branch TEXT,
+              head_sha TEXT NOT NULL,
+              run_number INTEGER NOT NULL,
+              run_attempt INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              conclusion TEXT,
+              html_url TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              run_started_at TEXT,
+              updated_at TEXT NOT NULL,
+              last_seen_at TEXT NOT NULL,
+              resolution_status TEXT NOT NULL DEFAULT 'unassigned',
+              ignored INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE run_attempts (
+              run_id INTEGER NOT NULL,
+              run_attempt INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              conclusion TEXT,
+              started_at TEXT,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(run_id, run_attempt)
+            );
+
+            CREATE TABLE run_assignments (
+              run_id INTEGER PRIMARY KEY REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+              track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
+              confidence INTEGER NOT NULL,
+              source TEXT NOT NULL,
+              reason TEXT NOT NULL,
+              manual INTEGER NOT NULL DEFAULT 0,
+              assigned_at TEXT NOT NULL
+            );
+
+            CREATE TABLE run_evidence (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              run_id INTEGER NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+              track_key TEXT NOT NULL,
+              signal_type TEXT NOT NULL,
+              score INTEGER NOT NULL,
+              value TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE track_fingerprints (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
+              signal_type TEXT NOT NULL,
+              pattern TEXT NOT NULL,
+              repository_id INTEGER REFERENCES monitored_repositories(id) ON DELETE CASCADE,
+              weight INTEGER NOT NULL CHECK(weight BETWEEN 1 AND 60),
+              learned_from_run_id INTEGER,
+              active INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL,
+              UNIQUE(track_id, signal_type, pattern, repository_id)
+            );
+
+            CREATE TABLE notifications_v2 (
+              track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
+              run_id INTEGER NOT NULL,
+              run_attempt INTEGER NOT NULL,
+              event_type TEXT NOT NULL,
+              notified_at TEXT NOT NULL,
+              PRIMARY KEY(track_id, run_id, run_attempt, event_type)
+            );
+
+            CREATE TABLE app_settings (
+              id INTEGER PRIMARY KEY CHECK(id=1),
+              queue_congestion_threshold INTEGER NOT NULL,
+              active_poll_seconds INTEGER NOT NULL,
+              idle_poll_seconds INTEGER NOT NULL,
+              auto_archive_completed INTEGER NOT NULL,
+              queue_congested INTEGER NOT NULL DEFAULT 0
+            );
+
+            INSERT INTO app_settings VALUES(1,4,30,180,0,0);
+
+            INSERT INTO watch_tracks(
+              id,name,track_key,long_ci_minutes,active,legacy_track_id,created_at,updated_at
+            ) VALUES
+              (10,'CI 운영','ops',8,1,NULL,'2026-09-20T00:00:00Z','2026-09-20T00:00:00Z'),
+              (20,'결제','commerce',8,1,NULL,'2026-09-20T00:00:00Z','2026-09-20T00:00:00Z');
+
+            INSERT INTO monitored_repositories(
+              id,repo,enabled,running_count,queued_count,created_at,updated_at
+            ) VALUES
+              (100,'gycha0109-beep/MyeongHa',1,0,0,'2026-09-20T00:00:00Z','2026-09-20T00:00:00Z'),
+              (101,'gycha0109-beep/Saju',1,0,0,'2026-09-20T00:00:00Z','2026-09-20T00:00:00Z'),
+              (200,'gycha0109-beep/K_beauty',1,0,0,'2026-09-20T00:00:00Z','2026-09-20T00:00:00Z');
+
+            INSERT INTO workflow_runs(
+              run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
+              head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
+              created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored
+            ) VALUES
+              (500,200,1,'Feature CI','.github/workflows/feature.yml','legacy manual','push',
+               'ops/legacy','sha500',1,1,'completed','success','https://example/500',
+               '2026-09-20T01:00:00Z','2026-09-20T01:00:01Z','2026-09-20T01:01:00Z','2026-09-20T01:01:00Z','assigned',0),
+              (501,100,2,'Feature CI','.github/workflows/feature.yml','legacy privacy alias','push',
+               'privacy-recovery/fix','sha501',2,1,'completed','success','https://example/501',
+               '2026-09-20T02:00:00Z','2026-09-20T02:00:01Z','2026-09-20T02:01:00Z','2026-09-20T02:01:00Z','unassigned',0),
+              (502,100,3,'Feature CI','.github/workflows/feature.yml','legacy commerce alias','push',
+               'commerce/fix','sha502',3,1,'completed','success','https://example/502',
+               '2026-09-20T03:00:00Z','2026-09-20T03:00:01Z','2026-09-20T03:01:00Z','2026-09-20T03:01:00Z','unassigned',0),
+              (503,100,4,'CI','.github/workflows/ci.yml','legacy project workflow','push',
+               'main','sha503',4,1,'completed','success','https://example/503',
+               '2026-09-20T04:00:00Z','2026-09-20T04:00:01Z','2026-09-20T04:01:00Z','2026-09-20T04:01:00Z','assigned',0),
+              (504,200,5,'BEJEWELY Current Main Health','.github/workflows/main-health.yml','legacy visualy project workflow','push',
+               'main','sha504',5,1,'completed','success','https://example/504',
+               '2026-09-20T05:00:00Z','2026-09-20T05:00:01Z','2026-09-20T05:01:00Z','2026-09-20T05:01:00Z','assigned',0);
+
+            INSERT INTO run_assignments(
+              run_id,track_id,confidence,source,reason,manual,assigned_at
+            ) VALUES
+              (500,10,100,'manual','legacy user choice',1,'2026-09-20T01:02:00Z'),
+              (503,10,90,'branch','legacy automatic project-wide assignment',0,'2026-09-20T04:02:00Z'),
+              (504,10,90,'branch','legacy automatic visualy project-wide assignment',0,'2026-09-20T05:02:00Z');
+
+            INSERT INTO run_evidence(run_id,track_key,signal_type,score,value,created_at) VALUES
+              (501,'privacy-recovery','branch',90,'privacy-recovery/fix','2026-09-20T02:00:00Z'),
+              (502,'commerce','branch',90,'commerce/fix','2026-09-20T03:00:00Z'),
+              (500,'ops','branch',90,'ops/legacy','2026-09-20T01:00:00Z');
+
+            INSERT INTO track_fingerprints(
+              track_id,signal_type,pattern,repository_id,weight,learned_from_run_id,active,created_at
+            ) VALUES
+              (10,'workflow_name','Feature CI',100,50,501,1,'2026-09-20T02:00:00Z'),
+              (20,'workflow_path','.github/workflows/feature.yml',100,35,502,1,'2026-09-20T03:00:00Z');
+
+            INSERT INTO notifications_v2(track_id,run_id,run_attempt,event_type,notified_at)
+              VALUES(10,503,1,'completed','2026-09-20T04:02:00Z');
+            "#,
+        )
+        .unwrap();
+    }
+
     fn track(id: i64, key: &str) -> Track {
         Track {
             id,
@@ -4051,6 +4256,231 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(invalid_auto_count, 0);
+    }
+
+    #[test]
+    fn legacy_v02_database_migrates_end_to_end_without_silent_data_loss() {
+        let path = legacy_v02_db_path("v02-e2e");
+        seed_legacy_v02_database(&path);
+
+        init_db(&path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
+
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+
+        let foreign_key_violations: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(foreign_key_violations, 0);
+
+        let run_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM workflow_runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(run_count, 5);
+
+        let myeongha_project_id: i64 = conn
+            .query_row(
+                "SELECT id FROM projects WHERE project_key='myeongha'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let visualy_project_id: i64 = conn
+            .query_row(
+                "SELECT id FROM projects WHERE project_key='visualy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let myeongha_repo_project: i64 = conn
+            .query_row(
+                "SELECT project_id FROM monitored_repositories
+                 WHERE repo='gycha0109-beep/MyeongHa'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let visualy_repo_project: i64 = conn
+            .query_row(
+                "SELECT project_id FROM monitored_repositories
+                 WHERE repo='gycha0109-beep/K_beauty'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(myeongha_repo_project, myeongha_project_id);
+        assert_eq!(visualy_repo_project, visualy_project_id);
+
+        let commerce_track: (String, i64) = conn
+            .query_row(
+                "SELECT track_key,project_id FROM watch_tracks
+                 WHERE name='결제'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(commerce_track.0, "product-commerce");
+        assert_eq!(commerce_track.1, myeongha_project_id);
+
+        let alias_targets: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT ta.alias_key,wt.track_key
+                     FROM track_aliases ta
+                     JOIN watch_tracks wt ON wt.id=ta.track_id
+                     WHERE ta.project_id=?
+                     ORDER BY ta.alias_key",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map(params![myeongha_project_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert!(alias_targets.contains(&("privacy-recovery".into(), "ops".into())));
+        assert!(alias_targets.contains(&("commerce".into(), "product-commerce".into())));
+
+        let privacy_assignment: (String, i64, String) = conn
+            .query_row(
+                "SELECT wt.track_key,ra.manual,ra.source
+                 FROM run_assignments ra
+                 JOIN watch_tracks wt ON wt.id=ra.track_id
+                 WHERE ra.run_id=501",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(privacy_assignment, ("ops".into(), 0, "track_alias".into()));
+
+        let commerce_assignment: (String, i64, String) = conn
+            .query_row(
+                "SELECT wt.track_key,ra.manual,ra.source
+                 FROM run_assignments ra
+                 JOIN watch_tracks wt ON wt.id=ra.track_id
+                 WHERE ra.run_id=502",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            commerce_assignment,
+            ("product-commerce".into(), 0, "track_alias".into())
+        );
+
+        let invalid_manual_active: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_assignments WHERE run_id=500",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(invalid_manual_active, 0);
+
+        let manual_audit: (String, i64, String, i64, i64) = conn
+            .query_row(
+                "SELECT track_key,manual,reason,from_repository_project_id,to_repository_project_id
+                 FROM assignment_migration_audit
+                 WHERE migration_key='visualy-project-scope-v1' AND run_id=500",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(manual_audit.0, "ops");
+        assert_eq!(manual_audit.1, 1);
+        assert_eq!(manual_audit.2, "legacy user choice");
+        assert_eq!(manual_audit.3, myeongha_project_id);
+        assert_eq!(manual_audit.4, visualy_project_id);
+
+        let moved_manual_status: String = conn
+            .query_row(
+                "SELECT resolution_status FROM workflow_runs WHERE run_id=500",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(moved_manual_status, "unassigned");
+
+        for run_id in [503_i64, 504_i64] {
+            let status: String = conn
+                .query_row(
+                    "SELECT resolution_status FROM workflow_runs WHERE run_id=?",
+                    params![run_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "project");
+            let assignment_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM run_assignments WHERE run_id=?",
+                    params![run_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(assignment_count, 0);
+        }
+
+        let fingerprint_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM track_fingerprints", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(fingerprint_count, 2);
+
+        let notification_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notifications_v2", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(notification_count, 1);
+
+        drop(conn);
+
+        init_db(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
+
+        let run_count_after_second_init: i64 = conn
+            .query_row("SELECT COUNT(*) FROM workflow_runs", [], |row| row.get(0))
+            .unwrap();
+        let migration_audit_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM assignment_migration_audit
+                 WHERE migration_key='visualy-project-scope-v1' AND run_id=500",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let alias_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM track_aliases
+                 WHERE project_id=? AND alias_key IN ('privacy-recovery','commerce')",
+                params![myeongha_project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(run_count_after_second_init, 5);
+        assert_eq!(migration_audit_count, 1);
+        assert_eq!(alias_count, 2);
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
     #[test]
