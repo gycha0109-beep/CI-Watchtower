@@ -985,6 +985,7 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
                 "DB Content Reading Suite",
                 "DB Runtime Authority Suite",
                 "DB PostgreSQL 17 Authority Suite",
+                "Supabase Production",
             ] {
                 conn.execute(
                     "INSERT OR IGNORE INTO project_workflow_rules(
@@ -1220,7 +1221,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.5")
+        .user_agent("ci-watchtower/0.3.6")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -4468,8 +4469,8 @@ mod tests {
     }
 
     #[test]
-    fn myeongha_db_authority_suites_are_repository_scoped_project_wide() {
-        let path = legacy_v02_db_path("myeongha-db-project-wide");
+    fn myeongha_repository_scoped_project_wide_rules_preserve_manual_and_repo_isolation() {
+        let path = legacy_v02_db_path("myeongha-repository-project-wide");
         seed_legacy_v02_database(&path);
         init_db(&path).unwrap();
 
@@ -4520,11 +4521,11 @@ mod tests {
                     run_id,
                     repository_id,
                     910_i64,
-                    "DB Runtime Authority Suite",
-                    ".github/workflows/db-runtime-authority-suite.yml",
-                    "db runtime authority",
-                    "pull_request",
-                    "fix/frontend-integration/runtime-authority",
+                    "Supabase Production",
+                    ".github/workflows/supabase-production.yml",
+                    "supabase production",
+                    "push",
+                    "main",
                     format!("sha-{run_id}"),
                     run_id,
                     1_i64,
@@ -4569,14 +4570,15 @@ mod tests {
                    AND workflow_name IN (
                      'DB Content Reading Suite',
                      'DB Runtime Authority Suite',
-                     'DB PostgreSQL 17 Authority Suite'
+                     'DB PostgreSQL 17 Authority Suite',
+                     'Supabase Production'
                    )
                    AND active=1",
                 params![project_id, myeongha_repository_id],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(scoped_rules, 3);
+        assert_eq!(scoped_rules, 4);
 
         let automatic_status: String = conn
             .query_row(
