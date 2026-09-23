@@ -1456,6 +1456,41 @@ fn upsert_run(conn: &Connection, repository_id: i64, run: &GithubRun, now: &str)
     Ok(())
 }
 
+fn load_stored_unresolved_runs(
+    conn: &Connection,
+    repository_id: i64,
+    limit: i64,
+) -> Result<Vec<GithubRun>> {
+    let mut stmt = conn.prepare(
+        "SELECT run_id,workflow_id,workflow_name,workflow_path,display_title,event,head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,created_at,run_started_at,updated_at
+         FROM workflow_runs
+         WHERE repository_id=? AND ignored=0 AND resolution_status IN ('unassigned','conflict')
+         ORDER BY created_at DESC LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![repository_id, limit], |row| {
+        Ok(GithubRun {
+            id: row.get(0)?,
+            workflow_id: row.get(1)?,
+            name: row.get(2)?,
+            path: row.get(3)?,
+            display_title: row.get(4)?,
+            event: row.get(5)?,
+            head_branch: row.get(6)?,
+            head_sha: row.get(7)?,
+            run_number: row.get(8)?,
+            run_attempt: row.get(9)?,
+            status: row.get(10)?,
+            conclusion: row.get(11)?,
+            html_url: row.get(12)?,
+            created_at: row.get(13)?,
+            run_started_at: row.get(14)?,
+            updated_at: row.get(15)?,
+            pull_requests: Vec::new(),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn mark_notified(
     conn: &Connection,
     track_id: i64,
@@ -1539,6 +1574,10 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
         let conn = db(state)?;
         list_tracks(&conn, true)?
     };
+    let project_rules = {
+        let conn = db(state)?;
+        list_project_workflow_rules(&conn)?
+    };
     let now = Utc::now();
     let now_str = now.to_rfc3339();
 
@@ -1572,8 +1611,18 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     let conn = db(state)?;
                     load_fingerprints(&conn, repository.id)?
                 };
+                let aliases = {
+                    let conn = db(state)?;
+                    load_project_aliases(&conn, repository.project_id)?
+                };
+                let repository_tracks: Vec<Track> = tracks
+                    .iter()
+                    .filter(|track| track.project_id == repository.project_id)
+                    .cloned()
+                    .collect();
                 let mut commit_cache = HashMap::new();
                 let mut pr_cache = HashMap::new();
+
                 for run in &runs {
                     let should_resolve = {
                         let conn = db(state)?;
@@ -1593,7 +1642,41 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &client,
                         &repository.repo,
                         run,
-                        &tracks,
+                        repository.project_id,
+                        repository.id,
+                        &repository_tracks,
+                        &project_rules,
+                        &aliases,
+                        &fingerprints,
+                        &mut commit_cache,
+                        &mut pr_cache,
+                    )
+                    .await?;
+                    let conn = db(state)?;
+                    persist_resolution(&conn, run.id, &resolution, &now_str)?;
+                }
+
+                // Old completed runs can fall out of GitHub's recent-100 window while still
+                // remaining unresolved locally. Re-evaluate a bounded batch each poll so
+                // PR/commit markers and newly-added project rules eventually backfill them.
+                let recent_ids: HashSet<i64> = runs.iter().map(|run| run.id).collect();
+                let stored_unresolved = {
+                    let conn = db(state)?;
+                    load_stored_unresolved_runs(&conn, repository.id, 12)?
+                };
+                for run in stored_unresolved {
+                    if recent_ids.contains(&run.id) {
+                        continue;
+                    }
+                    let resolution = resolve_run(
+                        &client,
+                        &repository.repo,
+                        &run,
+                        repository.project_id,
+                        repository.id,
+                        &repository_tracks,
+                        &project_rules,
+                        &aliases,
                         &fingerprints,
                         &mut commit_cache,
                         &mut pr_cache,
