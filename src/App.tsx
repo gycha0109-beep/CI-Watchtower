@@ -48,6 +48,18 @@ function runDot(run: WorkflowRunSummary) {
   return 'running-dot';
 }
 
+function producerBucketLabel(bucket: string) {
+  switch (bucket) {
+    case 'inference': return 'HEURISTIC';
+    case 'manual': return 'MANUAL';
+    case 'track_alias': return 'ALIAS';
+    case 'unassigned': return 'UNASSIGNED';
+    case 'conflict': return 'CONFLICT';
+    case 'other': return 'OTHER';
+    default: return bucket.toUpperCase();
+  }
+}
+
 function repositoryState(repo: MonitoredRepository) {
   if (!repo.enabled) return 'OFF';
   if (repo.lastError) return 'ERROR';
@@ -242,6 +254,11 @@ function App() {
   const contractCoverage = producerContract.sampledRuns === 0
     ? 100
     : Math.round((contractCompliantRuns / producerContract.sampledRuns) * 100);
+  const producerContractDriftRuns = useMemo(
+    () => (dashboard?.producerContractRuns ?? [])
+      .filter(item => !item.contractCompliant && runInScope(item.run)),
+    [dashboard, runInScope],
+  );
 
   const runningCount = repositoriesInScope.reduce((sum, repo) => sum + repo.runningCount, 0);
   const queuedCount = repositoriesInScope.reduce((sum, repo) => sum + repo.queuedCount, 0);
@@ -478,6 +495,34 @@ function App() {
           <div><span>Heuristic / 호환</span><b>{producerContract.heuristicRuns + producerContract.compatibilityRuns}</b><small>inference {producerContract.heuristicRuns} · alias {producerContract.compatibilityRuns}</small></div>
           <div><span>수동 / 기타</span><b>{producerContract.manualRuns + producerContract.otherRuns}</b><small>manual {producerContract.manualRuns} · other {producerContract.otherRuns}</small></div>
           <div><span>미해결</span><b>{producerContract.unresolvedRuns}</b><small>unassigned / conflict</small></div>
+        </div>
+        <div className="producer-drift">
+          <div className="producer-drift-head">
+            <div><b>Contract Drift</b><span>현재 범위 {producerContractDriftRuns.length}건</span></div>
+            <small>행을 누르면 저장된 resolver 근거와 reconciliation 이력을 확인합니다.</small>
+          </div>
+          {producerContractDriftRuns.length === 0 ? (
+            <div className="producer-drift-empty">최근 표본에서 heuristic / alias / manual / unresolved drift가 없습니다.</div>
+          ) : (
+            <div className="producer-drift-list">
+              {producerContractDriftRuns.map(item => (
+                <button
+                  className={`producer-drift-row ${auditRun?.id === item.run.id ? 'selected' : ''}`}
+                  key={item.run.id}
+                  onClick={() => void inspectAttribution(item.run)}
+                >
+                  <span className={`producer-bucket ${item.bucket}`}>{producerBucketLabel(item.bucket)}</span>
+                  <span className="producer-drift-main">
+                    <b>{item.run.workflowName}</b>
+                    <small>{item.run.displayTitle}</small>
+                  </span>
+                  <span className="producer-drift-repo">{item.run.repository}</span>
+                  <span className="producer-drift-source">{item.run.attributionSource ?? item.run.resolutionStatus}</span>
+                  <span className="mono producer-drift-branch">{item.run.headBranch ?? '—'}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </section>
 

@@ -131,6 +131,8 @@ Dashboard는 각 Repository의 **최근 최대 50개 Run**을 기준으로 produ
 
 따라서 Project-wide CI는 `[WT:*]`가 없어도 정상이며, shared workflow를 억지로 Track에 넣어 coverage를 올리지 않습니다. 이 지표의 목적은 resolver 성공률이 아니라 **producer가 스스로 귀속 근거를 얼마나 명시적으로 남기고 있는지** 확인하는 것입니다.
 
+Producer Contract 패널의 **Contract Drift** 목록은 같은 표본에서 정상 계약이 아닌 Run을 직접 보여줍니다. `inference`, `track_alias`, 수동 귀속, `unassigned/conflict`, 기타 비표준 귀속을 Repository/Workflow/branch와 함께 확인할 수 있고, 행을 선택하면 기존 Attribution Audit에서 실제 resolver evidence와 Historical Reconciliation 이력을 검토할 수 있습니다. 이 목록은 producer 저장소를 추측으로 일괄 수정하지 않고 실제 drift부터 보정하기 위한 작업 큐입니다.
+
 ## Resolver
 
 우선순위는 다음과 같습니다.
