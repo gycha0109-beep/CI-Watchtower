@@ -1322,12 +1322,27 @@ fn run_summary_from_row(row: &rusqlite::Row<'_>, now: DateTime<Utc>) -> rusqlite
 fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<WorkflowRunSummary>> {
     let now = Utc::now();
     let mut stmt = conn.prepare(
-        "SELECT wr.run_id,mr.project_id,mr.id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,ra.source,ra.reason,ra.confidence
-         FROM workflow_runs wr
-         JOIN monitored_repositories mr ON mr.id=wr.repository_id
-         JOIN run_assignments ra ON ra.run_id=wr.run_id
-         WHERE ra.track_id=? AND wr.ignored=0
-         ORDER BY wr.created_at DESC LIMIT ?",
+        "WITH ranked AS (
+           SELECT wr.run_id,mr.project_id,mr.id AS repository_id,mr.repo,
+                  wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,
+                  wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,
+                  wr.created_at,wr.run_started_at,wr.updated_at,
+                  ra.source,ra.reason,ra.confidence,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY wr.repository_id
+                    ORDER BY wr.created_at DESC
+                  ) AS repository_rank
+           FROM workflow_runs wr
+           JOIN monitored_repositories mr ON mr.id=wr.repository_id
+           JOIN run_assignments ra ON ra.run_id=wr.run_id
+           WHERE ra.track_id=? AND wr.ignored=0
+         )
+         SELECT run_id,project_id,repository_id,repo,workflow_name,display_title,event,
+                head_branch,head_sha,run_attempt,status,conclusion,html_url,resolution_status,
+                created_at,run_started_at,updated_at,source,reason,confidence
+         FROM ranked
+         WHERE repository_rank<=?
+         ORDER BY created_at DESC",
     )?;
     let rows = stmt.query_map(params![track_id, limit], |row| run_summary_from_row(row, now))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
