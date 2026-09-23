@@ -963,7 +963,13 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
             [],
             |row| row.get(0),
         )?;
-        for workflow_name in ["CI", "Governance", "Web PR Domain Gates", "PIE Prospective Shadow"] {
+        for workflow_name in [
+            "CI",
+            "Governance",
+            "Web PR Domain Gates",
+            "PIE Prospective Shadow",
+            "Supabase Production",
+        ] {
             conn.execute(
                 "INSERT OR IGNORE INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
                  VALUES(?,NULL,?,1,?)",
@@ -4442,6 +4448,134 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(invalid_auto_count, 0);
+    }
+
+    #[test]
+    fn myeongha_supabase_production_is_project_wide_and_preserves_manual_override() {
+        let path = legacy_v02_db_path("myeongha-supabase-project");
+        seed_legacy_v02_database(&path);
+        init_db(&path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let repository_id: i64 = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/MyeongHa'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let project_id: i64 = conn
+            .query_row(
+                "SELECT project_id FROM monitored_repositories WHERE id=?",
+                params![repository_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let ops_track_id: i64 = conn
+            .query_row(
+                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='ops'",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        for (run_id, manual) in [(9_300_001_i64, 0_i64), (9_300_002_i64, 1_i64)] {
+            conn.execute(
+                "INSERT INTO workflow_runs(
+                   run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
+                   head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
+                   created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored,last_resolution_attempt_at
+                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![
+                    run_id,
+                    repository_id,
+                    930_i64,
+                    "Supabase Production",
+                    ".github/workflows/supabase-production.yml",
+                    "supabase production",
+                    "push",
+                    "main",
+                    format!("sha-{run_id}"),
+                    run_id,
+                    1_i64,
+                    "completed",
+                    "success",
+                    format!("https://example/{run_id}"),
+                    "2026-09-24T02:00:00Z",
+                    Option::<String>::None,
+                    "2026-09-24T02:01:00Z",
+                    "2026-09-24T02:01:00Z",
+                    "assigned",
+                    0_i64,
+                    Option::<String>::None,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO run_assignments(
+                   run_id,track_id,confidence,source,reason,manual,assigned_at
+                 ) VALUES(?,?,?,?,?,?,?)",
+                params![
+                    run_id,
+                    ops_track_id,
+                    if manual == 1 { 100_i64 } else { 90_i64 },
+                    if manual == 1 { "manual" } else { "branch" },
+                    "fixture",
+                    manual,
+                    "2026-09-24T02:02:00Z",
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        migrate_project_scope(&Connection::open(&path).unwrap()).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let rule_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM project_workflow_rules
+                 WHERE project_id=? AND repository_id IS NULL
+                   AND workflow_name='Supabase Production' AND active=1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rule_count, 1);
+
+        let automatic_status: String = conn
+            .query_row(
+                "SELECT resolution_status FROM workflow_runs WHERE run_id=9300001",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let automatic_assignment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9300001",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(automatic_status, "project");
+        assert_eq!(automatic_assignment_count, 0);
+
+        let manual_row: (String, i64) = conn
+            .query_row(
+                "SELECT wr.resolution_status,ra.manual
+                 FROM workflow_runs wr
+                 JOIN run_assignments ra ON ra.run_id=wr.run_id
+                 WHERE wr.run_id=9300002",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(manual_row, ("assigned".into(), 1));
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
     #[test]
