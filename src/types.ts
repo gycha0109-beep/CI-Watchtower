@@ -88,6 +88,34 @@ export interface WorkflowRunSummary {
   resolutionStatus: 'assigned' | 'project' | 'unassigned' | 'conflict' | 'ignored' | string;
 }
 
+export interface RunAttributionEvidence {
+  trackKey: string;
+  signalType: string;
+  score: number;
+  value: string;
+  createdAt: string;
+}
+
+export interface RunAttributionDetail {
+  runId: number;
+  projectId: number;
+  repositoryId: number;
+  repository: string;
+  workflowName: string;
+  resolutionStatus: string;
+  assignedTrackId: number | null;
+  assignedTrackName: string | null;
+  assignedTrackKey: string | null;
+  source: string | null;
+  reason: string | null;
+  confidence: number | null;
+  manual: boolean | null;
+  lastResolutionAttemptAt: string | null;
+  projectRuleId: number | null;
+  projectRuleRepositoryId: number | null;
+  evidence: RunAttributionEvidence[];
+}
+
 export type TrackHealth =
   | 'waiting'
   | 'queued'
