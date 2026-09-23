@@ -422,6 +422,28 @@ fn init_db(path: &Path) -> Result<()> {
           UNIQUE(project_id, alias_key)
         );
 
+        CREATE TABLE IF NOT EXISTS assignment_migration_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          migration_key TEXT NOT NULL,
+          run_id INTEGER NOT NULL,
+          repository_id INTEGER NOT NULL,
+          repository_repo TEXT NOT NULL,
+          from_repository_project_id INTEGER,
+          to_repository_project_id INTEGER NOT NULL,
+          track_id INTEGER NOT NULL,
+          track_project_id INTEGER NOT NULL,
+          track_key TEXT NOT NULL,
+          track_name TEXT NOT NULL,
+          confidence INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          manual INTEGER NOT NULL,
+          assigned_at TEXT NOT NULL,
+          action TEXT NOT NULL,
+          migrated_at TEXT NOT NULL,
+          UNIQUE(migration_key, run_id, track_id)
+        );
+
         CREATE TABLE IF NOT EXISTS notifications_v2 (
           track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
           run_id INTEGER NOT NULL,
@@ -551,65 +573,46 @@ fn migrate_track_key_scope(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn seed_bejewely_project_scope(conn: &Connection) -> Result<()> {
-    let now = Utc::now().to_rfc3339();
+
+fn invalidate_cross_project_assignments(
+    conn: &Connection,
+    repository_id: i64,
+    from_repository_project_id: Option<i64>,
+    to_repository_project_id: i64,
+    migration_key: &str,
+) -> Result<()> {
+    let migrated_at = Utc::now().to_rfc3339();
 
     conn.execute(
-        "INSERT OR IGNORE INTO projects(name,project_key,active,created_at,updated_at)
-         VALUES('비주얼리','visualy',1,?,?)",
-        params![now, now],
+        "INSERT OR IGNORE INTO assignment_migration_audit(
+           migration_key,run_id,repository_id,repository_repo,
+           from_repository_project_id,to_repository_project_id,
+           track_id,track_project_id,track_key,track_name,
+           confidence,source,reason,manual,assigned_at,action,migrated_at
+         )
+         SELECT ?,wr.run_id,wr.repository_id,mr.repo,?,?,
+                ra.track_id,wt.project_id,wt.track_key,wt.name,
+                ra.confidence,ra.source,ra.reason,ra.manual,ra.assigned_at,
+                CASE
+                  WHEN ra.manual=1 THEN 'manual-invalidated-for-project-move'
+                  ELSE 'automatic-invalidated-for-project-move'
+                END,
+                ?
+         FROM run_assignments ra
+         JOIN workflow_runs wr ON wr.run_id=ra.run_id
+         JOIN monitored_repositories mr ON mr.id=wr.repository_id
+         JOIN watch_tracks wt ON wt.id=ra.track_id
+         WHERE wr.repository_id=?
+           AND wt.project_id<>?",
+        params![
+            migration_key,
+            from_repository_project_id,
+            to_repository_project_id,
+            migrated_at,
+            repository_id,
+            to_repository_project_id
+        ],
     )?;
-    let project_id: i64 = conn.query_row(
-        "SELECT id FROM projects WHERE project_key='visualy' LIMIT 1",
-        [],
-        |row| row.get(0),
-    )?;
-    conn.execute(
-        "UPDATE projects SET name='비주얼리',active=1,updated_at=? WHERE id=?",
-        params![now, project_id],
-    )?;
-
-    conn.execute(
-        "INSERT OR IGNORE INTO monitored_repositories(
-           project_id,repo,enabled,running_count,queued_count,created_at,updated_at
-         ) VALUES(?,'gycha0109-beep/K_beauty',1,0,0,?,?)",
-        params![project_id, now, now],
-    )?;
-    conn.execute(
-        "UPDATE monitored_repositories SET project_id=?,updated_at=?
-         WHERE repo='gycha0109-beep/K_beauty'",
-        params![project_id, now],
-    )?;
-    let repository_id: i64 = conn.query_row(
-        "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty' LIMIT 1",
-        [],
-        |row| row.get(0),
-    )?;
-
-    for (name, track_key, long_ci_minutes) in [
-        ("CI Watchtower / CI 운영 정리", "ops", 8_i64),
-        ("데이터 정렬 & AI", "taxonomy-ai", 8_i64),
-        ("신규 상품 신뢰도 운영 파이프라인", "trust", 8_i64),
-        ("Face Lab 연구", "face-research", 8_i64),
-        ("Premium Full Report", "full-report", 8_i64),
-        ("Mobile", "mobile", 8_i64),
-    ] {
-        conn.execute(
-            "INSERT OR IGNORE INTO watch_tracks(
-               project_id,name,track_key,long_ci_minutes,active,created_at,updated_at
-             ) VALUES(?,?,?,?,1,?,?)",
-            params![project_id, name, track_key, long_ci_minutes, now, now],
-        )?;
-    }
-
-    for workflow_name in ["BEJEWELY Current Main Health", "PIE Prospective Shadow"] {
-        conn.execute(
-            "INSERT OR IGNORE INTO project_workflow_rules(
-               project_id,repository_id,workflow_name,active,created_at
-             ) VALUES(?,NULL,?,1,?)",
-            params![project_id, workflow_name, now],
-        )?;
-    }
 
     conn.execute(
         "DELETE FROM run_assignments
@@ -621,10 +624,98 @@ fn seed_bejewely_project_scope(conn: &Connection) -> Result<()> {
          AND track_id IN (
            SELECT id FROM watch_tracks WHERE project_id<>?
          )",
-        params![repository_id, project_id],
+        params![repository_id, to_repository_project_id],
     )?;
 
     conn.execute(
+        "UPDATE workflow_runs
+         SET resolution_status='unassigned'
+         WHERE repository_id=?
+           AND ignored=0
+           AND resolution_status='assigned'
+           AND NOT EXISTS (
+             SELECT 1 FROM run_assignments ra WHERE ra.run_id=workflow_runs.run_id
+           )",
+        params![repository_id],
+    )?;
+
+    Ok(())
+}
+
+fn seed_bejewely_project_scope(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let now = Utc::now().to_rfc3339();
+
+    tx.execute(
+        "INSERT OR IGNORE INTO projects(name,project_key,active,created_at,updated_at)
+         VALUES('비주얼리','visualy',1,?,?)",
+        params![now, now],
+    )?;
+    let project_id: i64 = tx.query_row(
+        "SELECT id FROM projects WHERE project_key='visualy' LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "UPDATE projects SET name='비주얼리',active=1,updated_at=? WHERE id=?",
+        params![now, project_id],
+    )?;
+
+    tx.execute(
+        "INSERT OR IGNORE INTO monitored_repositories(
+           project_id,repo,enabled,running_count,queued_count,created_at,updated_at
+         ) VALUES(?,'gycha0109-beep/K_beauty',1,0,0,?,?)",
+        params![project_id, now, now],
+    )?;
+    let (repository_id, previous_repository_project_id): (i64, Option<i64>) = tx.query_row(
+        "SELECT id,project_id
+         FROM monitored_repositories
+         WHERE repo='gycha0109-beep/K_beauty'
+         LIMIT 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    invalidate_cross_project_assignments(
+        &tx,
+        repository_id,
+        previous_repository_project_id,
+        project_id,
+        "visualy-project-scope-v1",
+    )?;
+
+    tx.execute(
+        "UPDATE monitored_repositories SET project_id=?,updated_at=?
+         WHERE id=?",
+        params![project_id, now, repository_id],
+    )?;
+
+    for (name, track_key, long_ci_minutes) in [
+        ("CI Watchtower / CI 운영 정리", "ops", 8_i64),
+        ("데이터 정렬 & AI", "taxonomy-ai", 8_i64),
+        ("신규 상품 신뢰도 운영 파이프라인", "trust", 8_i64),
+        ("Face Lab 연구", "face-research", 8_i64),
+        ("Premium Full Report", "full-report", 8_i64),
+        ("Mobile", "mobile", 8_i64),
+    ] {
+        tx.execute(
+            "INSERT OR IGNORE INTO watch_tracks(
+               project_id,name,track_key,long_ci_minutes,active,created_at,updated_at
+             ) VALUES(?,?,?,?,1,?,?)",
+            params![project_id, name, track_key, long_ci_minutes, now, now],
+        )?;
+    }
+
+    for workflow_name in ["BEJEWELY Current Main Health", "PIE Prospective Shadow"] {
+        tx.execute(
+            "INSERT OR IGNORE INTO project_workflow_rules(
+               project_id,repository_id,workflow_name,active,created_at
+             ) VALUES(?,NULL,?,1,?)",
+            params![project_id, workflow_name, now],
+        )?;
+    }
+
+    tx.execute(
         "DELETE FROM run_assignments
          WHERE manual=0
            AND run_id IN (
@@ -640,7 +731,7 @@ fn seed_bejewely_project_scope(conn: &Connection) -> Result<()> {
         params![project_id, repository_id],
     )?;
 
-    conn.execute(
+    tx.execute(
         "UPDATE workflow_runs
          SET resolution_status='project'
          WHERE repository_id=?
@@ -660,7 +751,7 @@ fn seed_bejewely_project_scope(conn: &Connection) -> Result<()> {
         params![repository_id, project_id],
     )?;
 
-    conn.execute(
+    tx.execute(
         "UPDATE workflow_runs
          SET resolution_status='unassigned'
          WHERE repository_id=?
@@ -672,6 +763,7 @@ fn seed_bejewely_project_scope(conn: &Connection) -> Result<()> {
         params![repository_id],
     )?;
 
+    tx.commit()?;
     Ok(())
 }
 
@@ -2835,6 +2927,214 @@ mod tests {
         assert_eq!(resolution.status, "assigned");
         assert_eq!(resolution.track_id, Some(1));
         assert_eq!(resolution.confidence, Some(100));
+    }
+
+    #[test]
+    fn project_move_archives_manual_assignment_before_invalidating_it() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE monitored_repositories(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER,
+               repo TEXT NOT NULL
+             );
+             CREATE TABLE watch_tracks(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               name TEXT NOT NULL,
+               track_key TEXT NOT NULL
+             );
+             CREATE TABLE workflow_runs(
+               run_id INTEGER PRIMARY KEY,
+               repository_id INTEGER NOT NULL,
+               resolution_status TEXT NOT NULL,
+               ignored INTEGER NOT NULL
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               manual INTEGER NOT NULL,
+               assigned_at TEXT NOT NULL
+             );
+             CREATE TABLE assignment_migration_audit(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               migration_key TEXT NOT NULL,
+               run_id INTEGER NOT NULL,
+               repository_id INTEGER NOT NULL,
+               repository_repo TEXT NOT NULL,
+               from_repository_project_id INTEGER,
+               to_repository_project_id INTEGER NOT NULL,
+               track_id INTEGER NOT NULL,
+               track_project_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               track_name TEXT NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               manual INTEGER NOT NULL,
+               assigned_at TEXT NOT NULL,
+               action TEXT NOT NULL,
+               migrated_at TEXT NOT NULL,
+               UNIQUE(migration_key,run_id,track_id)
+             );
+             INSERT INTO monitored_repositories(id,project_id,repo)
+               VALUES(100,1,'gycha0109-beep/K_beauty');
+             INSERT INTO watch_tracks(id,project_id,name,track_key)
+               VALUES(10,1,'Old Manual Track','old-track'),
+                     (20,2,'Visualy Ops','ops');
+             INSERT INTO workflow_runs(run_id,repository_id,resolution_status,ignored)
+               VALUES(500,100,'assigned',0);
+             INSERT INTO run_assignments(
+               run_id,track_id,confidence,source,reason,manual,assigned_at
+             ) VALUES(500,10,100,'manual','사용자 수동 귀속',1,'2026-09-23T00:00:00Z');"
+        ).unwrap();
+
+        invalidate_cross_project_assignments(
+            &conn,
+            100,
+            Some(1),
+            2,
+            "visualy-project-scope-v1",
+        ).unwrap();
+
+        let remaining: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM run_assignments WHERE run_id=500",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(remaining, 0);
+
+        let archived: (i64, String, String, i64, i64) = conn.query_row(
+            "SELECT manual,track_key,reason,from_repository_project_id,to_repository_project_id
+             FROM assignment_migration_audit
+             WHERE migration_key='visualy-project-scope-v1' AND run_id=500",
+            [],
+            |row| Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            )),
+        ).unwrap();
+        assert_eq!(archived.0, 1);
+        assert_eq!(archived.1, "old-track");
+        assert_eq!(archived.2, "사용자 수동 귀속");
+        assert_eq!(archived.3, 1);
+        assert_eq!(archived.4, 2);
+
+        let status: String = conn.query_row(
+            "SELECT resolution_status FROM workflow_runs WHERE run_id=500",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(status, "unassigned");
+    }
+
+    #[test]
+    fn project_move_audit_is_idempotent_and_keeps_same_project_manual_assignment() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE monitored_repositories(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER,
+               repo TEXT NOT NULL
+             );
+             CREATE TABLE watch_tracks(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               name TEXT NOT NULL,
+               track_key TEXT NOT NULL
+             );
+             CREATE TABLE workflow_runs(
+               run_id INTEGER PRIMARY KEY,
+               repository_id INTEGER NOT NULL,
+               resolution_status TEXT NOT NULL,
+               ignored INTEGER NOT NULL
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               manual INTEGER NOT NULL,
+               assigned_at TEXT NOT NULL
+             );
+             CREATE TABLE assignment_migration_audit(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               migration_key TEXT NOT NULL,
+               run_id INTEGER NOT NULL,
+               repository_id INTEGER NOT NULL,
+               repository_repo TEXT NOT NULL,
+               from_repository_project_id INTEGER,
+               to_repository_project_id INTEGER NOT NULL,
+               track_id INTEGER NOT NULL,
+               track_project_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               track_name TEXT NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               manual INTEGER NOT NULL,
+               assigned_at TEXT NOT NULL,
+               action TEXT NOT NULL,
+               migrated_at TEXT NOT NULL,
+               UNIQUE(migration_key,run_id,track_id)
+             );
+             INSERT INTO monitored_repositories(id,project_id,repo)
+               VALUES(100,1,'gycha0109-beep/K_beauty');
+             INSERT INTO watch_tracks(id,project_id,name,track_key)
+               VALUES(10,1,'Old Auto','old-auto'),
+                     (20,2,'Visualy Manual','ops');
+             INSERT INTO workflow_runs(run_id,repository_id,resolution_status,ignored)
+               VALUES(500,100,'assigned',0),
+                     (600,100,'assigned',0);
+             INSERT INTO run_assignments(
+               run_id,track_id,confidence,source,reason,manual,assigned_at
+             ) VALUES(500,10,90,'branch','old automatic',0,'2026-09-23T00:00:00Z'),
+                     (600,20,100,'manual','valid visualy manual',1,'2026-09-23T00:00:00Z');"
+        ).unwrap();
+
+        invalidate_cross_project_assignments(
+            &conn,
+            100,
+            Some(1),
+            2,
+            "visualy-project-scope-v1",
+        ).unwrap();
+        invalidate_cross_project_assignments(
+            &conn,
+            100,
+            Some(1),
+            2,
+            "visualy-project-scope-v1",
+        ).unwrap();
+
+        let audit_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM assignment_migration_audit",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audit_count, 1);
+
+        let valid_manual_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM run_assignments
+             WHERE run_id=600 AND track_id=20 AND manual=1",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(valid_manual_count, 1);
+
+        let invalid_auto_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM run_assignments WHERE run_id=500",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(invalid_auto_count, 0);
     }
 
     #[test]
