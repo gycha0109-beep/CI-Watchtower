@@ -577,7 +577,7 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
                 "INSERT INTO projects(name,project_key,active,created_at,updated_at) VALUES('명하','myeongha',1,?,?)",
                 params![now, now],
             )?;
-            Ok(conn.last_insert_rowid())
+            Ok::<i64, rusqlite::Error>(conn.last_insert_rowid())
         })?
     } else {
         conn.query_row("SELECT id FROM projects WHERE active=1 ORDER BY id LIMIT 1", [], |row| row.get(0))?
