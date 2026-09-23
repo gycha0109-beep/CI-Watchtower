@@ -413,10 +413,13 @@ fn init_db(path: &Path) -> Result<()> {
           ON project_workflow_rules(project_id, COALESCE(repository_id,0), workflow_name);
 
         CREATE TABLE IF NOT EXISTS track_aliases (
-          alias_key TEXT PRIMARY KEY,
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          alias_key TEXT NOT NULL,
           track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
           active INTEGER NOT NULL DEFAULT 1,
-          created_at TEXT NOT NULL
+          created_at TEXT NOT NULL,
+          UNIQUE(project_id, alias_key)
         );
 
         CREATE TABLE IF NOT EXISTS notifications_v2 (
@@ -447,7 +450,10 @@ fn init_db(path: &Path) -> Result<()> {
     migrate_legacy(&conn)?;
     migrate_project_scope(&conn)?;
     migrate_track_key_scope(&conn)?;
+    migrate_track_alias_scope(&conn)?;
+    seed_myeongha_aliases(&conn)?;
     seed_bejewely_project_scope(&conn)?;
+    reconcile_alias_assignments(&conn)?;
     Ok(())
 }
 
@@ -752,32 +758,6 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
             )?;
         }
 
-        if let Some(ops_id) = conn
-            .query_row(
-                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='ops' LIMIT 1",
-                params![myeongha_project_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-        {
-            conn.execute(
-                "INSERT OR IGNORE INTO track_aliases(alias_key,track_id,active,created_at) VALUES('privacy-recovery',?,1,?)",
-                params![ops_id, now],
-            )?;
-        }
-        if let Some(commerce_id) = conn
-            .query_row(
-                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='product-commerce' LIMIT 1",
-                params![myeongha_project_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-        {
-            conn.execute(
-                "INSERT OR IGNORE INTO track_aliases(alias_key,track_id,active,created_at) VALUES('commerce',?,1,?)",
-                params![commerce_id, now],
-            )?;
-        }
     }
 
     conn.execute(
@@ -814,13 +794,148 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+
+    Ok(())
+}
+
+fn migrate_track_alias_scope(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(track_aliases)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_project_id = columns.iter().any(|name| name == "project_id");
+
+    if !has_project_id {
+        let orphan_count: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM track_aliases ta
+             LEFT JOIN watch_tracks wt ON wt.id=ta.track_id
+             WHERE wt.id IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        if orphan_count > 0 {
+            return Err(anyhow!(
+                "Track alias migration을 중단했습니다. 대상 Track이 없는 alias가 {}개 있습니다.",
+                orphan_count
+            ));
+        }
+
+        conn.execute_batch(
+            "CREATE TABLE track_aliases_v04 (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+               alias_key TEXT NOT NULL,
+               track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
+               active INTEGER NOT NULL DEFAULT 1,
+               created_at TEXT NOT NULL,
+               UNIQUE(project_id, alias_key)
+             );
+             INSERT INTO track_aliases_v04(project_id,alias_key,track_id,active,created_at)
+               SELECT wt.project_id,ta.alias_key,ta.track_id,ta.active,ta.created_at
+               FROM track_aliases ta
+               JOIN watch_tracks wt ON wt.id=ta.track_id;
+             DROP TABLE track_aliases;
+             ALTER TABLE track_aliases_v04 RENAME TO track_aliases;"
+        )?;
+    }
+
+    conn.execute(
+        "UPDATE track_aliases
+         SET project_id=(SELECT wt.project_id FROM watch_tracks wt WHERE wt.id=track_aliases.track_id)
+         WHERE EXISTS(
+           SELECT 1 FROM watch_tracks wt
+           WHERE wt.id=track_aliases.track_id AND wt.project_id<>track_aliases.project_id
+         )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_track_aliases_project_key
+         ON track_aliases(project_id,alias_key)",
+        [],
+    )?;
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS trg_track_aliases_project_insert
+         BEFORE INSERT ON track_aliases
+         FOR EACH ROW
+         WHEN NOT EXISTS(
+           SELECT 1 FROM watch_tracks wt
+           WHERE wt.id=NEW.track_id AND wt.project_id=NEW.project_id
+         )
+         BEGIN
+           SELECT RAISE(ABORT, 'track alias project mismatch');
+         END;
+
+         CREATE TRIGGER IF NOT EXISTS trg_track_aliases_project_update
+         BEFORE UPDATE OF project_id,track_id ON track_aliases
+         FOR EACH ROW
+         WHEN NOT EXISTS(
+           SELECT 1 FROM watch_tracks wt
+           WHERE wt.id=NEW.track_id AND wt.project_id=NEW.project_id
+         )
+         BEGIN
+           SELECT RAISE(ABORT, 'track alias project mismatch');
+         END;"
+    )?;
+    Ok(())
+}
+
+fn seed_myeongha_aliases(conn: &Connection) -> Result<()> {
+    let project_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM projects WHERE project_key='myeongha' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(project_id) = project_id else {
+        return Ok(());
+    };
+    let now = Utc::now().to_rfc3339();
+
+    for (alias_key, track_key) in [
+        ("privacy-recovery", "ops"),
+        ("commerce", "product-commerce"),
+    ] {
+        let track_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM watch_tracks
+                 WHERE project_id=? AND track_key=? AND active=1
+                 LIMIT 1",
+                params![project_id, track_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(track_id) = track_id {
+            conn.execute(
+                "INSERT INTO track_aliases(project_id,alias_key,track_id,active,created_at)
+                 VALUES(?,?,?,1,?)
+                 ON CONFLICT(project_id,alias_key)
+                 DO UPDATE SET track_id=excluded.track_id,active=1",
+                params![project_id, alias_key, track_id, now],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_alias_assignments(conn: &Connection) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT OR IGNORE INTO run_assignments(run_id,track_id,confidence,source,reason,manual,assigned_at)
          SELECT wr.run_id,ta.track_id,MAX(re.score),'track_alias',
                 '과거 Track Key alias 자동 귀속',0,?
          FROM workflow_runs wr
+         JOIN monitored_repositories mr ON mr.id=wr.repository_id
          JOIN run_evidence re ON re.run_id=wr.run_id
-         JOIN track_aliases ta ON ta.alias_key=re.track_key AND ta.active=1
+         JOIN track_aliases ta
+           ON ta.project_id=mr.project_id
+          AND ta.alias_key=re.track_key
+          AND ta.active=1
+         JOIN watch_tracks wt
+           ON wt.id=ta.track_id
+          AND wt.project_id=mr.project_id
+          AND wt.active=1
          LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
          WHERE wr.ignored=0
            AND wr.resolution_status IN ('unassigned','conflict')
@@ -835,9 +950,9 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
            AND EXISTS(SELECT 1 FROM run_assignments ra WHERE ra.run_id=workflow_runs.run_id)",
         [],
     )?;
-
     Ok(())
 }
+
 
 fn keyring_entry() -> Result<Entry> {
     Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|e| anyhow!(e.to_string()))
@@ -1315,7 +1430,10 @@ fn load_project_aliases(conn: &Connection, project_id: i64) -> Result<HashMap<St
         "SELECT ta.alias_key,wt.track_key
          FROM track_aliases ta
          JOIN watch_tracks wt ON wt.id=ta.track_id
-         WHERE ta.active=1 AND wt.active=1 AND wt.project_id=?",
+         WHERE ta.active=1
+           AND wt.active=1
+           AND ta.project_id=?
+           AND wt.project_id=ta.project_id",
     )?;
     let rows = stmt.query_map(params![project_id], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1337,14 +1455,43 @@ fn project_rule_matches(
     })
 }
 
-fn load_fingerprints(conn: &Connection, repository_id: i64) -> Result<Vec<Fingerprint>> {
+fn load_fingerprints(
+    conn: &Connection,
+    project_id: i64,
+    repository_id: i64,
+) -> Result<Vec<Fingerprint>> {
+    let repository_matches_project: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM monitored_repositories
+           WHERE id=? AND project_id=?
+         )",
+        params![repository_id, project_id],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )?;
+    if !repository_matches_project {
+        return Err(anyhow!(
+            "Fingerprint 조회 범위의 저장소와 프로젝트가 일치하지 않습니다."
+        ));
+    }
+
     let mut stmt = conn.prepare(
         "SELECT wt.track_key,tf.signal_type,tf.pattern,tf.weight
          FROM track_fingerprints tf
          JOIN watch_tracks wt ON wt.id=tf.track_id
-         WHERE tf.active=1 AND wt.active=1 AND (tf.repository_id IS NULL OR tf.repository_id=?)",
+         WHERE tf.active=1
+           AND wt.active=1
+           AND wt.project_id=?
+           AND (tf.repository_id IS NULL OR tf.repository_id=?)
+           AND (
+             tf.repository_id IS NULL
+             OR EXISTS(
+               SELECT 1 FROM monitored_repositories scope_repo
+               WHERE scope_repo.id=tf.repository_id
+                 AND scope_repo.project_id=wt.project_id
+             )
+           )",
     )?;
-    let rows = stmt.query_map(params![repository_id], |row| {
+    let rows = stmt.query_map(params![project_id, repository_id], |row| {
         Ok(Fingerprint {
             track_key: row.get(0)?,
             signal_type: row.get(1)?,
@@ -1818,7 +1965,7 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
 
                 let fingerprints = {
                     let conn = db(state)?;
-                    load_fingerprints(&conn, repository.id)?
+                    load_fingerprints(&conn, repository.project_id, repository.id)?
                 };
                 let aliases = {
                     let conn = db(state)?;
@@ -2316,8 +2463,12 @@ fn assign_run(
         )?;
         conn.execute(
             "INSERT OR IGNORE INTO track_fingerprints(track_id,signal_type,pattern,repository_id,weight,learned_from_run_id,active,created_at)
-             SELECT ?, 'workflow_name', ?, repository_id, 50, ?, 1, ? FROM workflow_runs WHERE run_id=?",
-            params![track_id, workflow_name, run_id, now, run_id],
+             SELECT ?, 'workflow_name', ?, wr.repository_id, 50, ?, 1, ?
+             FROM workflow_runs wr
+             JOIN monitored_repositories mr ON mr.id=wr.repository_id
+             JOIN watch_tracks wt ON wt.id=?
+             WHERE wr.run_id=? AND mr.project_id=wt.project_id",
+            params![track_id, workflow_name, run_id, now, track_id, run_id],
         )?;
         Ok(())
     })();
@@ -2684,6 +2835,130 @@ mod tests {
         assert_eq!(resolution.status, "assigned");
         assert_eq!(resolution.track_id, Some(1));
         assert_eq!(resolution.confidence, Some(100));
+    }
+
+    #[test]
+    fn alias_migration_is_project_scoped_and_preserves_manual_assignment() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE projects(
+               id INTEGER PRIMARY KEY,
+               project_key TEXT NOT NULL UNIQUE
+             );
+             CREATE TABLE watch_tracks(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               name TEXT NOT NULL,
+               track_key TEXT NOT NULL,
+               long_ci_minutes INTEGER NOT NULL,
+               active INTEGER NOT NULL,
+               created_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL
+             );
+             CREATE TABLE track_aliases(
+               alias_key TEXT PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               active INTEGER NOT NULL DEFAULT 1,
+               created_at TEXT NOT NULL
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               manual INTEGER NOT NULL
+             );
+             INSERT INTO projects(id,project_key) VALUES(1,'one'),(2,'two');
+             INSERT INTO watch_tracks(id,project_id,name,track_key,long_ci_minutes,active,created_at,updated_at)
+               VALUES(10,1,'Ops A','ops',8,1,'now','now'),
+                     (20,2,'Ops B','ops',8,1,'now','now');
+             INSERT INTO track_aliases(alias_key,track_id,active,created_at)
+               VALUES('privacy-recovery',10,1,'now');
+             INSERT INTO run_assignments(run_id,track_id,manual) VALUES(500,10,1);"
+        ).unwrap();
+
+        migrate_track_alias_scope(&conn).unwrap();
+
+        let migrated_project_id: i64 = conn.query_row(
+            "SELECT project_id FROM track_aliases WHERE alias_key='privacy-recovery'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(migrated_project_id, 1);
+
+        conn.execute(
+            "INSERT INTO track_aliases(project_id,alias_key,track_id,active,created_at)
+             VALUES(2,'privacy-recovery',20,1,'now')",
+            [],
+        ).unwrap();
+
+        let one = load_project_aliases(&conn, 1).unwrap();
+        let two = load_project_aliases(&conn, 2).unwrap();
+        assert_eq!(one.get("privacy-recovery").map(String::as_str), Some("ops"));
+        assert_eq!(two.get("privacy-recovery").map(String::as_str), Some("ops"));
+
+        let mismatch = conn.execute(
+            "INSERT INTO track_aliases(project_id,alias_key,track_id,active,created_at)
+             VALUES(1,'wrong-project',20,1,'now')",
+            [],
+        );
+        assert!(mismatch.is_err());
+
+        let manual: i64 = conn.query_row(
+            "SELECT manual FROM run_assignments WHERE run_id=500",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(manual, 1);
+    }
+
+    #[test]
+    fn fingerprints_are_isolated_by_project_and_repository() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE watch_tracks(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               active INTEGER NOT NULL
+             );
+             CREATE TABLE monitored_repositories(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL
+             );
+             CREATE TABLE track_fingerprints(
+               id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               signal_type TEXT NOT NULL,
+               pattern TEXT NOT NULL,
+               repository_id INTEGER,
+               weight INTEGER NOT NULL,
+               active INTEGER NOT NULL
+             );
+             INSERT INTO watch_tracks(id,project_id,track_key,active)
+               VALUES(10,1,'project-one',1),(20,2,'project-two',1);
+             INSERT INTO monitored_repositories(id,project_id)
+               VALUES(101,1),(202,2);
+             INSERT INTO track_fingerprints(id,track_id,signal_type,pattern,repository_id,weight,active)
+               VALUES(1,10,'workflow_name','global-one',NULL,50,1),
+                     (2,20,'workflow_name','global-two',NULL,50,1),
+                     (3,10,'workflow_name','repo-one',101,50,1),
+                     (4,20,'workflow_name','cross-track',101,50,1),
+                     (5,10,'workflow_name','wrong-repo',202,50,1);"
+        ).unwrap();
+
+        let project_one = load_fingerprints(&conn, 1, 101).unwrap();
+        let patterns: HashSet<_> = project_one.iter().map(|fp| fp.pattern.as_str()).collect();
+        assert_eq!(patterns.len(), 2);
+        assert!(patterns.contains("global-one"));
+        assert!(patterns.contains("repo-one"));
+        assert!(!patterns.contains("global-two"));
+        assert!(!patterns.contains("cross-track"));
+        assert!(!patterns.contains("wrong-repo"));
+
+        let project_two = load_fingerprints(&conn, 2, 202).unwrap();
+        let patterns: HashSet<_> = project_two.iter().map(|fp| fp.pattern.as_str()).collect();
+        assert_eq!(patterns, HashSet::from(["global-two"]));
+
+        assert!(load_fingerprints(&conn, 1, 202).is_err());
     }
 
     #[test]
