@@ -2291,7 +2291,6 @@ fn persist_resolution(
 ) -> Result<()> {
     persist_resolution_with_trigger(conn, run_id, resolution, now, None)
 }
-}
 
 fn upsert_run(conn: &Connection, repository_id: i64, run: &GithubRun, now: &str) -> Result<()> {
     let title = run
