@@ -22,6 +22,7 @@ const KEYRING_ACCOUNT: &str = "github-pat";
 const DEFAULT_ACTIVE_POLL_SECONDS: i64 = 25;
 const DEFAULT_IDLE_POLL_SECONDS: i64 = 90;
 const DEFAULT_QUEUE_THRESHOLD: i64 = 6;
+const HISTORICAL_RECONCILE_BATCH: i64 = 12;
 
 struct AppState {
     db_path: PathBuf,
@@ -352,6 +353,7 @@ fn init_db(path: &Path) -> Result<()> {
           run_started_at TEXT,
           updated_at TEXT NOT NULL,
           last_seen_at TEXT NOT NULL,
+          last_resolution_attempt_at TEXT,
           resolution_status TEXT NOT NULL DEFAULT 'unassigned',
           ignored INTEGER NOT NULL DEFAULT 0
         );
@@ -465,6 +467,7 @@ fn init_db(path: &Path) -> Result<()> {
     )?;
     ensure_column(&conn, "watch_tracks", "project_id", "INTEGER")?;
     ensure_column(&conn, "monitored_repositories", "project_id", "INTEGER")?;
+    ensure_column(&conn, "workflow_runs", "last_resolution_attempt_at", "TEXT")?;
     conn.execute(
         "INSERT OR IGNORE INTO app_settings(id, queue_congestion_threshold, active_poll_seconds, idle_poll_seconds, auto_archive_completed, queue_congested) VALUES(1,?,?,?,?,0)",
         params![DEFAULT_QUEUE_THRESHOLD, DEFAULT_ACTIVE_POLL_SECONDS, DEFAULT_IDLE_POLL_SECONDS, 0],
@@ -1700,7 +1703,10 @@ fn resolve_evidence(
     }
 
     let mut scores: HashMap<String, i64> = HashMap::new();
-    for item in &evidence {
+    for item in evidence
+        .iter()
+        .filter(|item| !item.signal_type.ends_with("_alias"))
+    {
         let key = canonical_evidence_key(&item.track_key, aliases);
         if known.contains_key(key.as_str()) {
             *scores.entry(key).or_default() += item.score;
@@ -1827,8 +1833,10 @@ fn persist_resolution(conn: &Connection, run_id: i64, resolution: &Resolution, n
         )?;
     }
     conn.execute(
-        "UPDATE workflow_runs SET resolution_status=? WHERE run_id=?",
-        params![resolution.status, run_id],
+        "UPDATE workflow_runs
+         SET resolution_status=?,last_resolution_attempt_at=?
+         WHERE run_id=?",
+        params![resolution.status, now, run_id],
     )?;
     if let Some(track_id) = resolution.track_id {
         conn.execute(
@@ -1912,8 +1920,18 @@ fn load_stored_unresolved_runs(
     let mut stmt = conn.prepare(
         "SELECT run_id,workflow_id,workflow_name,workflow_path,display_title,event,head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,created_at,run_started_at,updated_at
          FROM workflow_runs
-         WHERE repository_id=? AND ignored=0 AND resolution_status IN ('unassigned','conflict')
-         ORDER BY created_at DESC LIMIT ?",
+         WHERE repository_id=?
+           AND ignored=0
+           AND resolution_status IN ('unassigned','conflict')
+           AND NOT EXISTS(
+             SELECT 1 FROM run_assignments ra
+             WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+           )
+         ORDER BY
+           CASE WHEN last_resolution_attempt_at IS NULL THEN 0 ELSE 1 END,
+           last_resolution_attempt_at ASC,
+           created_at DESC
+         LIMIT ?",
     )?;
     let rows = stmt.query_map(params![repository_id, limit], |row| {
         Ok(GithubRun {
@@ -2110,7 +2128,11 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                 let recent_ids: HashSet<i64> = runs.iter().map(|run| run.id).collect();
                 let stored_unresolved = {
                     let conn = db(state)?;
-                    load_stored_unresolved_runs(&conn, repository.id, 12)?
+                    load_stored_unresolved_runs(
+                        &conn,
+                        repository.id,
+                        HISTORICAL_RECONCILE_BATCH,
+                    )?
                 };
                 for run in stored_unresolved {
                     if recent_ids.contains(&run.id) {
@@ -2927,6 +2949,179 @@ mod tests {
         assert_eq!(resolution.status, "assigned");
         assert_eq!(resolution.track_id, Some(1));
         assert_eq!(resolution.confidence, Some(100));
+    }
+
+    #[test]
+    fn alias_audit_evidence_does_not_double_inference_score() {
+        let tracks = vec![track(1, "ops")];
+        let aliases = HashMap::from([("privacy-recovery".into(), "ops".into())]);
+        let resolution = resolve_evidence(
+            &tracks,
+            &aliases,
+            vec![evidence("privacy-recovery", "workflow_name", 40)],
+        );
+
+        assert_eq!(resolution.status, "unassigned");
+        assert_eq!(resolution.track_id, None);
+        assert_eq!(resolution.confidence, Some(40));
+        assert!(resolution
+            .evidence
+            .iter()
+            .any(|item| item.signal_type == "workflow_name_alias"));
+    }
+
+    #[test]
+    fn independent_alias_signals_can_still_reach_inference_threshold() {
+        let tracks = vec![track(1, "ops")];
+        let aliases = HashMap::from([("privacy-recovery".into(), "ops".into())]);
+        let resolution = resolve_evidence(
+            &tracks,
+            &aliases,
+            vec![
+                evidence("privacy-recovery", "workflow_name", 40),
+                evidence("privacy-recovery", "workflow_path", 35),
+            ],
+        );
+
+        assert_eq!(resolution.status, "assigned");
+        assert_eq!(resolution.track_id, Some(1));
+        assert_eq!(resolution.confidence, Some(75));
+        assert_eq!(resolution.source.as_deref(), Some("inference"));
+    }
+
+    #[test]
+    fn persist_resolution_records_attempt_time_for_unassigned_run() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE workflow_runs(
+               run_id INTEGER PRIMARY KEY,
+               resolution_status TEXT NOT NULL,
+               last_resolution_attempt_at TEXT
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               manual INTEGER NOT NULL,
+               assigned_at TEXT NOT NULL
+             );
+             CREATE TABLE run_evidence(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               run_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               signal_type TEXT NOT NULL,
+               score INTEGER NOT NULL,
+               value TEXT NOT NULL,
+               created_at TEXT NOT NULL
+             );
+             INSERT INTO workflow_runs(run_id,resolution_status,last_resolution_attempt_at)
+               VALUES(500,'unassigned',NULL);"
+        ).unwrap();
+
+        let resolution = Resolution {
+            status: "unassigned".into(),
+            track_id: None,
+            confidence: Some(40),
+            source: None,
+            reason: Some("insufficient".into()),
+            evidence: vec![evidence("ops", "workflow_name", 40)],
+        };
+        persist_resolution(&conn, 500, &resolution, "2026-09-24T01:00:00Z").unwrap();
+
+        let row: (String, Option<String>) = conn.query_row(
+            "SELECT resolution_status,last_resolution_attempt_at
+             FROM workflow_runs WHERE run_id=500",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(row.0, "unassigned");
+        assert_eq!(row.1.as_deref(), Some("2026-09-24T01:00:00Z"));
+    }
+
+    #[test]
+    fn historical_reconciliation_rotates_unresolved_runs_without_manual_starvation() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE workflow_runs(
+               run_id INTEGER PRIMARY KEY,
+               repository_id INTEGER NOT NULL,
+               workflow_id INTEGER NOT NULL,
+               workflow_name TEXT NOT NULL,
+               workflow_path TEXT,
+               display_title TEXT,
+               event TEXT NOT NULL,
+               head_branch TEXT,
+               head_sha TEXT NOT NULL,
+               run_number INTEGER NOT NULL,
+               run_attempt INTEGER NOT NULL,
+               status TEXT NOT NULL,
+               conclusion TEXT,
+               html_url TEXT NOT NULL,
+               created_at TEXT NOT NULL,
+               run_started_at TEXT,
+               updated_at TEXT NOT NULL,
+               ignored INTEGER NOT NULL,
+               resolution_status TEXT NOT NULL,
+               last_resolution_attempt_at TEXT
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               manual INTEGER NOT NULL
+             );"
+        ).unwrap();
+
+        for id in 1_i64..=15 {
+            conn.execute(
+                "INSERT INTO workflow_runs(
+                   run_id,repository_id,workflow_id,workflow_name,workflow_path,
+                   display_title,event,head_branch,head_sha,run_number,run_attempt,
+                   status,conclusion,html_url,created_at,run_started_at,updated_at,
+                   ignored,resolution_status,last_resolution_attempt_at
+                 ) VALUES(?,100,1,'CI',NULL,'CI','push',NULL,?, ?,1,
+                          'completed','success',?, ?,NULL,?,0,'unassigned',NULL)",
+                params![
+                    id,
+                    format!("sha-{id}"),
+                    id,
+                    format!("https://example.invalid/{id}"),
+                    format!("2026-09-{:02}T00:00:00Z", id),
+                    format!("2026-09-{:02}T00:05:00Z", id)
+                ],
+            ).unwrap();
+        }
+
+        conn.execute(
+            "INSERT INTO workflow_runs(
+               run_id,repository_id,workflow_id,workflow_name,workflow_path,
+               display_title,event,head_branch,head_sha,run_number,run_attempt,
+               status,conclusion,html_url,created_at,run_started_at,updated_at,
+               ignored,resolution_status,last_resolution_attempt_at
+             ) VALUES(99,100,1,'CI',NULL,'CI','push',NULL,'sha-99',99,1,
+                      'completed','success','https://example.invalid/99',
+                      '2026-09-30T00:00:00Z',NULL,'2026-09-30T00:05:00Z',
+                      0,'unassigned',NULL);
+             INSERT INTO run_assignments(run_id,manual) VALUES(99,1);"
+        ).unwrap();
+
+        let first = load_stored_unresolved_runs(&conn, 100, 12).unwrap();
+        assert_eq!(first.len(), 12);
+        assert!(!first.iter().any(|run| run.id == 99));
+
+        for run in &first {
+            conn.execute(
+                "UPDATE workflow_runs
+                 SET last_resolution_attempt_at='2026-09-24T01:00:00Z'
+                 WHERE run_id=?",
+                params![run.id],
+            ).unwrap();
+        }
+
+        let second = load_stored_unresolved_runs(&conn, 100, 12).unwrap();
+        let first_three: Vec<i64> = second.iter().take(3).map(|run| run.id).collect();
+        assert_eq!(first_three, vec![3, 2, 1]);
+        assert!(!second.iter().any(|run| run.id == 99));
     }
 
     #[test]
