@@ -1,5 +1,35 @@
+export interface Project {
+  id: number;
+  name: string;
+  projectKey: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectInput {
+  id?: number;
+  name: string;
+  projectKey: string;
+}
+
+export interface ProjectWorkflowRule {
+  id: number;
+  projectId: number;
+  repositoryId: number | null;
+  workflowName: string;
+  active: boolean;
+}
+
+export interface ProjectWorkflowRuleInput {
+  projectId: number;
+  repositoryId: number | null;
+  workflowName: string;
+}
+
 export interface Track {
   id: number;
+  projectId: number;
   name: string;
   trackKey: string;
   longCiMinutes: number;
@@ -10,6 +40,7 @@ export interface Track {
 
 export interface TrackInput {
   id?: number;
+  projectId: number;
   name: string;
   trackKey: string;
   longCiMinutes: number;
@@ -17,6 +48,7 @@ export interface TrackInput {
 
 export interface MonitoredRepository {
   id: number;
+  projectId: number;
   repo: string;
   enabled: boolean;
   runningCount: number;
@@ -27,12 +59,15 @@ export interface MonitoredRepository {
 
 export interface RepositoryInput {
   id?: number;
+  projectId: number;
   repo: string;
   enabled: boolean;
 }
 
 export interface WorkflowRunSummary {
   id: number;
+  projectId: number;
+  repositoryId: number;
   repository: string;
   workflowName: string;
   displayTitle: string;
@@ -50,7 +85,7 @@ export interface WorkflowRunSummary {
   attributionSource: string | null;
   attributionReason: string | null;
   confidence: number | null;
-  resolutionStatus: 'assigned' | 'unassigned' | 'conflict' | 'ignored' | string;
+  resolutionStatus: 'assigned' | 'project' | 'unassigned' | 'conflict' | 'ignored' | string;
 }
 
 export type TrackHealth =
@@ -83,7 +118,10 @@ export interface Dashboard {
   congestionLevel: 'safe' | 'busy' | 'congested';
   tokenConfigured: boolean;
   settings: Settings;
+  projects: Project[];
   repositories: MonitoredRepository[];
   tracks: DashboardTrack[];
+  projectWorkflowRules: ProjectWorkflowRule[];
+  projectRuns: WorkflowRunSummary[];
   unassignedRuns: WorkflowRunSummary[];
 }
