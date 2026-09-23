@@ -2571,6 +2571,67 @@ fn delete_repository(id: i64, state: State<'_, AppState>) -> std::result::Result
         .map_err(|e| e.to_string())
 }
 
+fn assign_run_to_project_in_conn(
+    conn: &Connection,
+    run_id: i64,
+    project_id: i64,
+    learn_rule: bool,
+    now: &str,
+) -> Result<()> {
+    let (repository_project_id, workflow_name): (i64, String) = conn.query_row(
+        "SELECT mr.project_id,wr.workflow_name
+         FROM workflow_runs wr
+         JOIN monitored_repositories mr ON mr.id=wr.repository_id
+         WHERE wr.run_id=?",
+        params![run_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if repository_project_id != project_id {
+        return Err(anyhow!("Run과 프로젝트가 일치하지 않습니다."));
+    }
+
+    conn.execute("DELETE FROM run_assignments WHERE run_id=?", params![run_id])?;
+    conn.execute(
+        "UPDATE workflow_runs SET resolution_status='project',ignored=0 WHERE run_id=?",
+        params![run_id],
+    )?;
+
+    if learn_rule {
+        conn.execute(
+            "INSERT OR IGNORE INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
+             VALUES(?,NULL,?,1,?)",
+            params![project_id, workflow_name, now],
+        )?;
+        conn.execute(
+            "UPDATE project_workflow_rules SET active=1
+             WHERE project_id=? AND repository_id IS NULL AND workflow_name=?",
+            params![project_id, workflow_name],
+        )?;
+        conn.execute(
+            "DELETE FROM run_assignments
+             WHERE manual=0 AND run_id IN (
+               SELECT wr.run_id FROM workflow_runs wr
+               JOIN monitored_repositories mr ON mr.id=wr.repository_id
+               WHERE mr.project_id=? AND wr.workflow_name=?
+             )",
+            params![project_id, workflow_name],
+        )?;
+        conn.execute(
+            "UPDATE workflow_runs
+             SET resolution_status='project'
+             WHERE ignored=0 AND workflow_name=?
+               AND repository_id IN (SELECT id FROM monitored_repositories WHERE project_id=?)
+               AND NOT EXISTS(
+                 SELECT 1 FROM run_assignments ra
+                 WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+               )",
+            params![workflow_name, project_id],
+        )?;
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 fn assign_run_to_project(
     run_id: i64,
@@ -2580,58 +2641,69 @@ fn assign_run_to_project(
 ) -> std::result::Result<(), String> {
     let result = (|| -> Result<()> {
         let conn = db(&state)?;
-        let (repository_id, repository_project_id, workflow_name): (i64, i64, String) = conn.query_row(
-            "SELECT wr.repository_id,mr.project_id,wr.workflow_name
-             FROM workflow_runs wr JOIN monitored_repositories mr ON mr.id=wr.repository_id
-             WHERE wr.run_id=?",
-            params![run_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        if repository_project_id != project_id {
-            return Err(anyhow!("Run과 프로젝트가 일치하지 않습니다."));
-        }
-        conn.execute("DELETE FROM run_assignments WHERE run_id=?", params![run_id])?;
-        conn.execute(
-            "UPDATE workflow_runs SET resolution_status='project',ignored=0 WHERE run_id=?",
-            params![run_id],
-        )?;
-        if learn_rule {
-            let now = Utc::now().to_rfc3339();
-            conn.execute(
-                "INSERT OR IGNORE INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
-                 VALUES(?,NULL,?,1,?)",
-                params![project_id, workflow_name, now],
-            )?;
-            conn.execute(
-                "UPDATE project_workflow_rules SET active=1
-                 WHERE project_id=? AND repository_id IS NULL AND workflow_name=?",
-                params![project_id, workflow_name],
-            )?;
-            conn.execute(
-                "DELETE FROM run_assignments
-                 WHERE manual=0 AND run_id IN (
-                   SELECT wr.run_id FROM workflow_runs wr
-                   JOIN monitored_repositories mr ON mr.id=wr.repository_id
-                   WHERE mr.project_id=? AND wr.workflow_name=?
-                 )",
-                params![project_id, workflow_name],
-            )?;
-            conn.execute(
-                "UPDATE workflow_runs
-                 SET resolution_status='project'
-                 WHERE ignored=0 AND workflow_name=?
-                   AND repository_id IN (SELECT id FROM monitored_repositories WHERE project_id=?)
-                   AND NOT EXISTS(
-                     SELECT 1 FROM run_assignments ra
-                     WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
-                   )",
-                params![workflow_name, project_id],
-            )?;
-        }
-        let _ = repository_id;
-        Ok(())
+        let now = Utc::now().to_rfc3339();
+        assign_run_to_project_in_conn(&conn, run_id, project_id, learn_rule, &now)
     })();
     result.map_err(|e| e.to_string())
+}
+
+fn assign_run_in_conn(conn: &Connection, run_id: i64, track_id: i64, now: &str) -> Result<()> {
+    let (workflow_name, workflow_path, run_project_id, track_project_id): (
+        String,
+        Option<String>,
+        i64,
+        i64,
+    ) = conn.query_row(
+        "SELECT wr.workflow_name,wr.workflow_path,mr.project_id,wt.project_id
+         FROM workflow_runs wr
+         JOIN monitored_repositories mr ON mr.id=wr.repository_id
+         JOIN watch_tracks wt ON wt.id=?
+         WHERE wr.run_id=?",
+        params![track_id, run_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    if run_project_id != track_project_id {
+        return Err(anyhow!("다른 프로젝트의 트랙에는 Run을 귀속할 수 없습니다."));
+    }
+
+    conn.execute(
+        "INSERT INTO run_assignments(run_id,track_id,confidence,source,reason,manual,assigned_at)
+         VALUES(?,?,100,'manual','사용자 수동 귀속',1,?)
+         ON CONFLICT(run_id) DO UPDATE SET track_id=excluded.track_id,confidence=100,source='manual',reason='사용자 수동 귀속',manual=1,assigned_at=excluded.assigned_at",
+        params![run_id, track_id, now],
+    )?;
+    conn.execute(
+        "UPDATE workflow_runs SET resolution_status='assigned',ignored=0 WHERE run_id=?",
+        params![run_id],
+    )?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO track_fingerprints(track_id,signal_type,pattern,repository_id,weight,learned_from_run_id,active,created_at)
+         SELECT ?, 'workflow_name', ?, wr.repository_id, 50, ?, 1, ?
+         FROM workflow_runs wr
+         JOIN monitored_repositories mr ON mr.id=wr.repository_id
+         JOIN watch_tracks wt ON wt.id=?
+         WHERE wr.run_id=? AND mr.project_id=wt.project_id",
+        params![track_id, workflow_name, run_id, now, track_id, run_id],
+    )?;
+
+    if let Some(path) = workflow_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        conn.execute(
+            "INSERT OR IGNORE INTO track_fingerprints(track_id,signal_type,pattern,repository_id,weight,learned_from_run_id,active,created_at)
+             SELECT ?, 'workflow_path', ?, wr.repository_id, 35, ?, 1, ?
+             FROM workflow_runs wr
+             JOIN monitored_repositories mr ON mr.id=wr.repository_id
+             JOIN watch_tracks wt ON wt.id=?
+             WHERE wr.run_id=? AND mr.project_id=wt.project_id",
+            params![track_id, path, run_id, now, track_id, run_id],
+        )?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -2643,38 +2715,7 @@ fn assign_run(
     let result = (|| -> Result<()> {
         let conn = db(&state)?;
         let now = Utc::now().to_rfc3339();
-        let (workflow_name, run_project_id, track_project_id): (String, i64, i64) = conn.query_row(
-            "SELECT wr.workflow_name,mr.project_id,wt.project_id
-             FROM workflow_runs wr
-             JOIN monitored_repositories mr ON mr.id=wr.repository_id
-             JOIN watch_tracks wt ON wt.id=?
-             WHERE wr.run_id=?",
-            params![track_id, run_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        if run_project_id != track_project_id {
-            return Err(anyhow!("다른 프로젝트의 트랙에는 Run을 귀속할 수 없습니다."));
-        }
-        conn.execute(
-            "INSERT INTO run_assignments(run_id,track_id,confidence,source,reason,manual,assigned_at)
-             VALUES(?,?,100,'manual','사용자 수동 귀속',1,?)
-             ON CONFLICT(run_id) DO UPDATE SET track_id=excluded.track_id,confidence=100,source='manual',reason='사용자 수동 귀속',manual=1,assigned_at=excluded.assigned_at",
-            params![run_id, track_id, now],
-        )?;
-        conn.execute(
-            "UPDATE workflow_runs SET resolution_status='assigned' WHERE run_id=?",
-            params![run_id],
-        )?;
-        conn.execute(
-            "INSERT OR IGNORE INTO track_fingerprints(track_id,signal_type,pattern,repository_id,weight,learned_from_run_id,active,created_at)
-             SELECT ?, 'workflow_name', ?, wr.repository_id, 50, ?, 1, ?
-             FROM workflow_runs wr
-             JOIN monitored_repositories mr ON mr.id=wr.repository_id
-             JOIN watch_tracks wt ON wt.id=?
-             WHERE wr.run_id=? AND mr.project_id=wt.project_id",
-            params![track_id, workflow_name, run_id, now, track_id, run_id],
-        )?;
-        Ok(())
+        assign_run_in_conn(&conn, run_id, track_id, &now)
     })();
     result.map_err(|e| e.to_string())
 }
@@ -3590,6 +3631,221 @@ mod tests {
         assert_eq!(patterns, HashSet::from(["global-two"]));
 
         assert!(load_fingerprints(&conn, 1, 202).is_err());
+    }
+
+    #[test]
+    fn workflow_name_fingerprint_alone_stays_below_auto_assignment_threshold() {
+        let tracks = vec![track(10, "ops")];
+        let fingerprints = vec![Fingerprint {
+            track_key: "ops".into(),
+            signal_type: "workflow_name".into(),
+            pattern: "Shared CI".into(),
+            weight: 50,
+        }];
+        let run = GithubRun {
+            id: 101,
+            workflow_id: 1,
+            name: "Shared CI".into(),
+            path: None,
+            display_title: Some("Shared CI".into()),
+            event: "push".into(),
+            head_branch: Some("main".into()),
+            head_sha: "sha-101".into(),
+            run_number: 101,
+            run_attempt: 1,
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            html_url: "https://github.com/example/repo/actions/runs/101".into(),
+            created_at: "2026-09-24T01:00:00Z".into(),
+            run_started_at: Some("2026-09-24T01:00:01Z".into()),
+            updated_at: "2026-09-24T01:01:00Z".into(),
+            pull_requests: Vec::new(),
+        };
+
+        let resolution = resolve_evidence(
+            &tracks,
+            &HashMap::new(),
+            fingerprint_evidence(&fingerprints, &run),
+        );
+
+        assert_eq!(resolution.status, "unassigned");
+        assert_eq!(resolution.track_id, None);
+        assert_eq!(resolution.confidence, Some(50));
+    }
+
+    #[test]
+    fn manual_assignment_learning_and_project_wide_transition_complete_acceptance_cycle() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE watch_tracks(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               active INTEGER NOT NULL
+             );
+             CREATE TABLE monitored_repositories(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL
+             );
+             CREATE TABLE workflow_runs(
+               run_id INTEGER PRIMARY KEY,
+               repository_id INTEGER NOT NULL,
+               workflow_name TEXT NOT NULL,
+               workflow_path TEXT,
+               resolution_status TEXT NOT NULL,
+               ignored INTEGER NOT NULL,
+               last_resolution_attempt_at TEXT
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               manual INTEGER NOT NULL,
+               assigned_at TEXT NOT NULL
+             );
+             CREATE TABLE run_evidence(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               run_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               signal_type TEXT NOT NULL,
+               score INTEGER NOT NULL,
+               value TEXT NOT NULL,
+               created_at TEXT NOT NULL
+             );
+             CREATE TABLE track_fingerprints(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               track_id INTEGER NOT NULL,
+               signal_type TEXT NOT NULL,
+               pattern TEXT NOT NULL,
+               repository_id INTEGER,
+               weight INTEGER NOT NULL,
+               learned_from_run_id INTEGER,
+               active INTEGER NOT NULL,
+               created_at TEXT NOT NULL,
+               UNIQUE(track_id,signal_type,pattern,repository_id)
+             );
+             CREATE TABLE project_workflow_rules(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               project_id INTEGER NOT NULL,
+               repository_id INTEGER,
+               workflow_name TEXT NOT NULL,
+               active INTEGER NOT NULL,
+               created_at TEXT NOT NULL
+             );
+             CREATE UNIQUE INDEX idx_test_project_workflow_rules_scope
+               ON project_workflow_rules(project_id,COALESCE(repository_id,0),workflow_name);
+
+             INSERT INTO watch_tracks(id,project_id,track_key,active)
+               VALUES(10,1,'ops',1),(20,2,'ops',1);
+             INSERT INTO monitored_repositories(id,project_id)
+               VALUES(100,1),(110,1),(200,2);
+             INSERT INTO workflow_runs(
+               run_id,repository_id,workflow_name,workflow_path,resolution_status,ignored,last_resolution_attempt_at
+             ) VALUES
+               (1000,100,'Shared CI','.github/workflows/shared.yml','unassigned',0,NULL),
+               (1001,100,'Shared CI','.github/workflows/shared.yml','unassigned',0,NULL),
+               (2000,200,'Shared CI','.github/workflows/shared.yml','unassigned',0,NULL);"
+        ).unwrap();
+
+        assign_run_in_conn(&conn, 1000, 10, "2026-09-24T01:00:00Z").unwrap();
+
+        let manual: (i64, i64, String) = conn.query_row(
+            "SELECT track_id,manual,source FROM run_assignments WHERE run_id=1000",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(manual, (10, 1, "manual".into()));
+
+        let learned = load_fingerprints(&conn, 1, 100).unwrap();
+        let learned_signals: HashMap<_, _> = learned
+            .iter()
+            .map(|item| (item.signal_type.as_str(), item.weight))
+            .collect();
+        assert_eq!(learned_signals.get("workflow_name"), Some(&50));
+        assert_eq!(learned_signals.get("workflow_path"), Some(&35));
+        assert!(load_fingerprints(&conn, 2, 200).unwrap().is_empty());
+
+        let next_run = GithubRun {
+            id: 1001,
+            workflow_id: 1,
+            name: "Shared CI".into(),
+            path: Some(".github/workflows/shared.yml".into()),
+            display_title: Some("Shared CI".into()),
+            event: "push".into(),
+            head_branch: Some("main".into()),
+            head_sha: "sha-1001".into(),
+            run_number: 2,
+            run_attempt: 1,
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            html_url: "https://github.com/example/repo/actions/runs/1001".into(),
+            created_at: "2026-09-24T01:10:00Z".into(),
+            run_started_at: Some("2026-09-24T01:10:01Z".into()),
+            updated_at: "2026-09-24T01:11:00Z".into(),
+            pull_requests: Vec::new(),
+        };
+        let inferred = resolve_evidence(
+            &[track(10, "ops")],
+            &HashMap::new(),
+            fingerprint_evidence(&learned, &next_run),
+        );
+        assert_eq!(inferred.status, "assigned");
+        assert_eq!(inferred.track_id, Some(10));
+        assert_eq!(inferred.confidence, Some(85));
+        assert_eq!(inferred.source.as_deref(), Some("inference"));
+
+        persist_resolution(&conn, 1001, &inferred, "2026-09-24T01:11:00Z").unwrap();
+        let automatic: (i64, i64, String) = conn.query_row(
+            "SELECT track_id,manual,source FROM run_assignments WHERE run_id=1001",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(automatic, (10, 0, "inference".into()));
+
+        assign_run_to_project_in_conn(
+            &conn,
+            1001,
+            1,
+            true,
+            "2026-09-24T01:12:00Z",
+        ).unwrap();
+
+        let rules = list_project_workflow_rules(&conn).unwrap();
+        assert!(project_rule_matches(&rules, 1, 100, "Shared CI"));
+        assert!(project_rule_matches(&rules, 1, 110, "Shared CI"));
+        assert!(!project_rule_matches(&rules, 2, 200, "Shared CI"));
+
+        let promoted_status: String = conn.query_row(
+            "SELECT resolution_status FROM workflow_runs WHERE run_id=1001",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(promoted_status, "project");
+        let promoted_assignment_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM run_assignments WHERE run_id=1001",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(promoted_assignment_count, 0);
+
+        let preserved_manual: (String, i64) = conn.query_row(
+            "SELECT wr.resolution_status,ra.manual
+             FROM workflow_runs wr
+             JOIN run_assignments ra ON ra.run_id=wr.run_id
+             WHERE wr.run_id=1000",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(preserved_manual, ("assigned".into(), 1));
+
+        let other_project_status: String = conn.query_row(
+            "SELECT resolution_status FROM workflow_runs WHERE run_id=2000",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(other_project_status, "unassigned");
     }
 
     #[test]
