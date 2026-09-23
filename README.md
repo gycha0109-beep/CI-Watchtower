@@ -24,6 +24,31 @@ Project는 제품/서비스 단위, Repository는 GitHub 저장소, Track은 병
 
 기존 데이터는 최초 v0.3 실행 시 자동 migration됩니다. MyeongHa/Saju 저장소가 존재하면 `명하` Project로 묶고 기존 Track/Repository를 해당 Project 아래로 승격합니다.
 
+## v0.3.1 BEJEWELY 기본 Registry
+
+v0.3.1부터 로컬 DB migration이 비주얼리 Project를 기본 등록합니다.
+
+```text
+Project: 비주얼리 (visualy)
+Repository: gycha0109-beep/K_beauty
+
+Project-wide CI
+├─ BEJEWELY Current Main Health
+└─ PIE Prospective Shadow
+
+Tracks
+├─ CI Watchtower / CI 운영 정리        → ops
+├─ 데이터 정렬 & AI                    → taxonomy-ai
+├─ 신규 상품 신뢰도 운영 파이프라인    → trust
+├─ Face Lab 연구                       → face-research
+├─ Premium Full Report                 → full-report
+└─ Mobile                              → mobile
+```
+
+기존 producer에서 사용된 `taxonomy&AI`는 Track Key 문자 규칙과 맞지 않으므로 Watchtower가 과거 evidence를 읽을 때 `taxonomy-ai`로 정규화합니다. 신규 producer는 `taxonomy-ai`를 사용합니다.
+
+K_beauty가 기존 Project 아래에 등록되어 있던 경우 Repository를 `비주얼리`로 이동하고, 다른 Project Track에 남아 있는 잘못된 Run 귀속을 정리합니다. 두 Project-wide Workflow의 기존 Run도 공용 CI로 즉시 재분류합니다.
+
 ## Project-wide CI
 
 명하 migration은 다음 Workflow 이름을 기본 공용 CI 규칙으로 등록합니다.

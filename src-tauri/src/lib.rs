@@ -447,6 +447,7 @@ fn init_db(path: &Path) -> Result<()> {
     migrate_legacy(&conn)?;
     migrate_project_scope(&conn)?;
     migrate_track_key_scope(&conn)?;
+    seed_bejewely_project_scope(&conn)?;
     Ok(())
 }
 
@@ -541,6 +542,130 @@ fn migrate_track_key_scope(conn: &Connection) -> Result<()> {
          CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_tracks_project_key ON watch_tracks(project_id,track_key);
          PRAGMA foreign_keys=ON;"
     )?;
+    Ok(())
+}
+
+fn seed_bejewely_project_scope(conn: &Connection) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT OR IGNORE INTO projects(name,project_key,active,created_at,updated_at)
+         VALUES('비주얼리','visualy',1,?,?)",
+        params![now, now],
+    )?;
+    let project_id: i64 = conn.query_row(
+        "SELECT id FROM projects WHERE project_key='visualy' LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "UPDATE projects SET name='비주얼리',active=1,updated_at=? WHERE id=?",
+        params![now, project_id],
+    )?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO monitored_repositories(
+           project_id,repo,enabled,running_count,queued_count,created_at,updated_at
+         ) VALUES(?,'gycha0109-beep/K_beauty',1,0,0,?,?)",
+        params![project_id, now, now],
+    )?;
+    conn.execute(
+        "UPDATE monitored_repositories SET project_id=?,updated_at=?
+         WHERE repo='gycha0109-beep/K_beauty'",
+        params![project_id, now],
+    )?;
+    let repository_id: i64 = conn.query_row(
+        "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty' LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+
+    for (name, track_key, long_ci_minutes) in [
+        ("CI Watchtower / CI 운영 정리", "ops", 8_i64),
+        ("데이터 정렬 & AI", "taxonomy-ai", 8_i64),
+        ("신규 상품 신뢰도 운영 파이프라인", "trust", 8_i64),
+        ("Face Lab 연구", "face-research", 8_i64),
+        ("Premium Full Report", "full-report", 8_i64),
+        ("Mobile", "mobile", 8_i64),
+    ] {
+        conn.execute(
+            "INSERT OR IGNORE INTO watch_tracks(
+               project_id,name,track_key,long_ci_minutes,active,created_at,updated_at
+             ) VALUES(?,?,?,?,1,?,?)",
+            params![project_id, name, track_key, long_ci_minutes, now, now],
+        )?;
+    }
+
+    for workflow_name in ["BEJEWELY Current Main Health", "PIE Prospective Shadow"] {
+        conn.execute(
+            "INSERT OR IGNORE INTO project_workflow_rules(
+               project_id,repository_id,workflow_name,active,created_at
+             ) VALUES(?,NULL,?,1,?)",
+            params![project_id, workflow_name, now],
+        )?;
+    }
+
+    conn.execute(
+        "DELETE FROM run_assignments
+         WHERE run_id IN (
+           SELECT wr.run_id
+           FROM workflow_runs wr
+           WHERE wr.repository_id=?
+         )
+         AND track_id IN (
+           SELECT id FROM watch_tracks WHERE project_id<>?
+         )",
+        params![repository_id, project_id],
+    )?;
+
+    conn.execute(
+        "DELETE FROM run_assignments
+         WHERE manual=0
+           AND run_id IN (
+             SELECT wr.run_id
+             FROM workflow_runs wr
+             JOIN project_workflow_rules pwr
+               ON pwr.project_id=?
+              AND pwr.active=1
+              AND pwr.workflow_name=wr.workflow_name
+              AND (pwr.repository_id IS NULL OR pwr.repository_id=wr.repository_id)
+             WHERE wr.repository_id=?
+           )",
+        params![project_id, repository_id],
+    )?;
+
+    conn.execute(
+        "UPDATE workflow_runs
+         SET resolution_status='project'
+         WHERE repository_id=?
+           AND ignored=0
+           AND EXISTS (
+             SELECT 1
+             FROM project_workflow_rules pwr
+             WHERE pwr.project_id=?
+               AND pwr.active=1
+               AND pwr.workflow_name=workflow_runs.workflow_name
+               AND (pwr.repository_id IS NULL OR pwr.repository_id=workflow_runs.repository_id)
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM run_assignments ra
+             WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+           )",
+        params![repository_id, project_id],
+    )?;
+
+    conn.execute(
+        "UPDATE workflow_runs
+         SET resolution_status='unassigned'
+         WHERE repository_id=?
+           AND ignored=0
+           AND resolution_status='assigned'
+           AND NOT EXISTS (
+             SELECT 1 FROM run_assignments ra WHERE ra.run_id=workflow_runs.run_id
+           )",
+        params![repository_id],
+    )?;
+
     Ok(())
 }
 
@@ -744,7 +869,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.0")
+        .user_agent("ci-watchtower/0.3.1")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -804,11 +929,18 @@ fn elapsed_seconds(
     start.map(|s| (end - s).num_seconds().max(0)).unwrap_or(0)
 }
 
+fn normalize_evidence_track_key(value: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "taxonomy&ai" => "taxonomy-ai".into(),
+        key => key.into(),
+    }
+}
+
 fn extract_marker(text: &str) -> Option<String> {
     let start = text.find("[WT:")? + 4;
     let tail = &text[start..];
     let end = tail.find(']')?;
-    let key = tail[..end].trim().to_lowercase();
+    let key = normalize_evidence_track_key(&tail[..end]);
     validate_track_key(&key).ok()?;
     Some(key)
 }
@@ -817,7 +949,7 @@ fn extract_track_trailer(text: &str) -> Option<String> {
     for line in text.lines() {
         let trimmed = line.trim();
         if let Some(value) = trimmed.strip_prefix("Watchtower-Track:") {
-            let key = value.trim().to_lowercase();
+            let key = normalize_evidence_track_key(value);
             if validate_track_key(&key).is_ok() {
                 return Some(key);
             }
@@ -827,10 +959,11 @@ fn extract_track_trailer(text: &str) -> Option<String> {
 }
 
 fn branch_has_key(branch: &str, key: &str) -> bool {
-    branch == key
-        || branch.split('/').any(|segment| segment == key)
-        || branch.starts_with(&format!("{key}/"))
-        || branch.ends_with(&format!("/{key}"))
+    let normalized_branch = branch.to_lowercase().replace("taxonomy&ai", "taxonomy-ai");
+    normalized_branch == key
+        || normalized_branch.split('/').any(|segment| segment == key)
+        || normalized_branch.starts_with(&format!("{key}/"))
+        || normalized_branch.ends_with(&format!("/{key}"))
 }
 
 fn load_settings(conn: &Connection) -> Result<Settings> {
@@ -2385,6 +2518,19 @@ mod tests {
             extract_marker("[WT:frontend-integration] Reader Grounding"),
             Some("frontend-integration".into())
         );
+    }
+
+    #[test]
+    fn normalizes_legacy_bejewely_taxonomy_key() {
+        assert_eq!(
+            extract_marker("[WT:taxonomy&AI] Product Query Quality"),
+            Some("taxonomy-ai".into())
+        );
+        assert_eq!(
+            extract_track_trailer("feat: x\n\nWatchtower-Track: taxonomy&AI"),
+            Some("taxonomy-ai".into())
+        );
+        assert!(branch_has_key("feat/taxonomy&AI/provider-quality", "taxonomy-ai"));
     }
 
     #[test]
