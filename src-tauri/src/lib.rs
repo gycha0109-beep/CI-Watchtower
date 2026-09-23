@@ -700,7 +700,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.2.0")
+        .user_agent("ci-watchtower/0.3.0")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -2097,11 +2097,18 @@ fn assign_run(
     let result = (|| -> Result<()> {
         let conn = db(&state)?;
         let now = Utc::now().to_rfc3339();
-        let workflow_name: String = conn.query_row(
-            "SELECT workflow_name FROM workflow_runs WHERE run_id=?",
-            params![run_id],
-            |row| row.get(0),
+        let (workflow_name, run_project_id, track_project_id): (String, i64, i64) = conn.query_row(
+            "SELECT wr.workflow_name,mr.project_id,wt.project_id
+             FROM workflow_runs wr
+             JOIN monitored_repositories mr ON mr.id=wr.repository_id
+             JOIN watch_tracks wt ON wt.id=?
+             WHERE wr.run_id=?",
+            params![track_id, run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
+        if run_project_id != track_project_id {
+            return Err(anyhow!("다른 프로젝트의 트랙에는 Run을 귀속할 수 없습니다."));
+        }
         conn.execute(
             "INSERT INTO run_assignments(run_id,track_id,confidence,source,reason,manual,assigned_at)
              VALUES(?,?,100,'manual','사용자 수동 귀속',1,?)
@@ -2291,10 +2298,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_dashboard,
             poll_now,
+            save_project,
+            delete_project,
+            save_project_workflow_rule,
+            delete_project_workflow_rule,
             save_track,
             delete_track,
             save_repository,
             delete_repository,
+            assign_run_to_project,
             assign_run,
             ignore_run,
             save_settings,
@@ -2313,6 +2325,7 @@ mod tests {
     fn track(id: i64, key: &str) -> Track {
         Track {
             id,
+            project_id: 1,
             name: key.into(),
             track_key: key.into(),
             long_ci_minutes: 8,
