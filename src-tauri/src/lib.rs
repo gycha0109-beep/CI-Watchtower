@@ -459,7 +459,7 @@ fn legacy_track_key(name: &str, id: i64) -> String {
     } else if lower.contains("운영") || lower.contains("ops") {
         "ops".into()
     } else if lower.contains("결제") || lower.contains("commerce") {
-        "commerce".into()
+        "product-commerce".into()
     } else if lower.contains("파이프라인") || lower.contains("reliability") {
         "pipeline-reliability".into()
     } else {
@@ -494,6 +494,176 @@ fn migrate_legacy(conn: &Connection) -> Result<()> {
             params![repo, now, now],
         )?;
     }
+    Ok(())
+}
+
+fn migrate_project_scope(conn: &Connection) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+
+    let has_myeongha: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM monitored_repositories WHERE repo LIKE '%/MyeongHa' OR repo LIKE '%/Saju')",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )?;
+
+    let project_count: i64 = conn.query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))?;
+    if project_count == 0 {
+        let (name, key) = if has_myeongha {
+            ("명하", "myeongha")
+        } else {
+            ("기본 프로젝트", "default")
+        };
+        conn.execute(
+            "INSERT INTO projects(name,project_key,active,created_at,updated_at) VALUES(?,?,1,?,?)",
+            params![name, key, now, now],
+        )?;
+    }
+
+    let default_project_id: i64 = if has_myeongha {
+        conn.query_row(
+            "SELECT id FROM projects WHERE project_key='myeongha' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .or_else(|_| {
+            conn.execute(
+                "INSERT INTO projects(name,project_key,active,created_at,updated_at) VALUES('명하','myeongha',1,?,?)",
+                params![now, now],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })?
+    } else {
+        conn.query_row("SELECT id FROM projects WHERE active=1 ORDER BY id LIMIT 1", [], |row| row.get(0))?
+    };
+
+    conn.execute(
+        "UPDATE monitored_repositories SET project_id=? WHERE project_id IS NULL",
+        params![default_project_id],
+    )?;
+    conn.execute(
+        "UPDATE watch_tracks SET project_id=? WHERE project_id IS NULL",
+        params![default_project_id],
+    )?;
+
+    let commerce_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM watch_tracks WHERE track_key='commerce' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let product_commerce_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM watch_tracks WHERE track_key='product-commerce')",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )?;
+    if let Some(id) = commerce_id {
+        if !product_commerce_exists {
+            conn.execute(
+                "UPDATE watch_tracks SET track_key='product-commerce',updated_at=? WHERE id=?",
+                params![now, id],
+            )?;
+        }
+    }
+
+    if has_myeongha {
+        let myeongha_project_id: i64 = conn.query_row(
+            "SELECT project_id FROM monitored_repositories WHERE repo LIKE '%/MyeongHa' OR repo LIKE '%/Saju' ORDER BY id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )?;
+        for workflow_name in ["CI", "Governance", "Web PR Domain Gates", "PIE Prospective Shadow"] {
+            conn.execute(
+                "INSERT OR IGNORE INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
+                 VALUES(?,NULL,?,1,?)",
+                params![myeongha_project_id, workflow_name, now],
+            )?;
+        }
+
+        if let Some(ops_id) = conn
+            .query_row(
+                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='ops' LIMIT 1",
+                params![myeongha_project_id],
+                |row| row.get(0),
+            )
+            .optional()?
+        {
+            conn.execute(
+                "INSERT OR IGNORE INTO track_aliases(alias_key,track_id,active,created_at) VALUES('privacy-recovery',?,1,?)",
+                params![ops_id, now],
+            )?;
+        }
+        if let Some(commerce_id) = conn
+            .query_row(
+                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='product-commerce' LIMIT 1",
+                params![myeongha_project_id],
+                |row| row.get(0),
+            )
+            .optional()?
+        {
+            conn.execute(
+                "INSERT OR IGNORE INTO track_aliases(alias_key,track_id,active,created_at) VALUES('commerce',?,1,?)",
+                params![commerce_id, now],
+            )?;
+        }
+    }
+
+    conn.execute(
+        "DELETE FROM run_assignments
+         WHERE manual=0 AND run_id IN (
+           SELECT wr.run_id
+           FROM workflow_runs wr
+           JOIN monitored_repositories mr ON mr.id=wr.repository_id
+           JOIN project_workflow_rules pwr
+             ON pwr.project_id=mr.project_id
+            AND pwr.active=1
+            AND pwr.workflow_name=wr.workflow_name
+            AND (pwr.repository_id IS NULL OR pwr.repository_id=wr.repository_id)
+         )",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE workflow_runs
+         SET resolution_status='project'
+         WHERE ignored=0
+           AND run_id IN (
+             SELECT wr.run_id
+             FROM workflow_runs wr
+             JOIN monitored_repositories mr ON mr.id=wr.repository_id
+             JOIN project_workflow_rules pwr
+               ON pwr.project_id=mr.project_id
+              AND pwr.active=1
+              AND pwr.workflow_name=wr.workflow_name
+              AND (pwr.repository_id IS NULL OR pwr.repository_id=wr.repository_id)
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM run_assignments ra WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+           )",
+        [],
+    )?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO run_assignments(run_id,track_id,confidence,source,reason,manual,assigned_at)
+         SELECT wr.run_id,ta.track_id,MAX(re.score),'track_alias',
+                '과거 Track Key alias 자동 귀속',0,?
+         FROM workflow_runs wr
+         JOIN run_evidence re ON re.run_id=wr.run_id
+         JOIN track_aliases ta ON ta.alias_key=re.track_key AND ta.active=1
+         LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
+         WHERE wr.ignored=0
+           AND wr.resolution_status IN ('unassigned','conflict')
+           AND re.score>=90
+           AND ra.run_id IS NULL
+         GROUP BY wr.run_id,ta.track_id",
+        params![now],
+    )?;
+    conn.execute(
+        "UPDATE workflow_runs SET resolution_status='assigned'
+         WHERE ignored=0 AND resolution_status IN ('unassigned','conflict')
+           AND EXISTS(SELECT 1 FROM run_assignments ra WHERE ra.run_id=workflow_runs.run_id)",
+        [],
+    )?;
+
     Ok(())
 }
 
