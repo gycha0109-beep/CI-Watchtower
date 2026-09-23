@@ -188,6 +188,12 @@ export interface ProducerContractStats {
   otherRuns: number;
 }
 
+export interface ProducerContractRun {
+  run: WorkflowRunSummary;
+  bucket: 'project' | 'run_name' | 'pr_marker' | 'commit_marker' | 'branch' | 'inference' | 'manual' | 'track_alias' | 'unassigned' | 'conflict' | 'other' | string;
+  contractCompliant: boolean;
+}
+
 export interface Dashboard {
   runningCount: number;
   queuedCount: number;
@@ -201,6 +207,7 @@ export interface Dashboard {
   projectWorkflowRules: ProjectWorkflowRule[];
   repositoryScopeStats: RepositoryScopeStats[];
   producerContractStats: ProducerContractStats[];
+  producerContractRuns: ProducerContractRun[];
   projectRuns: WorkflowRunSummary[];
   unassignedRuns: WorkflowRunSummary[];
 }
