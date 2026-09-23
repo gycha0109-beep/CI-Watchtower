@@ -30,8 +30,46 @@ struct AppState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct Project {
+    id: i64,
+    name: String,
+    project_key: String,
+    active: bool,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectInput {
+    id: Option<i64>,
+    name: String,
+    project_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectWorkflowRule {
+    id: i64,
+    project_id: i64,
+    repository_id: Option<i64>,
+    workflow_name: String,
+    active: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectWorkflowRuleInput {
+    project_id: i64,
+    repository_id: Option<i64>,
+    workflow_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Track {
     id: i64,
+    project_id: i64,
     name: String,
     track_key: String,
     long_ci_minutes: i64,
@@ -44,6 +82,7 @@ struct Track {
 #[serde(rename_all = "camelCase")]
 struct TrackInput {
     id: Option<i64>,
+    project_id: i64,
     name: String,
     track_key: String,
     long_ci_minutes: i64,
@@ -53,6 +92,7 @@ struct TrackInput {
 #[serde(rename_all = "camelCase")]
 struct MonitoredRepository {
     id: i64,
+    project_id: i64,
     repo: String,
     enabled: bool,
     running_count: i64,
@@ -65,6 +105,7 @@ struct MonitoredRepository {
 #[serde(rename_all = "camelCase")]
 struct RepositoryInput {
     id: Option<i64>,
+    project_id: i64,
     repo: String,
     enabled: bool,
 }
@@ -73,6 +114,8 @@ struct RepositoryInput {
 #[serde(rename_all = "camelCase")]
 struct WorkflowRunSummary {
     id: i64,
+    project_id: i64,
+    repository_id: i64,
     repository: String,
     workflow_name: String,
     display_title: String,
@@ -121,8 +164,11 @@ struct Dashboard {
     congestion_level: String,
     token_configured: bool,
     settings: Settings,
+    projects: Vec<Project>,
     repositories: Vec<MonitoredRepository>,
     tracks: Vec<DashboardTrack>,
+    project_workflow_rules: Vec<ProjectWorkflowRule>,
+    project_runs: Vec<WorkflowRunSummary>,
     unassigned_runs: Vec<WorkflowRunSummary>,
 }
 
@@ -209,6 +255,20 @@ fn db(state: &AppState) -> Result<Connection> {
     Connection::open(&state.db_path).context("open sqlite")
 }
 
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !names.iter().any(|name| name == column) {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 fn init_db(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -238,8 +298,18 @@ fn init_db(path: &Path) -> Result<()> {
           )
         );
 
+        CREATE TABLE IF NOT EXISTS projects (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          project_key TEXT NOT NULL UNIQUE,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS watch_tracks (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
           name TEXT NOT NULL,
           track_key TEXT NOT NULL UNIQUE,
           long_ci_minutes INTEGER NOT NULL CHECK(long_ci_minutes > 0),
@@ -251,6 +321,7 @@ fn init_db(path: &Path) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS monitored_repositories (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER REFERENCES projects(id) ON DELETE RESTRICT,
           repo TEXT NOT NULL UNIQUE,
           enabled INTEGER NOT NULL DEFAULT 1,
           running_count INTEGER NOT NULL DEFAULT 0,
@@ -328,6 +399,26 @@ fn init_db(path: &Path) -> Result<()> {
           UNIQUE(track_id, signal_type, pattern, repository_id)
         );
 
+        CREATE TABLE IF NOT EXISTS project_workflow_rules (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          repository_id INTEGER REFERENCES monitored_repositories(id) ON DELETE CASCADE,
+          workflow_name TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          UNIQUE(project_id, repository_id, workflow_name)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_project_workflow_rules_scope
+          ON project_workflow_rules(project_id, COALESCE(repository_id,0), workflow_name);
+
+        CREATE TABLE IF NOT EXISTS track_aliases (
+          alias_key TEXT PRIMARY KEY,
+          track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS notifications_v2 (
           track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
           run_id INTEGER NOT NULL,
@@ -347,11 +438,15 @@ fn init_db(path: &Path) -> Result<()> {
         );
         "#,
     )?;
+    ensure_column(&conn, "watch_tracks", "project_id", "INTEGER")?;
+    ensure_column(&conn, "monitored_repositories", "project_id", "INTEGER")?;
     conn.execute(
         "INSERT OR IGNORE INTO app_settings(id, queue_congestion_threshold, active_poll_seconds, idle_poll_seconds, auto_archive_completed, queue_congested) VALUES(1,?,?,?,?,0)",
         params![DEFAULT_QUEUE_THRESHOLD, DEFAULT_ACTIVE_POLL_SECONDS, DEFAULT_IDLE_POLL_SECONDS, 0],
     )?;
     migrate_legacy(&conn)?;
+    migrate_project_scope(&conn)?;
+    migrate_track_key_scope(&conn)?;
     Ok(())
 }
 
@@ -368,7 +463,7 @@ fn legacy_track_key(name: &str, id: i64) -> String {
     } else if lower.contains("운영") || lower.contains("ops") {
         "ops".into()
     } else if lower.contains("결제") || lower.contains("commerce") {
-        "commerce".into()
+        "product-commerce".into()
     } else if lower.contains("파이프라인") || lower.contains("reliability") {
         "pipeline-reliability".into()
     } else {
@@ -406,6 +501,219 @@ fn migrate_legacy(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_track_key_scope(conn: &Connection) -> Result<()> {
+    let table_sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='watch_tracks'",
+        [],
+        |row| row.get(0),
+    )?;
+    let legacy_global_unique = table_sql
+        .to_ascii_lowercase()
+        .replace('\n', " ")
+        .replace('\r', " ")
+        .replace('\t', " ")
+        .contains("track_key text not null unique");
+    if !legacy_global_unique {
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_tracks_project_key ON watch_tracks(project_id,track_key)",
+            [],
+        )?;
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         CREATE TABLE watch_tracks_v03 (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+           name TEXT NOT NULL,
+           track_key TEXT NOT NULL,
+           long_ci_minutes INTEGER NOT NULL,
+           active INTEGER NOT NULL DEFAULT 1,
+           created_at TEXT NOT NULL,
+           updated_at TEXT NOT NULL,
+           UNIQUE(project_id, track_key)
+         );
+         INSERT INTO watch_tracks_v03(id,project_id,name,track_key,long_ci_minutes,active,created_at,updated_at)
+           SELECT id,project_id,name,track_key,long_ci_minutes,active,created_at,updated_at FROM watch_tracks;
+         DROP TABLE watch_tracks;
+         ALTER TABLE watch_tracks_v03 RENAME TO watch_tracks;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_tracks_project_key ON watch_tracks(project_id,track_key);
+         PRAGMA foreign_keys=ON;"
+    )?;
+    Ok(())
+}
+
+fn migrate_project_scope(conn: &Connection) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+
+    let has_myeongha: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM monitored_repositories WHERE repo LIKE '%/MyeongHa' OR repo LIKE '%/Saju')",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )?;
+
+    let project_count: i64 = conn.query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))?;
+    if project_count == 0 {
+        let (name, key) = if has_myeongha {
+            ("명하", "myeongha")
+        } else {
+            ("기본 프로젝트", "default")
+        };
+        conn.execute(
+            "INSERT INTO projects(name,project_key,active,created_at,updated_at) VALUES(?,?,1,?,?)",
+            params![name, key, now, now],
+        )?;
+    }
+
+    let default_project_id: i64 = if has_myeongha {
+        conn.query_row(
+            "SELECT id FROM projects WHERE project_key='myeongha' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .or_else(|_| {
+            conn.execute(
+                "INSERT INTO projects(name,project_key,active,created_at,updated_at) VALUES('명하','myeongha',1,?,?)",
+                params![now, now],
+            )?;
+            Ok::<i64, rusqlite::Error>(conn.last_insert_rowid())
+        })?
+    } else {
+        conn.query_row("SELECT id FROM projects WHERE active=1 ORDER BY id LIMIT 1", [], |row| row.get(0))?
+    };
+
+    conn.execute(
+        "UPDATE monitored_repositories SET project_id=? WHERE project_id IS NULL",
+        params![default_project_id],
+    )?;
+    conn.execute(
+        "UPDATE watch_tracks SET project_id=? WHERE project_id IS NULL",
+        params![default_project_id],
+    )?;
+
+    let commerce_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM watch_tracks WHERE track_key='commerce' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let product_commerce_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM watch_tracks WHERE track_key='product-commerce')",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )?;
+    if let Some(id) = commerce_id {
+        if !product_commerce_exists {
+            conn.execute(
+                "UPDATE watch_tracks SET track_key='product-commerce',updated_at=? WHERE id=?",
+                params![now, id],
+            )?;
+        }
+    }
+
+    if has_myeongha {
+        let myeongha_project_id: i64 = conn.query_row(
+            "SELECT project_id FROM monitored_repositories WHERE repo LIKE '%/MyeongHa' OR repo LIKE '%/Saju' ORDER BY id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )?;
+        for workflow_name in ["CI", "Governance", "Web PR Domain Gates", "PIE Prospective Shadow"] {
+            conn.execute(
+                "INSERT OR IGNORE INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
+                 VALUES(?,NULL,?,1,?)",
+                params![myeongha_project_id, workflow_name, now],
+            )?;
+        }
+
+        if let Some(ops_id) = conn
+            .query_row(
+                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='ops' LIMIT 1",
+                params![myeongha_project_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            conn.execute(
+                "INSERT OR IGNORE INTO track_aliases(alias_key,track_id,active,created_at) VALUES('privacy-recovery',?,1,?)",
+                params![ops_id, now],
+            )?;
+        }
+        if let Some(commerce_id) = conn
+            .query_row(
+                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='product-commerce' LIMIT 1",
+                params![myeongha_project_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            conn.execute(
+                "INSERT OR IGNORE INTO track_aliases(alias_key,track_id,active,created_at) VALUES('commerce',?,1,?)",
+                params![commerce_id, now],
+            )?;
+        }
+    }
+
+    conn.execute(
+        "DELETE FROM run_assignments
+         WHERE manual=0 AND run_id IN (
+           SELECT wr.run_id
+           FROM workflow_runs wr
+           JOIN monitored_repositories mr ON mr.id=wr.repository_id
+           JOIN project_workflow_rules pwr
+             ON pwr.project_id=mr.project_id
+            AND pwr.active=1
+            AND pwr.workflow_name=wr.workflow_name
+            AND (pwr.repository_id IS NULL OR pwr.repository_id=wr.repository_id)
+         )",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE workflow_runs
+         SET resolution_status='project'
+         WHERE ignored=0
+           AND run_id IN (
+             SELECT wr.run_id
+             FROM workflow_runs wr
+             JOIN monitored_repositories mr ON mr.id=wr.repository_id
+             JOIN project_workflow_rules pwr
+               ON pwr.project_id=mr.project_id
+              AND pwr.active=1
+              AND pwr.workflow_name=wr.workflow_name
+              AND (pwr.repository_id IS NULL OR pwr.repository_id=wr.repository_id)
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM run_assignments ra WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+           )",
+        [],
+    )?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO run_assignments(run_id,track_id,confidence,source,reason,manual,assigned_at)
+         SELECT wr.run_id,ta.track_id,MAX(re.score),'track_alias',
+                '과거 Track Key alias 자동 귀속',0,?
+         FROM workflow_runs wr
+         JOIN run_evidence re ON re.run_id=wr.run_id
+         JOIN track_aliases ta ON ta.alias_key=re.track_key AND ta.active=1
+         LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
+         WHERE wr.ignored=0
+           AND wr.resolution_status IN ('unassigned','conflict')
+           AND re.score>=90
+           AND ra.run_id IS NULL
+         GROUP BY wr.run_id,ta.track_id",
+        params![now],
+    )?;
+    conn.execute(
+        "UPDATE workflow_runs SET resolution_status='assigned'
+         WHERE ignored=0 AND resolution_status IN ('unassigned','conflict')
+           AND EXISTS(SELECT 1 FROM run_assignments ra WHERE ra.run_id=workflow_runs.run_id)",
+        [],
+    )?;
+
+    Ok(())
+}
+
 fn keyring_entry() -> Result<Entry> {
     Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|e| anyhow!(e.to_string()))
 }
@@ -436,7 +744,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.2.0")
+        .user_agent("ci-watchtower/0.3.0")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -541,22 +849,43 @@ fn load_settings(conn: &Connection) -> Result<Settings> {
     .map_err(Into::into)
 }
 
+fn list_projects(conn: &Connection, active_only: bool) -> Result<Vec<Project>> {
+    let sql = if active_only {
+        "SELECT id,name,project_key,active,created_at,updated_at FROM projects WHERE active=1 ORDER BY id"
+    } else {
+        "SELECT id,name,project_key,active,created_at,updated_at FROM projects ORDER BY id"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(Project {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            project_key: row.get(2)?,
+            active: row.get::<_, i64>(3)? != 0,
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn list_tracks(conn: &Connection, active_only: bool) -> Result<Vec<Track>> {
     let sql = if active_only {
-        "SELECT id,name,track_key,long_ci_minutes,active,created_at,updated_at FROM watch_tracks WHERE active=1 ORDER BY id DESC"
+        "SELECT id,project_id,name,track_key,long_ci_minutes,active,created_at,updated_at FROM watch_tracks WHERE active=1 ORDER BY id DESC"
     } else {
-        "SELECT id,name,track_key,long_ci_minutes,active,created_at,updated_at FROM watch_tracks ORDER BY id DESC"
+        "SELECT id,project_id,name,track_key,long_ci_minutes,active,created_at,updated_at FROM watch_tracks ORDER BY id DESC"
     };
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
         Ok(Track {
             id: row.get(0)?,
-            name: row.get(1)?,
-            track_key: row.get(2)?,
-            long_ci_minutes: row.get(3)?,
-            active: row.get::<_, i64>(4)? != 0,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            project_id: row.get(1)?,
+            name: row.get(2)?,
+            track_key: row.get(3)?,
+            long_ci_minutes: row.get(4)?,
+            active: row.get::<_, i64>(5)? != 0,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -564,43 +893,63 @@ fn list_tracks(conn: &Connection, active_only: bool) -> Result<Vec<Track>> {
 
 fn list_repositories(conn: &Connection, enabled_only: bool) -> Result<Vec<MonitoredRepository>> {
     let sql = if enabled_only {
-        "SELECT id,repo,enabled,running_count,queued_count,last_polled_at,last_error FROM monitored_repositories WHERE enabled=1 ORDER BY repo"
+        "SELECT id,project_id,repo,enabled,running_count,queued_count,last_polled_at,last_error FROM monitored_repositories WHERE enabled=1 ORDER BY repo"
     } else {
-        "SELECT id,repo,enabled,running_count,queued_count,last_polled_at,last_error FROM monitored_repositories ORDER BY repo"
+        "SELECT id,project_id,repo,enabled,running_count,queued_count,last_polled_at,last_error FROM monitored_repositories ORDER BY repo"
     };
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
         Ok(MonitoredRepository {
             id: row.get(0)?,
-            repo: row.get(1)?,
-            enabled: row.get::<_, i64>(2)? != 0,
-            running_count: row.get(3)?,
-            queued_count: row.get(4)?,
-            last_polled_at: row.get(5)?,
-            last_error: row.get(6)?,
+            project_id: row.get(1)?,
+            repo: row.get(2)?,
+            enabled: row.get::<_, i64>(3)? != 0,
+            running_count: row.get(4)?,
+            queued_count: row.get(5)?,
+            last_polled_at: row.get(6)?,
+            last_error: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn list_project_workflow_rules(conn: &Connection) -> Result<Vec<ProjectWorkflowRule>> {
+    let mut stmt = conn.prepare(
+        "SELECT id,project_id,repository_id,workflow_name,active
+         FROM project_workflow_rules WHERE active=1 ORDER BY project_id,workflow_name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ProjectWorkflowRule {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            repository_id: row.get(2)?,
+            workflow_name: row.get(3)?,
+            active: row.get::<_, i64>(4)? != 0,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn run_summary_from_row(row: &rusqlite::Row<'_>, now: DateTime<Utc>) -> rusqlite::Result<WorkflowRunSummary> {
-    let status: String = row.get(8)?;
-    let created_at: String = row.get(12)?;
-    let run_started_at: Option<String> = row.get(13)?;
-    let updated_at: String = row.get(14)?;
+    let status: String = row.get(10)?;
+    let created_at: String = row.get(14)?;
+    let run_started_at: Option<String> = row.get(15)?;
+    let updated_at: String = row.get(16)?;
     Ok(WorkflowRunSummary {
         id: row.get(0)?,
-        repository: row.get(1)?,
-        workflow_name: row.get(2)?,
-        display_title: row.get(3)?,
-        event: row.get(4)?,
-        head_branch: row.get(5)?,
-        head_sha: row.get(6)?,
-        run_attempt: row.get(7)?,
+        project_id: row.get(1)?,
+        repository_id: row.get(2)?,
+        repository: row.get(3)?,
+        workflow_name: row.get(4)?,
+        display_title: row.get(5)?,
+        event: row.get(6)?,
+        head_branch: row.get(7)?,
+        head_sha: row.get(8)?,
+        run_attempt: row.get(9)?,
         status: status.clone(),
-        conclusion: row.get(9)?,
-        html_url: row.get(10)?,
-        resolution_status: row.get(11)?,
+        conclusion: row.get(11)?,
+        html_url: row.get(12)?,
+        resolution_status: row.get(13)?,
         created_at: created_at.clone(),
         run_started_at: run_started_at.clone(),
         updated_at: updated_at.clone(),
@@ -611,16 +960,16 @@ fn run_summary_from_row(row: &rusqlite::Row<'_>, now: DateTime<Utc>) -> rusqlite
             &updated_at,
             now,
         ),
-        attribution_source: row.get(15)?,
-        attribution_reason: row.get(16)?,
-        confidence: row.get(17)?,
+        attribution_source: row.get(17)?,
+        attribution_reason: row.get(18)?,
+        confidence: row.get(19)?,
     })
 }
 
 fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<WorkflowRunSummary>> {
     let now = Utc::now();
     let mut stmt = conn.prepare(
-        "SELECT wr.run_id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,ra.source,ra.reason,ra.confidence
+        "SELECT wr.run_id,mr.project_id,mr.id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,ra.source,ra.reason,ra.confidence
          FROM workflow_runs wr
          JOIN monitored_repositories mr ON mr.id=wr.repository_id
          JOIN run_assignments ra ON ra.run_id=wr.run_id
@@ -631,10 +980,26 @@ fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<Wo
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+fn project_runs(conn: &Connection, limit: i64) -> Result<Vec<WorkflowRunSummary>> {
+    let now = Utc::now();
+    let mut stmt = conn.prepare(
+        "SELECT wr.run_id,mr.project_id,mr.id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,
+                'project_workflow' AS attribution_source,
+                '프로젝트 공용 CI 규칙' AS attribution_reason,
+                100 AS confidence
+         FROM workflow_runs wr
+         JOIN monitored_repositories mr ON mr.id=wr.repository_id
+         WHERE wr.resolution_status='project' AND wr.ignored=0
+         ORDER BY wr.created_at DESC LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![limit], |row| run_summary_from_row(row, now))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn unassigned_runs(conn: &Connection, limit: i64) -> Result<Vec<WorkflowRunSummary>> {
     let now = Utc::now();
     let mut stmt = conn.prepare(
-        "SELECT wr.run_id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,
+        "SELECT wr.run_id,mr.project_id,mr.id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,
                 CASE WHEN wr.resolution_status='conflict' THEN 'explicit_conflict'
                      ELSE (SELECT re.signal_type FROM run_evidence re WHERE re.run_id=wr.run_id ORDER BY re.score DESC LIMIT 1) END,
                 (SELECT 'Track Key 후보: ' || group_concat(track_key, ', ') FROM (SELECT DISTINCT re.track_key track_key FROM run_evidence re WHERE re.run_id=wr.run_id AND re.score>=90)),
@@ -642,7 +1007,7 @@ fn unassigned_runs(conn: &Connection, limit: i64) -> Result<Vec<WorkflowRunSumma
          FROM workflow_runs wr
          JOIN monitored_repositories mr ON mr.id=wr.repository_id
          LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
-         WHERE ra.run_id IS NULL AND wr.ignored=0
+         WHERE ra.run_id IS NULL AND wr.ignored=0 AND wr.resolution_status IN ('unassigned','conflict')
          ORDER BY CASE WHEN wr.status='completed' THEN 1 ELSE 0 END, wr.created_at DESC LIMIT ?",
     )?;
     let rows = stmt.query_map(params![limit], |row| run_summary_from_row(row, now))?;
@@ -694,8 +1059,10 @@ fn average_duration(conn: &Connection, track_id: i64) -> Result<Option<i64>> {
 fn build_dashboard(state: &AppState) -> Result<Dashboard> {
     let conn = db(state)?;
     let settings = load_settings(&conn)?;
+    let projects = list_projects(&conn, true)?;
     let repositories = list_repositories(&conn, false)?;
     let tracks = list_tracks(&conn, true)?;
+    let project_workflow_rules = list_project_workflow_rules(&conn)?;
     let mut dashboard_tracks = Vec::with_capacity(tracks.len());
     for track in tracks {
         let runs = runs_for_track(&conn, track.id, 30)?;
@@ -716,9 +1083,15 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
     }
     let running_count: i64 = repositories.iter().filter(|r| r.enabled).map(|r| r.running_count).sum();
     let queued_count: i64 = repositories.iter().filter(|r| r.enabled).map(|r| r.queued_count).sum();
-    let unassigned_runs = unassigned_runs(&conn, 30)?;
+    let project_runs = project_runs(&conn, 200)?;
+    let unassigned_runs = unassigned_runs(&conn, 200)?;
     let unassigned_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM workflow_runs wr LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id WHERE ra.run_id IS NULL AND wr.ignored=0",
+        "SELECT COUNT(*)
+         FROM workflow_runs wr
+         LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
+         WHERE ra.run_id IS NULL
+           AND wr.ignored=0
+           AND wr.resolution_status IN ('unassigned','conflict')",
         [],
         |row| row.get(0),
     )?;
@@ -736,8 +1109,11 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         congestion_level: congestion_level.into(),
         token_configured: token_configured(),
         settings,
+        projects,
         repositories,
         tracks: dashboard_tracks,
+        project_workflow_rules,
+        project_runs,
         unassigned_runs,
     })
 }
@@ -801,6 +1177,33 @@ async fn github_prs_for_run(
     pulls
 }
 
+fn load_project_aliases(conn: &Connection, project_id: i64) -> Result<HashMap<String, String>> {
+    let mut stmt = conn.prepare(
+        "SELECT ta.alias_key,wt.track_key
+         FROM track_aliases ta
+         JOIN watch_tracks wt ON wt.id=ta.track_id
+         WHERE ta.active=1 AND wt.active=1 AND wt.project_id=?",
+    )?;
+    let rows = stmt.query_map(params![project_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+}
+
+fn project_rule_matches(
+    rules: &[ProjectWorkflowRule],
+    project_id: i64,
+    repository_id: i64,
+    workflow_name: &str,
+) -> bool {
+    rules.iter().any(|rule| {
+        rule.active
+            && rule.project_id == project_id
+            && rule.workflow_name == workflow_name
+            && (rule.repository_id.is_none() || rule.repository_id == Some(repository_id))
+    })
+}
+
 fn load_fingerprints(conn: &Connection, repository_id: i64) -> Result<Vec<Fingerprint>> {
     let mut stmt = conn.prepare(
         "SELECT wt.track_key,tf.signal_type,tf.pattern,tf.weight
@@ -846,11 +1249,26 @@ async fn resolve_run(
     client: &Client,
     repo: &str,
     run: &GithubRun,
+    project_id: i64,
+    repository_id: i64,
     tracks: &[Track],
+    project_rules: &[ProjectWorkflowRule],
+    aliases: &HashMap<String, String>,
     fingerprints: &[Fingerprint],
     commit_cache: &mut HashMap<String, Option<String>>,
     pr_cache: &mut HashMap<String, Vec<GithubPull>>,
 ) -> Result<Resolution> {
+    if project_rule_matches(project_rules, project_id, repository_id, &run.name) {
+        return Ok(Resolution {
+            status: "project".into(),
+            track_id: None,
+            confidence: Some(100),
+            source: Some("project_workflow".into()),
+            reason: Some(format!("프로젝트 공용 CI: {}", run.name)),
+            evidence: Vec::new(),
+        });
+    }
+
     let mut evidence = Vec::new();
 
     if let Some(key) = run.display_title.as_deref().and_then(extract_marker) {
@@ -900,12 +1318,33 @@ async fn resolve_run(
 
     evidence.extend(fingerprint_evidence(fingerprints, run));
 
+    let alias_evidence: Vec<Evidence> = evidence
+        .iter()
+        .filter_map(|item| {
+            aliases.get(&item.track_key).map(|canonical| Evidence {
+                track_key: canonical.clone(),
+                signal_type: format!("{}_alias", item.signal_type),
+                score: item.score,
+                value: format!("{} → {}", item.track_key, canonical),
+            })
+        })
+        .collect();
+    evidence.extend(alias_evidence);
+
     let known: HashMap<&str, i64> = tracks.iter().map(|t| (t.track_key.as_str(), t.id)).collect();
-    let explicit_keys: HashSet<String> = evidence
+    let max_explicit_score = evidence
         .iter()
         .filter(|e| e.score >= 90 && known.contains_key(e.track_key.as_str()))
-        .map(|e| e.track_key.clone())
-        .collect();
+        .map(|e| e.score)
+        .max();
+    let explicit_keys: HashSet<String> = match max_explicit_score {
+        Some(max_score) => evidence
+            .iter()
+            .filter(|e| e.score == max_score && known.contains_key(e.track_key.as_str()))
+            .map(|e| e.track_key.clone())
+            .collect(),
+        None => HashSet::new(),
+    };
 
     if explicit_keys.len() > 1 {
         return Ok(Resolution {
@@ -914,7 +1353,7 @@ async fn resolve_run(
             confidence: None,
             source: Some("explicit_conflict".into()),
             reason: Some(format!(
-                "명시적 Track Key가 충돌합니다: {}",
+                "동일 우선순위 Track Key가 충돌합니다: {}",
                 explicit_keys.into_iter().collect::<Vec<_>>().join(", ")
             )),
             evidence,
@@ -961,7 +1400,7 @@ async fn resolve_run(
 
     let unknown_explicit: Vec<String> = evidence
         .iter()
-        .filter(|e| e.score >= 90 && !known.contains_key(e.track_key.as_str()))
+        .filter(|e| e.score >= 90 && !known.contains_key(e.track_key.as_str()) && !aliases.contains_key(&e.track_key))
         .map(|e| e.track_key.clone())
         .collect();
     let reason = if unknown_explicit.is_empty() {
@@ -1075,6 +1514,41 @@ fn upsert_run(conn: &Connection, repository_id: i64, run: &GithubRun, now: &str)
     Ok(())
 }
 
+fn load_stored_unresolved_runs(
+    conn: &Connection,
+    repository_id: i64,
+    limit: i64,
+) -> Result<Vec<GithubRun>> {
+    let mut stmt = conn.prepare(
+        "SELECT run_id,workflow_id,workflow_name,workflow_path,display_title,event,head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,created_at,run_started_at,updated_at
+         FROM workflow_runs
+         WHERE repository_id=? AND ignored=0 AND resolution_status IN ('unassigned','conflict')
+         ORDER BY created_at DESC LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![repository_id, limit], |row| {
+        Ok(GithubRun {
+            id: row.get(0)?,
+            workflow_id: row.get(1)?,
+            name: row.get(2)?,
+            path: row.get(3)?,
+            display_title: row.get(4)?,
+            event: row.get(5)?,
+            head_branch: row.get(6)?,
+            head_sha: row.get(7)?,
+            run_number: row.get(8)?,
+            run_attempt: row.get(9)?,
+            status: row.get(10)?,
+            conclusion: row.get(11)?,
+            html_url: row.get(12)?,
+            created_at: row.get(13)?,
+            run_started_at: row.get(14)?,
+            updated_at: row.get(15)?,
+            pull_requests: Vec::new(),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn mark_notified(
     conn: &Connection,
     track_id: i64,
@@ -1158,6 +1632,10 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
         let conn = db(state)?;
         list_tracks(&conn, true)?
     };
+    let project_rules = {
+        let conn = db(state)?;
+        list_project_workflow_rules(&conn)?
+    };
     let now = Utc::now();
     let now_str = now.to_rfc3339();
 
@@ -1191,8 +1669,18 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     let conn = db(state)?;
                     load_fingerprints(&conn, repository.id)?
                 };
+                let aliases = {
+                    let conn = db(state)?;
+                    load_project_aliases(&conn, repository.project_id)?
+                };
+                let repository_tracks: Vec<Track> = tracks
+                    .iter()
+                    .filter(|track| track.project_id == repository.project_id)
+                    .cloned()
+                    .collect();
                 let mut commit_cache = HashMap::new();
                 let mut pr_cache = HashMap::new();
+
                 for run in &runs {
                     let should_resolve = {
                         let conn = db(state)?;
@@ -1212,7 +1700,41 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &client,
                         &repository.repo,
                         run,
-                        &tracks,
+                        repository.project_id,
+                        repository.id,
+                        &repository_tracks,
+                        &project_rules,
+                        &aliases,
+                        &fingerprints,
+                        &mut commit_cache,
+                        &mut pr_cache,
+                    )
+                    .await?;
+                    let conn = db(state)?;
+                    persist_resolution(&conn, run.id, &resolution, &now_str)?;
+                }
+
+                // Old completed runs can fall out of GitHub's recent-100 window while still
+                // remaining unresolved locally. Re-evaluate a bounded batch each poll so
+                // PR/commit markers and newly-added project rules eventually backfill them.
+                let recent_ids: HashSet<i64> = runs.iter().map(|run| run.id).collect();
+                let stored_unresolved = {
+                    let conn = db(state)?;
+                    load_stored_unresolved_runs(&conn, repository.id, 12)?
+                };
+                for run in stored_unresolved {
+                    if recent_ids.contains(&run.id) {
+                        continue;
+                    }
+                    let resolution = resolve_run(
+                        &client,
+                        &repository.repo,
+                        &run,
+                        repository.project_id,
+                        repository.id,
+                        &repository_tracks,
+                        &project_rules,
+                        &aliases,
                         &fingerprints,
                         &mut commit_cache,
                         &mut pr_cache,
@@ -1269,6 +1791,174 @@ async fn poll_now(app: AppHandle) -> std::result::Result<Dashboard, String> {
 }
 
 #[tauri::command]
+fn save_project(input: ProjectInput, state: State<'_, AppState>) -> std::result::Result<i64, String> {
+    let result = (|| -> Result<i64> {
+        let name = input.name.trim();
+        let project_key = input.project_key.trim().to_lowercase();
+        if name.is_empty() {
+            return Err(anyhow!("프로젝트 이름을 입력하십시오."));
+        }
+        validate_track_key(&project_key)?;
+        let conn = db(&state)?;
+        let now = Utc::now().to_rfc3339();
+        let id = if let Some(id) = input.id {
+            conn.execute(
+                "UPDATE projects SET name=?,project_key=?,active=1,updated_at=? WHERE id=?",
+                params![name, project_key, now, id],
+            )?;
+            if conn.changes() == 0 {
+                return Err(anyhow!("수정할 프로젝트를 찾지 못했습니다."));
+            }
+            id
+        } else {
+            conn.execute(
+                "INSERT INTO projects(name,project_key,active,created_at,updated_at) VALUES(?,?,1,?,?)",
+                params![name, project_key, now, now],
+            )?;
+            conn.last_insert_rowid()
+        };
+        Ok(id)
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_project(id: i64, state: State<'_, AppState>) -> std::result::Result<(), String> {
+    let result = (|| -> Result<()> {
+        let conn = db(&state)?;
+        let repository_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM monitored_repositories WHERE project_id=?",
+            params![id],
+            |row| row.get(0),
+        )?;
+        let track_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM watch_tracks WHERE project_id=?",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if repository_count > 0 || track_count > 0 {
+            return Err(anyhow!("프로젝트에 저장소 또는 트랙이 남아 있어 삭제할 수 없습니다."));
+        }
+        let deleted = conn.execute("DELETE FROM projects WHERE id=?", params![id])?;
+        if deleted == 0 {
+            return Err(anyhow!("삭제할 프로젝트를 찾지 못했습니다."));
+        }
+        Ok(())
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_project_workflow_rule(
+    input: ProjectWorkflowRuleInput,
+    state: State<'_, AppState>,
+) -> std::result::Result<i64, String> {
+    let result = (|| -> Result<i64> {
+        let workflow_name = input.workflow_name.trim();
+        if workflow_name.is_empty() {
+            return Err(anyhow!("Workflow 이름을 입력하십시오."));
+        }
+        let conn = db(&state)?;
+        if let Some(repository_id) = input.repository_id {
+            let belongs: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM monitored_repositories WHERE id=? AND project_id=?)",
+                params![repository_id, input.project_id],
+                |row| Ok(row.get::<_, i64>(0)? != 0),
+            )?;
+            if !belongs {
+                return Err(anyhow!("저장소가 선택한 프로젝트에 속하지 않습니다."));
+            }
+        }
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR IGNORE INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
+             VALUES(?,?,?,1,?)",
+            params![input.project_id, input.repository_id, workflow_name, now],
+        )?;
+        conn.execute(
+            "UPDATE project_workflow_rules SET active=1
+             WHERE project_id=? AND workflow_name=?
+               AND ((repository_id IS NULL AND ? IS NULL) OR repository_id=?)",
+            params![input.project_id, workflow_name, input.repository_id, input.repository_id],
+        )?;
+        let id: i64 = conn.query_row(
+            "SELECT id FROM project_workflow_rules
+             WHERE project_id=? AND workflow_name=? AND ((repository_id IS NULL AND ? IS NULL) OR repository_id=?)",
+            params![input.project_id, workflow_name, input.repository_id, input.repository_id],
+            |row| row.get(0),
+        )?;
+
+        conn.execute(
+            "DELETE FROM run_assignments
+             WHERE manual=0 AND run_id IN (
+               SELECT wr.run_id FROM workflow_runs wr
+               JOIN monitored_repositories mr ON mr.id=wr.repository_id
+               WHERE mr.project_id=? AND wr.workflow_name=?
+                 AND (? IS NULL OR wr.repository_id=?)
+             )",
+            params![input.project_id, workflow_name, input.repository_id, input.repository_id],
+        )?;
+        conn.execute(
+            "UPDATE workflow_runs
+             SET resolution_status='project'
+             WHERE ignored=0
+               AND workflow_name=?
+               AND repository_id IN (
+                 SELECT id FROM monitored_repositories
+                 WHERE project_id=? AND (? IS NULL OR id=?)
+               )
+               AND NOT EXISTS(
+                 SELECT 1 FROM run_assignments ra
+                 WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+               )",
+            params![workflow_name, input.project_id, input.repository_id, input.repository_id],
+        )?;
+        Ok(id)
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_project_workflow_rule(id: i64, state: State<'_, AppState>) -> std::result::Result<(), String> {
+    let result = (|| -> Result<()> {
+        let conn = db(&state)?;
+        let rule: Option<(i64, Option<i64>, String)> = conn
+            .query_row(
+                "SELECT project_id,repository_id,workflow_name FROM project_workflow_rules WHERE id=?",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((project_id, repository_id, workflow_name)) = rule else {
+            return Err(anyhow!("삭제할 공용 CI 규칙을 찾지 못했습니다."));
+        };
+        conn.execute("DELETE FROM project_workflow_rules WHERE id=?", params![id])?;
+        conn.execute(
+            "UPDATE workflow_runs
+             SET resolution_status='unassigned'
+             WHERE ignored=0
+               AND resolution_status='project'
+               AND workflow_name=?
+               AND repository_id IN (
+                 SELECT mr.id FROM monitored_repositories mr
+                 WHERE mr.project_id=? AND (? IS NULL OR mr.id=?)
+               )
+               AND NOT EXISTS(
+                 SELECT 1 FROM project_workflow_rules pwr
+                 JOIN monitored_repositories mr2 ON mr2.id=workflow_runs.repository_id
+                 WHERE pwr.active=1
+                   AND pwr.project_id=mr2.project_id
+                   AND pwr.workflow_name=workflow_runs.workflow_name
+                   AND (pwr.repository_id IS NULL OR pwr.repository_id=workflow_runs.repository_id)
+               )",
+            params![workflow_name, project_id, repository_id, repository_id],
+        )?;
+        Ok(())
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn save_track(input: TrackInput, state: State<'_, AppState>) -> std::result::Result<i64, String> {
     let result = (|| -> Result<i64> {
         let name = input.name.trim();
@@ -1281,11 +1971,19 @@ fn save_track(input: TrackInput, state: State<'_, AppState>) -> std::result::Res
             return Err(anyhow!("장기 CI 기준시간은 1~10080분 사이로 입력하십시오."));
         }
         let conn = db(&state)?;
+        let project_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1)",
+            params![input.project_id],
+            |row| Ok(row.get::<_, i64>(0)? != 0),
+        )?;
+        if !project_exists {
+            return Err(anyhow!("프로젝트를 찾지 못했습니다."));
+        }
         let now = Utc::now().to_rfc3339();
         let id = if let Some(id) = input.id {
             conn.execute(
-                "UPDATE watch_tracks SET name=?,track_key=?,long_ci_minutes=?,active=1,updated_at=? WHERE id=?",
-                params![name, track_key, input.long_ci_minutes, now, id],
+                "UPDATE watch_tracks SET project_id=?,name=?,track_key=?,long_ci_minutes=?,active=1,updated_at=? WHERE id=?",
+                params![input.project_id, name, track_key, input.long_ci_minutes, now, id],
             )?;
             if conn.changes() == 0 {
                 return Err(anyhow!("수정할 트랙을 찾지 못했습니다."));
@@ -1293,8 +1991,8 @@ fn save_track(input: TrackInput, state: State<'_, AppState>) -> std::result::Res
             id
         } else {
             conn.execute(
-                "INSERT INTO watch_tracks(name,track_key,long_ci_minutes,active,created_at,updated_at) VALUES(?,?,?,1,?,?)",
-                params![name, track_key, input.long_ci_minutes, now, now],
+                "INSERT INTO watch_tracks(project_id,name,track_key,long_ci_minutes,active,created_at,updated_at) VALUES(?,?,?,?,1,?,?)",
+                params![input.project_id, name, track_key, input.long_ci_minutes, now, now],
             )?;
             conn.last_insert_rowid()
         };
@@ -1333,11 +2031,19 @@ fn save_repository(
         let repo = input.repo.trim();
         validate_repo(repo)?;
         let conn = db(&state)?;
+        let project_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1)",
+            params![input.project_id],
+            |row| Ok(row.get::<_, i64>(0)? != 0),
+        )?;
+        if !project_exists {
+            return Err(anyhow!("프로젝트를 찾지 못했습니다."));
+        }
         let now = Utc::now().to_rfc3339();
         let id = if let Some(id) = input.id {
             conn.execute(
-                "UPDATE monitored_repositories SET repo=?,enabled=?,updated_at=? WHERE id=?",
-                params![repo, if input.enabled { 1 } else { 0 }, now, id],
+                "UPDATE monitored_repositories SET project_id=?,repo=?,enabled=?,updated_at=? WHERE id=?",
+                params![input.project_id, repo, if input.enabled { 1 } else { 0 }, now, id],
             )?;
             if conn.changes() == 0 {
                 return Err(anyhow!("수정할 저장소를 찾지 못했습니다."));
@@ -1345,8 +2051,8 @@ fn save_repository(
             id
         } else {
             conn.execute(
-                "INSERT INTO monitored_repositories(repo,enabled,created_at,updated_at) VALUES(?,?,?,?)",
-                params![repo, if input.enabled { 1 } else { 0 }, now, now],
+                "INSERT INTO monitored_repositories(project_id,repo,enabled,created_at,updated_at) VALUES(?,?,?,?,?)",
+                params![input.project_id, repo, if input.enabled { 1 } else { 0 }, now, now],
             )?;
             conn.last_insert_rowid()
         };
@@ -1364,6 +2070,69 @@ fn delete_repository(id: i64, state: State<'_, AppState>) -> std::result::Result
 }
 
 #[tauri::command]
+fn assign_run_to_project(
+    run_id: i64,
+    project_id: i64,
+    learn_rule: bool,
+    state: State<'_, AppState>,
+) -> std::result::Result<(), String> {
+    let result = (|| -> Result<()> {
+        let conn = db(&state)?;
+        let (repository_id, repository_project_id, workflow_name): (i64, i64, String) = conn.query_row(
+            "SELECT wr.repository_id,mr.project_id,wr.workflow_name
+             FROM workflow_runs wr JOIN monitored_repositories mr ON mr.id=wr.repository_id
+             WHERE wr.run_id=?",
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if repository_project_id != project_id {
+            return Err(anyhow!("Run과 프로젝트가 일치하지 않습니다."));
+        }
+        conn.execute("DELETE FROM run_assignments WHERE run_id=?", params![run_id])?;
+        conn.execute(
+            "UPDATE workflow_runs SET resolution_status='project',ignored=0 WHERE run_id=?",
+            params![run_id],
+        )?;
+        if learn_rule {
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT OR IGNORE INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
+                 VALUES(?,NULL,?,1,?)",
+                params![project_id, workflow_name, now],
+            )?;
+            conn.execute(
+                "UPDATE project_workflow_rules SET active=1
+                 WHERE project_id=? AND repository_id IS NULL AND workflow_name=?",
+                params![project_id, workflow_name],
+            )?;
+            conn.execute(
+                "DELETE FROM run_assignments
+                 WHERE manual=0 AND run_id IN (
+                   SELECT wr.run_id FROM workflow_runs wr
+                   JOIN monitored_repositories mr ON mr.id=wr.repository_id
+                   WHERE mr.project_id=? AND wr.workflow_name=?
+                 )",
+                params![project_id, workflow_name],
+            )?;
+            conn.execute(
+                "UPDATE workflow_runs
+                 SET resolution_status='project'
+                 WHERE ignored=0 AND workflow_name=?
+                   AND repository_id IN (SELECT id FROM monitored_repositories WHERE project_id=?)
+                   AND NOT EXISTS(
+                     SELECT 1 FROM run_assignments ra
+                     WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+                   )",
+                params![workflow_name, project_id],
+            )?;
+        }
+        let _ = repository_id;
+        Ok(())
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn assign_run(
     run_id: i64,
     track_id: i64,
@@ -1372,11 +2141,18 @@ fn assign_run(
     let result = (|| -> Result<()> {
         let conn = db(&state)?;
         let now = Utc::now().to_rfc3339();
-        let workflow_name: String = conn.query_row(
-            "SELECT workflow_name FROM workflow_runs WHERE run_id=?",
-            params![run_id],
-            |row| row.get(0),
+        let (workflow_name, run_project_id, track_project_id): (String, i64, i64) = conn.query_row(
+            "SELECT wr.workflow_name,mr.project_id,wt.project_id
+             FROM workflow_runs wr
+             JOIN monitored_repositories mr ON mr.id=wr.repository_id
+             JOIN watch_tracks wt ON wt.id=?
+             WHERE wr.run_id=?",
+            params![track_id, run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
+        if run_project_id != track_project_id {
+            return Err(anyhow!("다른 프로젝트의 트랙에는 Run을 귀속할 수 없습니다."));
+        }
         conn.execute(
             "INSERT INTO run_assignments(run_id,track_id,confidence,source,reason,manual,assigned_at)
              VALUES(?,?,100,'manual','사용자 수동 귀속',1,?)
@@ -1566,10 +2342,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_dashboard,
             poll_now,
+            save_project,
+            delete_project,
+            save_project_workflow_rule,
+            delete_project_workflow_rule,
             save_track,
             delete_track,
             save_repository,
             delete_repository,
+            assign_run_to_project,
             assign_run,
             ignore_run,
             save_settings,
@@ -1588,6 +2369,7 @@ mod tests {
     fn track(id: i64, key: &str) -> Track {
         Track {
             id,
+            project_id: 1,
             name: key.into(),
             track_key: key.into(),
             long_ci_minutes: 8,

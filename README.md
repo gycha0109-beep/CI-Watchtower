@@ -1,36 +1,43 @@
 # CI Watchtower
 
-Windows 시스템 트레이에서 GitHub Actions를 **개발 Track Key 단위**로 자동 분류하고 감시하는 로컬 데스크톱 앱입니다.
+Windows 시스템 트레이에서 GitHub Actions를 **Project → Track → Repository** 단위로 분류하고 감시하는 로컬 데스크톱 앱입니다.
 
-v0.2부터 PR 번호나 branch HEAD를 감시 대상으로 직접 등록하지 않습니다. 사용자는 감시할 repository와 Track Key만 등록하고, Watchtower는 repository 전체의 최근 Actions Run을 수집한 뒤 명시적 Track Key 신호를 기준으로 각 트랙에 귀속합니다.
-
-## v0.2 핵심 구조
+## v0.3 구조
 
 ```text
-Monitored repositories
-  ├─ gycha0109-beep/Saju
-  └─ gycha0109-beep/MyeongHa
-              ↓
-       Repository Run Collector
-              ↓
-          Run ID pinning
-              ↓
-          Track Resolver
-       ┌──────┼─────────┐
-       saju   ops   frontend-integration
+Project
+├─ Repositories
+│  ├─ repo A
+│  └─ repo B
+├─ Project-wide CI
+│  ├─ CI
+│  ├─ Governance
+│  └─ Web PR Domain Gates
+└─ Tracks
+   ├─ ops
+   ├─ product-commerce
+   ├─ saju
+   └─ frontend-integration
 ```
 
-Repository는 감시 대상, Track은 분류 대상, GitHub Actions Run ID는 실제 추적 대상입니다. main HEAD가 이동하거나 트랙이 다른 repository로 이동해도 이미 발견한 Run은 Run ID로 계속 추적합니다.
+Project는 제품/서비스 단위, Repository는 GitHub 저장소, Track은 병렬 개발 작업축입니다. 특정 Track에 속하지 않는 정상적인 총괄 Workflow는 `Project-wide CI`로 분리합니다. 따라서 `미귀속`은 실제로 귀속 판단이 필요한 예외 Inbox만 의미합니다.
 
-## Track 등록
+기존 데이터는 최초 v0.3 실행 시 자동 migration됩니다. MyeongHa/Saju 저장소가 존재하면 `명하` Project로 묶고 기존 Track/Repository를 해당 Project 아래로 승격합니다.
 
-트랙에는 다음 세 값만 필요합니다.
+## Project-wide CI
+
+명하 migration은 다음 Workflow 이름을 기본 공용 CI 규칙으로 등록합니다.
 
 ```text
-트랙 이름: 프론트 연동
-Track Key: frontend-integration
-장기 CI: 8분
+CI
+Governance
+Web PR Domain Gates
+PIE Prospective Shadow
 ```
+
+공용 CI 규칙은 UI에서 추가/삭제할 수 있으며 프로젝트 전체 또는 특정 Repository 범위로 제한할 수 있습니다. 미귀속 Inbox의 Run에서 **공용 CI로 분류**를 선택하면 같은 Project의 동일 Workflow 이름을 공용 규칙으로 학습합니다.
+
+## Track Key
 
 Track Key는 repository나 ChatGPT 대화 번호가 바뀌어도 같은 작업축이면 유지합니다.
 
@@ -41,8 +48,10 @@ Track Key는 repository나 ChatGPT 대화 번호가 바뀌어도 같은 작업�
 - `face-reading`
 - `face-research`
 - `ops`
-- `commerce`
+- `product-commerce`
 - `pipeline-reliability`
+
+v0.3 migration은 기존 `commerce` Track Key를 `product-commerce`로 정규화합니다. 과거 evidence 호환을 위해 `commerce → product-commerce`, `privacy-recovery → ops` alias를 유지합니다.
 
 ## Producer Contract
 
@@ -62,9 +71,7 @@ research/face-research/repeatability
 Watchtower-Track: frontend-integration
 ```
 
-### workflow_dispatch
-
-dispatch workflow는 선택 입력값을 받을 수 있게 구성합니다.
+### workflow_dispatch / run-name
 
 ```yaml
 on:
@@ -78,31 +85,37 @@ on:
 run-name: "[WT:${{ inputs.watchtower_track }}] ${{ github.workflow }}"
 ```
 
-Run 이름에 `[WT:<track-key>]`가 노출되면 Watchtower가 PR 연결 여부와 관계없이 직접 귀속할 수 있습니다.
+`[WT:<track-key>]`는 Workflow 파일명이 아니라 GitHub Actions **run-name**에 노출되는 귀속 신호입니다.
 
-## Resolver 우선순위
+## Resolver
 
-명시 신호를 우선합니다.
+우선순위는 다음과 같습니다.
 
-1. Run 이름의 `[WT:<track-key>]`
-2. PR 본문의 `Watchtower-Track:`
-3. commit footer의 `Watchtower-Track:`
-4. branch segment의 Track Key
-5. 사용자가 이전에 수동 귀속해서 학습된 workflow fingerprint
+1. Project-wide CI 규칙
+2. Run 이름의 `[WT:<track-key>]`
+3. PR 본문의 `Watchtower-Track:`
+4. commit footer의 `Watchtower-Track:`
+5. branch Track Key
+6. 수동 귀속으로 학습된 workflow fingerprint
 
-명시 신호가 서로 다른 Track Key를 가리키면 자동 귀속하지 않고 `conflict`로 둡니다. 확정 근거가 없으면 `미귀속 CI` Inbox에 남깁니다.
+동일 최고 우선순위의 명시 신호가 서로 다른 Track을 가리키면 `conflict`로 둡니다. 상위 명시 신호가 존재하면 낮은 우선순위 branch 신호 때문에 false conflict를 만들지 않습니다.
 
-Workflow 이름 하나만으로는 자동 확정하지 않습니다.
+기존 미귀속 Run이 GitHub 최근 100개 window에서 밀려나도 로컬 DB의 미해결 Run을 bounded batch로 다시 평가합니다. 새 alias나 PR/commit marker, 공용 CI 규칙이 생기면 과거 Run도 점진적으로 재분류됩니다.
 
 ## 미귀속 CI
 
-미귀속 Inbox에서 Run을 기존 트랙에 수동 연결하거나 무시할 수 있습니다.
+미귀속 Inbox에서는 다음 처리가 가능합니다.
 
-수동 연결 시 해당 repository의 workflow 이름을 weight 50 보조 fingerprint로 학습합니다. 이 fingerprint 단독으로는 자동 귀속 임계값 70을 넘지 못하므로 잘못된 자동 귀속을 방지합니다.
+- 같은 Project의 기존 Track으로 수동 귀속
+- Project-wide CI로 분류하고 동일 Workflow 규칙 학습
+- 무시
+- 원본 GitHub Actions 열기
+
+Dashboard는 미귀속 Run을 최근 200개까지 내려주며, 화면에 **현재 필터 건수 / 전체 DB 건수**를 함께 표시합니다.
 
 ## Run ID / rerun
 
-발견된 Run은 branch의 최신 HEAD와 분리하여 Run ID로 저장합니다.
+발견된 Run은 branch 최신 HEAD와 분리해 Run ID로 저장합니다.
 
 ```text
 Run ID 35627433295
@@ -110,21 +123,9 @@ Attempt 1 → failure
 Attempt 2 → success
 ```
 
-`run_attempt`을 별도로 기록하고 알림 dedupe 키도 `track + run_id + run_attempt + event` 기준으로 관리합니다.
+`run_attempt`을 별도로 기록하고 알림 dedupe도 `track + run_id + run_attempt + event` 기준으로 관리합니다.
 
-## Queue / 상태
-
-Repository 전체 최근 Run에서 다음 상태를 집계합니다.
-
-- Running: `in_progress`
-- Queued: `queued / requested / pending / waiting`
-- GREEN: 완료 + success
-- RED: failure / cancelled / timed_out / action_required / startup_failure / stale
-- DONE: 그 외 terminal conclusion
-
-Repository 조회 실패 시 이전 Running/Queued 값을 그대로 보여주지 않고 0으로 초기화하며 오류를 저장합니다.
-
-## Polling
+## Queue / Polling
 
 기본값:
 
@@ -134,7 +135,7 @@ Repository 조회 실패 시 이전 Running/Queued 값을 그대로 보여주지
 Queue 혼잡: queued 6개 이상
 ```
 
-한 repository에서 최근 100개 Run을 한 번 가져온 뒤 로컬 DB에 upsert합니다. commit/PR evidence 조회는 polling cycle 안에서 SHA 기준으로 캐시합니다.
+Running은 `in_progress`, Queued는 `queued / requested / pending / waiting`을 집계합니다. Repository 조회 실패 시 stale Running/Queued 수치를 유지하지 않고 0으로 초기화하고 오류를 기록합니다.
 
 ## GitHub PAT
 
@@ -145,13 +146,16 @@ Fine-grained PAT 권장 권한:
 - Pull requests: Read
 - Metadata: Read
 
-PAT은 SQLite나 설정 파일에 저장하지 않습니다. Windows에서는 OS Credential Manager backend를 사용합니다. 저장 후 즉시 다시 읽어 값이 동일한지 검증합니다.
+PAT은 SQLite에 저장하지 않고 Windows Credential Manager backend를 사용합니다. 저장 직후 재조회하여 값이 동일한지 검증합니다.
 
-## 로컬 DB v0.2
+## 로컬 DB v0.3
 
 주요 테이블:
 
+- `projects`
+- `project_workflow_rules`
 - `watch_tracks`
+- `track_aliases`
 - `monitored_repositories`
 - `workflow_runs`
 - `run_attempts`
@@ -159,8 +163,6 @@ PAT은 SQLite나 설정 파일에 저장하지 않습니다. Windows에서는 OS
 - `run_evidence`
 - `track_fingerprints`
 - `notifications_v2`
-
-기존 v0.1 `tracks` 데이터는 최초 실행 시 v0.2 구조로 보존 migration합니다. 알려진 트랙 이름은 안정적인 Track Key로 변환하고 기존 repository는 전역 감시 저장소로 승격합니다.
 
 ## 실행
 
@@ -182,16 +184,15 @@ Release installer:
 npm run tauri build
 ```
 
-## v0.2 Acceptance
+## v0.3 Acceptance
 
-- branch Track Key 자동 귀속
-- PR `Watchtower-Track` 자동 귀속
-- `[WT:key]` workflow_dispatch 자동 귀속
-- Saju ↔ MyeongHa 이동 후 동일 Track 유지
-- main HEAD 변경 후 기존 Run 추적 유지
-- rerun attempt 별 상태/알림 분리
-- 명시 신호 충돌 시 conflict
-- 근거 부족 시 미귀속 Inbox
-- 수동 귀속 후 fingerprint 학습
-- `waiting` 포함 Queue 집계
-- Windows tray 감시 및 native notification
+- Project 생성/삭제 및 Repository/Track Project 귀속
+- Project → Track → Repository 필터
+- Project-wide CI 규칙과 별도 화면
+- `CI / Governance / Web PR Domain Gates / PIE Prospective Shadow` 기본 공용 분류
+- `commerce → product-commerce` migration
+- `privacy-recovery → ops` 과거 key alias
+- 명시 marker가 branch보다 우선하여 false conflict 방지
+- 최근 100개에서 밀린 과거 미귀속 Run 점진 재평가
+- 미귀속 전체 건수와 화면 표시 건수 구분
+- 다른 Project Track으로 수동 오귀속 방지
