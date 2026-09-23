@@ -3092,7 +3092,7 @@ mod tests {
             ).unwrap();
         }
 
-        conn.execute(
+        conn.execute_batch(
             "INSERT INTO workflow_runs(
                run_id,repository_id,workflow_id,workflow_name,workflow_path,
                display_title,event,head_branch,head_sha,run_number,run_attempt,
