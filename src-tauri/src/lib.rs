@@ -1471,17 +1471,25 @@ fn load_run_attribution_detail(conn: &Connection, run_id: i64) -> Result<RunAttr
         (assignment_source, assignment_reason, assignment_confidence)
     };
 
-    let mut history_stmt = conn.prepare(
-        "SELECT id,trigger,from_status,from_track_key,from_source,from_confidence,
-                to_status,to_track_key,to_source,to_confidence,to_reason,
-                previous_evidence_json,evidence_json,reconciled_at
-         FROM resolution_reconciliation_audit
-         WHERE run_id=?
-         ORDER BY id DESC
-         LIMIT 20",
+    let has_reconciliation_audit: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sqlite_master
+           WHERE type='table' AND name='resolution_reconciliation_audit'
+         )",
+        [],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
     )?;
-    let reconciliation_history = history_stmt
-        .query_map(params![run_id], |row| {
+    let reconciliation_history = if has_reconciliation_audit {
+        let mut history_stmt = conn.prepare(
+            "SELECT id,trigger,from_status,from_track_key,from_source,from_confidence,
+                    to_status,to_track_key,to_source,to_confidence,to_reason,
+                    previous_evidence_json,evidence_json,reconciled_at
+             FROM resolution_reconciliation_audit
+             WHERE run_id=?
+             ORDER BY id DESC
+             LIMIT 20",
+        )?;
+        let rows = history_stmt.query_map(params![run_id], |row| {
             let previous_json: String = row.get(11)?;
             let evidence_json: String = row.get(12)?;
             Ok(ReconciliationAuditEntry {
@@ -1500,8 +1508,11 @@ fn load_run_attribution_detail(conn: &Connection, run_id: i64) -> Result<RunAttr
                 evidence: serde_json::from_str(&evidence_json).unwrap_or_default(),
                 reconciled_at: row.get(13)?,
             })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
 
     Ok(RunAttributionDetail {
         run_id,
@@ -2153,26 +2164,37 @@ fn persist_resolution_with_trigger(
     now: &str,
     trigger: Option<&str>,
 ) -> Result<()> {
-    let previous: Option<(i64, String, Option<String>, Option<String>, Option<i64>, Option<i64>)> = conn
-        .query_row(
-            "SELECT wr.repository_id,wr.resolution_status,wt.track_key,ra.source,ra.confidence,ra.manual
-             FROM workflow_runs wr
-             LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
-             LEFT JOIN watch_tracks wt ON wt.id=ra.track_id
-             WHERE wr.run_id=?",
-            params![run_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .optional()?;
+    let previous: Option<(i64, String, Option<String>, Option<String>, Option<i64>, Option<i64>)> =
+        if trigger.is_some() {
+            conn.query_row(
+                "SELECT wr.repository_id,wr.resolution_status,wt.track_key,ra.source,ra.confidence,ra.manual
+                 FROM workflow_runs wr
+                 LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
+                 LEFT JOIN watch_tracks wt ON wt.id=ra.track_id
+                 WHERE wr.run_id=?",
+                params![run_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?
+        } else {
+            let manual: Option<i64> = conn
+                .query_row(
+                    "SELECT manual FROM run_assignments WHERE run_id=?",
+                    params![run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Some((0, String::new(), None, None, None, manual))
+        };
     let Some((
         repository_id,
         previous_status,
