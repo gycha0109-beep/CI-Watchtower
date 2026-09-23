@@ -802,22 +802,43 @@ fn load_settings(conn: &Connection) -> Result<Settings> {
     .map_err(Into::into)
 }
 
+fn list_projects(conn: &Connection, active_only: bool) -> Result<Vec<Project>> {
+    let sql = if active_only {
+        "SELECT id,name,project_key,active,created_at,updated_at FROM projects WHERE active=1 ORDER BY id"
+    } else {
+        "SELECT id,name,project_key,active,created_at,updated_at FROM projects ORDER BY id"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(Project {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            project_key: row.get(2)?,
+            active: row.get::<_, i64>(3)? != 0,
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn list_tracks(conn: &Connection, active_only: bool) -> Result<Vec<Track>> {
     let sql = if active_only {
-        "SELECT id,name,track_key,long_ci_minutes,active,created_at,updated_at FROM watch_tracks WHERE active=1 ORDER BY id DESC"
+        "SELECT id,project_id,name,track_key,long_ci_minutes,active,created_at,updated_at FROM watch_tracks WHERE active=1 ORDER BY id DESC"
     } else {
-        "SELECT id,name,track_key,long_ci_minutes,active,created_at,updated_at FROM watch_tracks ORDER BY id DESC"
+        "SELECT id,project_id,name,track_key,long_ci_minutes,active,created_at,updated_at FROM watch_tracks ORDER BY id DESC"
     };
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
         Ok(Track {
             id: row.get(0)?,
-            name: row.get(1)?,
-            track_key: row.get(2)?,
-            long_ci_minutes: row.get(3)?,
-            active: row.get::<_, i64>(4)? != 0,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            project_id: row.get(1)?,
+            name: row.get(2)?,
+            track_key: row.get(3)?,
+            long_ci_minutes: row.get(4)?,
+            active: row.get::<_, i64>(5)? != 0,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -825,43 +846,63 @@ fn list_tracks(conn: &Connection, active_only: bool) -> Result<Vec<Track>> {
 
 fn list_repositories(conn: &Connection, enabled_only: bool) -> Result<Vec<MonitoredRepository>> {
     let sql = if enabled_only {
-        "SELECT id,repo,enabled,running_count,queued_count,last_polled_at,last_error FROM monitored_repositories WHERE enabled=1 ORDER BY repo"
+        "SELECT id,project_id,repo,enabled,running_count,queued_count,last_polled_at,last_error FROM monitored_repositories WHERE enabled=1 ORDER BY repo"
     } else {
-        "SELECT id,repo,enabled,running_count,queued_count,last_polled_at,last_error FROM monitored_repositories ORDER BY repo"
+        "SELECT id,project_id,repo,enabled,running_count,queued_count,last_polled_at,last_error FROM monitored_repositories ORDER BY repo"
     };
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
         Ok(MonitoredRepository {
             id: row.get(0)?,
-            repo: row.get(1)?,
-            enabled: row.get::<_, i64>(2)? != 0,
-            running_count: row.get(3)?,
-            queued_count: row.get(4)?,
-            last_polled_at: row.get(5)?,
-            last_error: row.get(6)?,
+            project_id: row.get(1)?,
+            repo: row.get(2)?,
+            enabled: row.get::<_, i64>(3)? != 0,
+            running_count: row.get(4)?,
+            queued_count: row.get(5)?,
+            last_polled_at: row.get(6)?,
+            last_error: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn list_project_workflow_rules(conn: &Connection) -> Result<Vec<ProjectWorkflowRule>> {
+    let mut stmt = conn.prepare(
+        "SELECT id,project_id,repository_id,workflow_name,active
+         FROM project_workflow_rules WHERE active=1 ORDER BY project_id,workflow_name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ProjectWorkflowRule {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            repository_id: row.get(2)?,
+            workflow_name: row.get(3)?,
+            active: row.get::<_, i64>(4)? != 0,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn run_summary_from_row(row: &rusqlite::Row<'_>, now: DateTime<Utc>) -> rusqlite::Result<WorkflowRunSummary> {
-    let status: String = row.get(8)?;
-    let created_at: String = row.get(12)?;
-    let run_started_at: Option<String> = row.get(13)?;
-    let updated_at: String = row.get(14)?;
+    let status: String = row.get(10)?;
+    let created_at: String = row.get(14)?;
+    let run_started_at: Option<String> = row.get(15)?;
+    let updated_at: String = row.get(16)?;
     Ok(WorkflowRunSummary {
         id: row.get(0)?,
-        repository: row.get(1)?,
-        workflow_name: row.get(2)?,
-        display_title: row.get(3)?,
-        event: row.get(4)?,
-        head_branch: row.get(5)?,
-        head_sha: row.get(6)?,
-        run_attempt: row.get(7)?,
+        project_id: row.get(1)?,
+        repository_id: row.get(2)?,
+        repository: row.get(3)?,
+        workflow_name: row.get(4)?,
+        display_title: row.get(5)?,
+        event: row.get(6)?,
+        head_branch: row.get(7)?,
+        head_sha: row.get(8)?,
+        run_attempt: row.get(9)?,
         status: status.clone(),
-        conclusion: row.get(9)?,
-        html_url: row.get(10)?,
-        resolution_status: row.get(11)?,
+        conclusion: row.get(11)?,
+        html_url: row.get(12)?,
+        resolution_status: row.get(13)?,
         created_at: created_at.clone(),
         run_started_at: run_started_at.clone(),
         updated_at: updated_at.clone(),
@@ -872,16 +913,16 @@ fn run_summary_from_row(row: &rusqlite::Row<'_>, now: DateTime<Utc>) -> rusqlite
             &updated_at,
             now,
         ),
-        attribution_source: row.get(15)?,
-        attribution_reason: row.get(16)?,
-        confidence: row.get(17)?,
+        attribution_source: row.get(17)?,
+        attribution_reason: row.get(18)?,
+        confidence: row.get(19)?,
     })
 }
 
 fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<WorkflowRunSummary>> {
     let now = Utc::now();
     let mut stmt = conn.prepare(
-        "SELECT wr.run_id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,ra.source,ra.reason,ra.confidence
+        "SELECT wr.run_id,mr.project_id,mr.id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,ra.source,ra.reason,ra.confidence
          FROM workflow_runs wr
          JOIN monitored_repositories mr ON mr.id=wr.repository_id
          JOIN run_assignments ra ON ra.run_id=wr.run_id
@@ -892,10 +933,26 @@ fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<Wo
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+fn project_runs(conn: &Connection, limit: i64) -> Result<Vec<WorkflowRunSummary>> {
+    let now = Utc::now();
+    let mut stmt = conn.prepare(
+        "SELECT wr.run_id,mr.project_id,mr.id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,
+                'project_workflow' AS attribution_source,
+                '프로젝트 공용 CI 규칙' AS attribution_reason,
+                100 AS confidence
+         FROM workflow_runs wr
+         JOIN monitored_repositories mr ON mr.id=wr.repository_id
+         WHERE wr.resolution_status='project' AND wr.ignored=0
+         ORDER BY wr.created_at DESC LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![limit], |row| run_summary_from_row(row, now))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn unassigned_runs(conn: &Connection, limit: i64) -> Result<Vec<WorkflowRunSummary>> {
     let now = Utc::now();
     let mut stmt = conn.prepare(
-        "SELECT wr.run_id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,
+        "SELECT wr.run_id,mr.project_id,mr.id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,
                 CASE WHEN wr.resolution_status='conflict' THEN 'explicit_conflict'
                      ELSE (SELECT re.signal_type FROM run_evidence re WHERE re.run_id=wr.run_id ORDER BY re.score DESC LIMIT 1) END,
                 (SELECT 'Track Key 후보: ' || group_concat(track_key, ', ') FROM (SELECT DISTINCT re.track_key track_key FROM run_evidence re WHERE re.run_id=wr.run_id AND re.score>=90)),
@@ -903,7 +960,7 @@ fn unassigned_runs(conn: &Connection, limit: i64) -> Result<Vec<WorkflowRunSumma
          FROM workflow_runs wr
          JOIN monitored_repositories mr ON mr.id=wr.repository_id
          LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
-         WHERE ra.run_id IS NULL AND wr.ignored=0
+         WHERE ra.run_id IS NULL AND wr.ignored=0 AND wr.resolution_status IN ('unassigned','conflict')
          ORDER BY CASE WHEN wr.status='completed' THEN 1 ELSE 0 END, wr.created_at DESC LIMIT ?",
     )?;
     let rows = stmt.query_map(params![limit], |row| run_summary_from_row(row, now))?;
