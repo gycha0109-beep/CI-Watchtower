@@ -111,6 +111,13 @@ export interface Settings {
   autoArchiveCompleted: boolean;
 }
 
+export interface RepositoryScopeStats {
+  repositoryId: number;
+  projectId: number;
+  unassignedCount: number;
+  projectRunCount: number;
+}
+
 export interface Dashboard {
   runningCount: number;
   queuedCount: number;
@@ -122,6 +129,7 @@ export interface Dashboard {
   repositories: MonitoredRepository[];
   tracks: DashboardTrack[];
   projectWorkflowRules: ProjectWorkflowRule[];
+  repositoryScopeStats: RepositoryScopeStats[];
   projectRuns: WorkflowRunSummary[];
   unassignedRuns: WorkflowRunSummary[];
 }
