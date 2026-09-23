@@ -200,6 +200,49 @@ function App() {
   const scopedUnassignedCount = scopeStats.reduce((sum, item) => sum + item.unassignedCount, 0);
   const scopedProjectRunCount = scopeStats.reduce((sum, item) => sum + item.projectRunCount, 0);
 
+  const producerStatsInScope = useMemo(
+    () => (dashboard?.producerContractStats ?? []).filter(item =>
+      (selectedProject === 'all' || item.projectId === selectedProject) &&
+      (selectedRepository === 'all' || item.repositoryId === selectedRepository)
+    ),
+    [dashboard, selectedProject, selectedRepository],
+  );
+  const producerContract = producerStatsInScope.reduce(
+    (total, item) => ({
+      sampledRuns: total.sampledRuns + item.sampledRuns,
+      projectWideRuns: total.projectWideRuns + item.projectWideRuns,
+      explicitRuns: total.explicitRuns + item.explicitRuns,
+      runNameRuns: total.runNameRuns + item.runNameRuns,
+      prMarkerRuns: total.prMarkerRuns + item.prMarkerRuns,
+      commitMarkerRuns: total.commitMarkerRuns + item.commitMarkerRuns,
+      branchRuns: total.branchRuns + item.branchRuns,
+      heuristicRuns: total.heuristicRuns + item.heuristicRuns,
+      manualRuns: total.manualRuns + item.manualRuns,
+      compatibilityRuns: total.compatibilityRuns + item.compatibilityRuns,
+      unresolvedRuns: total.unresolvedRuns + item.unresolvedRuns,
+      otherRuns: total.otherRuns + item.otherRuns,
+    }),
+    {
+      sampledRuns: 0,
+      projectWideRuns: 0,
+      explicitRuns: 0,
+      runNameRuns: 0,
+      prMarkerRuns: 0,
+      commitMarkerRuns: 0,
+      branchRuns: 0,
+      heuristicRuns: 0,
+      manualRuns: 0,
+      compatibilityRuns: 0,
+      unresolvedRuns: 0,
+      otherRuns: 0,
+    },
+  );
+  const contractCompliantRuns = producerContract.projectWideRuns + producerContract.explicitRuns;
+  const contractDriftRuns = producerContract.sampledRuns - contractCompliantRuns;
+  const contractCoverage = producerContract.sampledRuns === 0
+    ? 100
+    : Math.round((contractCompliantRuns / producerContract.sampledRuns) * 100);
+
   const runningCount = repositoriesInScope.reduce((sum, repo) => sum + repo.runningCount, 0);
   const queuedCount = repositoriesInScope.reduce((sum, repo) => sum + repo.queuedCount, 0);
   const congestionText = !dashboard
@@ -415,6 +458,27 @@ function App() {
           <span>Project CI</span><strong>{scopedProjectRunCount}</strong>
         </button>
         <div className={`summary-card congestion ${congestionText.toLowerCase()}`}><span>Queue</span><strong>{congestionText}</strong></div>
+      </section>
+
+      <section className="panel producer-contract-panel">
+        <div className="producer-contract-head">
+          <div>
+            <p className="eyebrow">PRODUCER CONTRACT</p>
+            <h2>최근 Run 귀속 계약</h2>
+            <p className="muted-copy">Repository별 최근 최대 50개 Run 기준 · Project-wide 규칙 또는 명시 신호(run-name / PR / commit / branch)를 정상 계약으로 집계합니다.</p>
+          </div>
+          <div className={`contract-coverage ${contractDriftRuns === 0 ? 'healthy' : producerContract.unresolvedRuns > 0 ? 'risk' : 'drift'}`}>
+            <strong>{contractCoverage}%</strong>
+            <span>{contractCompliantRuns}/{producerContract.sampledRuns}</span>
+          </div>
+        </div>
+        <div className="metrics-row producer-contract-metrics">
+          <div><span>명시 신호</span><b>{producerContract.explicitRuns}</b><small>run-name {producerContract.runNameRuns} · PR {producerContract.prMarkerRuns} · commit {producerContract.commitMarkerRuns} · branch {producerContract.branchRuns}</small></div>
+          <div><span>Project-wide</span><b>{producerContract.projectWideRuns}</b><small>Track marker 없이 공용 규칙으로 정상 분류</small></div>
+          <div><span>Heuristic / 호환</span><b>{producerContract.heuristicRuns + producerContract.compatibilityRuns}</b><small>inference {producerContract.heuristicRuns} · alias {producerContract.compatibilityRuns}</small></div>
+          <div><span>수동 / 기타</span><b>{producerContract.manualRuns + producerContract.otherRuns}</b><small>manual {producerContract.manualRuns} · other {producerContract.otherRuns}</small></div>
+          <div><span>미해결</span><b>{producerContract.unresolvedRuns}</b><small>unassigned / conflict</small></div>
+        </div>
       </section>
 
       <div className="layout-grid">

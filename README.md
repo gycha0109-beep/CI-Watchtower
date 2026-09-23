@@ -112,6 +112,25 @@ run-name: "[WT:${{ inputs.watchtower_track }}] ${{ github.workflow }}"
 
 `[WT:<track-key>]`는 Workflow 파일명이 아니라 GitHub Actions **run-name**에 노출되는 귀속 신호입니다.
 
+## Producer Contract Health
+
+Dashboard는 각 Repository의 **최근 최대 50개 Run**을 기준으로 producer contract 상태를 집계합니다.
+
+정상 계약으로 계산하는 경우:
+
+- Project-wide CI 규칙으로 분류된 Run
+- `run_name`, `pr_marker`, `commit_marker`, `branch` 명시 신호로 Track에 귀속된 Run
+
+별도 drift로 표시하는 경우:
+
+- learned fingerprint 기반 `inference`
+- 과거 alias migration의 `track_alias`
+- 수동 귀속
+- 미귀속 / 충돌
+- 그 밖의 비표준 귀속
+
+따라서 Project-wide CI는 `[WT:*]`가 없어도 정상이며, shared workflow를 억지로 Track에 넣어 coverage를 올리지 않습니다. 이 지표의 목적은 resolver 성공률이 아니라 **producer가 스스로 귀속 근거를 얼마나 명시적으로 남기고 있는지** 확인하는 것입니다.
+
 ## Resolver
 
 우선순위는 다음과 같습니다.

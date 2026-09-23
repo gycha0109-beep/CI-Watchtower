@@ -23,6 +23,7 @@ const DEFAULT_ACTIVE_POLL_SECONDS: i64 = 25;
 const DEFAULT_IDLE_POLL_SECONDS: i64 = 90;
 const DEFAULT_QUEUE_THRESHOLD: i64 = 6;
 const HISTORICAL_RECONCILE_BATCH: i64 = 12;
+const PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY: i64 = 50;
 
 struct AppState {
     db_path: PathBuf,
@@ -222,6 +223,7 @@ struct Dashboard {
     tracks: Vec<DashboardTrack>,
     project_workflow_rules: Vec<ProjectWorkflowRule>,
     repository_scope_stats: Vec<RepositoryScopeStats>,
+    producer_contract_stats: Vec<ProducerContractStats>,
     project_runs: Vec<WorkflowRunSummary>,
     unassigned_runs: Vec<WorkflowRunSummary>,
 }
@@ -233,6 +235,25 @@ struct RepositoryScopeStats {
     project_id: i64,
     unassigned_count: i64,
     project_run_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProducerContractStats {
+    repository_id: i64,
+    project_id: i64,
+    sampled_runs: i64,
+    project_wide_runs: i64,
+    explicit_runs: i64,
+    run_name_runs: i64,
+    pr_marker_runs: i64,
+    commit_marker_runs: i64,
+    branch_runs: i64,
+    heuristic_runs: i64,
+    manual_runs: i64,
+    compatibility_runs: i64,
+    unresolved_runs: i64,
+    other_runs: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1686,6 +1707,72 @@ fn repository_scope_stats(conn: &Connection) -> Result<Vec<RepositoryScopeStats>
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+fn producer_contract_stats(
+    conn: &Connection,
+    sample_per_repository: i64,
+) -> Result<Vec<ProducerContractStats>> {
+    let mut stmt = conn.prepare(
+        "WITH recent AS (
+           SELECT wr.run_id,mr.id AS repository_id,mr.project_id,
+                  wr.resolution_status,ra.source,COALESCE(ra.manual,0) AS manual,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY wr.repository_id
+                    ORDER BY wr.created_at DESC,wr.run_id DESC
+                  ) AS repository_rank
+           FROM workflow_runs wr
+           JOIN monitored_repositories mr ON mr.id=wr.repository_id
+           LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
+           WHERE wr.ignored=0
+         )
+         SELECT repository_id,project_id,
+                COUNT(*) AS sampled_runs,
+                SUM(CASE WHEN resolution_status='project' THEN 1 ELSE 0 END) AS project_wide_runs,
+                SUM(CASE WHEN resolution_status='assigned' AND manual=0
+                          AND source IN ('run_name','pr_marker','commit_marker','branch')
+                         THEN 1 ELSE 0 END) AS explicit_runs,
+                SUM(CASE WHEN resolution_status='assigned' AND manual=0 AND source='run_name' THEN 1 ELSE 0 END) AS run_name_runs,
+                SUM(CASE WHEN resolution_status='assigned' AND manual=0 AND source='pr_marker' THEN 1 ELSE 0 END) AS pr_marker_runs,
+                SUM(CASE WHEN resolution_status='assigned' AND manual=0 AND source='commit_marker' THEN 1 ELSE 0 END) AS commit_marker_runs,
+                SUM(CASE WHEN resolution_status='assigned' AND manual=0 AND source='branch' THEN 1 ELSE 0 END) AS branch_runs,
+                SUM(CASE WHEN resolution_status='assigned' AND manual=0 AND source='inference' THEN 1 ELSE 0 END) AS heuristic_runs,
+                SUM(CASE WHEN resolution_status='assigned' AND manual=1 THEN 1 ELSE 0 END) AS manual_runs,
+                SUM(CASE WHEN resolution_status='assigned' AND manual=0 AND source='track_alias' THEN 1 ELSE 0 END) AS compatibility_runs,
+                SUM(CASE WHEN resolution_status IN ('unassigned','conflict') THEN 1 ELSE 0 END) AS unresolved_runs,
+                SUM(CASE WHEN resolution_status NOT IN ('project','unassigned','conflict')
+                           AND NOT (
+                             resolution_status='assigned'
+                             AND (
+                               manual=1
+                               OR source IN ('run_name','pr_marker','commit_marker','branch','inference','track_alias')
+                             )
+                           )
+                         THEN 1 ELSE 0 END) AS other_runs
+         FROM recent
+         WHERE repository_rank<=?
+         GROUP BY repository_id,project_id
+         ORDER BY repository_id",
+    )?;
+    let rows = stmt.query_map(params![sample_per_repository.max(1)], |row| {
+        Ok(ProducerContractStats {
+            repository_id: row.get(0)?,
+            project_id: row.get(1)?,
+            sampled_runs: row.get(2)?,
+            project_wide_runs: row.get(3)?,
+            explicit_runs: row.get(4)?,
+            run_name_runs: row.get(5)?,
+            pr_marker_runs: row.get(6)?,
+            commit_marker_runs: row.get(7)?,
+            branch_runs: row.get(8)?,
+            heuristic_runs: row.get(9)?,
+            manual_runs: row.get(10)?,
+            compatibility_runs: row.get(11)?,
+            unresolved_runs: row.get(12)?,
+            other_runs: row.get(13)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn track_health(runs: &[WorkflowRunSummary]) -> String {
     if runs.is_empty() {
         return "waiting".into();
@@ -1756,6 +1843,8 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
     let running_count: i64 = repositories.iter().filter(|r| r.enabled).map(|r| r.running_count).sum();
     let queued_count: i64 = repositories.iter().filter(|r| r.enabled).map(|r| r.queued_count).sum();
     let repository_scope_stats = repository_scope_stats(&conn)?;
+    let producer_contract_stats =
+        producer_contract_stats(&conn, PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY)?;
     let mut project_runs = Vec::new();
     let mut unassigned_runs = Vec::new();
     for repository in &repositories {
@@ -1799,6 +1888,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         tracks: dashboard_tracks,
         project_workflow_rules,
         repository_scope_stats,
+        producer_contract_stats,
         project_runs,
         unassigned_runs,
     })
@@ -4256,6 +4346,141 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(invalid_auto_count, 0);
+    }
+
+    #[test]
+    fn producer_contract_stats_classify_recent_runs_without_overlapping_buckets() {
+        let path = legacy_v02_db_path("producer-contract");
+        init_db(&path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
+        let repository_id: i64 = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let project_id: i64 = conn
+            .query_row(
+                "SELECT project_id FROM monitored_repositories WHERE id=?",
+                params![repository_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let track_id: i64 = conn
+            .query_row(
+                "SELECT id FROM watch_tracks
+                 WHERE project_id=? AND track_key='ops'",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        for (offset, status) in [
+            (1_i64, "project"),
+            (2, "assigned"),
+            (3, "assigned"),
+            (4, "assigned"),
+            (5, "assigned"),
+            (6, "assigned"),
+            (7, "assigned"),
+            (8, "unassigned"),
+            (9, "assigned"),
+        ] {
+            let run_id = 9_100_000 + offset;
+            conn.execute(
+                "INSERT INTO workflow_runs(
+                   run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
+                   head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
+                   created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored,last_resolution_attempt_at
+                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![
+                    run_id,
+                    repository_id,
+                    700 + offset,
+                    format!("Contract {offset}"),
+                    Option::<String>::None,
+                    format!("Contract {offset}"),
+                    "push",
+                    "main",
+                    format!("sha-{offset}"),
+                    offset,
+                    1_i64,
+                    "completed",
+                    "success",
+                    format!("https://example/{run_id}"),
+                    format!("2026-09-24T00:{offset:02}:00Z"),
+                    Option::<String>::None,
+                    format!("2026-09-24T00:{offset:02}:30Z"),
+                    format!("2026-09-24T00:{offset:02}:30Z"),
+                    status,
+                    if offset == 9 { 1_i64 } else { 0_i64 },
+                    Option::<String>::None,
+                ],
+            )
+            .unwrap();
+        }
+
+        for (offset, source, manual) in [
+            (2_i64, "run_name", 0_i64),
+            (3, "pr_marker", 0),
+            (4, "branch", 0),
+            (5, "inference", 0),
+            (6, "manual", 1),
+            (7, "track_alias", 0),
+            (9, "commit_marker", 0),
+        ] {
+            conn.execute(
+                "INSERT INTO run_assignments(
+                   run_id,track_id,confidence,source,reason,manual,assigned_at
+                 ) VALUES(?,?,?,?,?,?,?)",
+                params![
+                    9_100_000 + offset,
+                    track_id,
+                    100_i64,
+                    source,
+                    "fixture",
+                    manual,
+                    "2026-09-24T00:10:00Z",
+                ],
+            )
+            .unwrap();
+        }
+
+        let stats = producer_contract_stats(&conn, 50).unwrap();
+        let row = stats
+            .iter()
+            .find(|item| item.repository_id == repository_id)
+            .unwrap();
+        assert_eq!(row.sampled_runs, 8);
+        assert_eq!(row.project_wide_runs, 1);
+        assert_eq!(row.explicit_runs, 3);
+        assert_eq!(row.run_name_runs, 1);
+        assert_eq!(row.pr_marker_runs, 1);
+        assert_eq!(row.commit_marker_runs, 0);
+        assert_eq!(row.branch_runs, 1);
+        assert_eq!(row.heuristic_runs, 1);
+        assert_eq!(row.manual_runs, 1);
+        assert_eq!(row.compatibility_runs, 1);
+        assert_eq!(row.unresolved_runs, 1);
+        assert_eq!(row.other_runs, 0);
+        assert_eq!(
+            row.project_wide_runs
+                + row.explicit_runs
+                + row.heuristic_runs
+                + row.manual_runs
+                + row.compatibility_runs
+                + row.unresolved_runs
+                + row.other_runs,
+            row.sampled_runs
+        );
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
     #[test]
