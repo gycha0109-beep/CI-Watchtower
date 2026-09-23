@@ -971,6 +971,29 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
             )?;
         }
 
+        let myeongha_repository_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories
+                 WHERE repo='gycha0109-beep/MyeongHa'
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(repository_id) = myeongha_repository_id {
+            for workflow_name in [
+                "DB Content Reading Suite",
+                "DB Runtime Authority Suite",
+                "DB PostgreSQL 17 Authority Suite",
+            ] {
+                conn.execute(
+                    "INSERT OR IGNORE INTO project_workflow_rules(
+                       project_id,repository_id,workflow_name,active,created_at
+                     ) VALUES(?,?,?,1,?)",
+                    params![myeongha_project_id, repository_id, workflow_name, now],
+                )?;
+            }
+        }
     }
 
     conn.execute(
@@ -1197,7 +1220,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.4")
+        .user_agent("ci-watchtower/0.3.5")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -4442,6 +4465,165 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(invalid_auto_count, 0);
+    }
+
+    #[test]
+    fn myeongha_db_authority_suites_are_repository_scoped_project_wide() {
+        let path = legacy_v02_db_path("myeongha-db-project-wide");
+        seed_legacy_v02_database(&path);
+        init_db(&path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let myeongha_repository_id: i64 = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories
+                 WHERE repo='gycha0109-beep/MyeongHa'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let saju_repository_id: i64 = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories
+                 WHERE repo='gycha0109-beep/Saju'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let project_id: i64 = conn
+            .query_row(
+                "SELECT project_id FROM monitored_repositories WHERE id=?",
+                params![myeongha_repository_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let ops_track_id: i64 = conn
+            .query_row(
+                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='ops'",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        for (run_id, repository_id, manual) in [
+            (9_100_001_i64, myeongha_repository_id, 0_i64),
+            (9_100_002_i64, myeongha_repository_id, 1_i64),
+            (9_100_003_i64, saju_repository_id, 0_i64),
+        ] {
+            conn.execute(
+                "INSERT INTO workflow_runs(
+                   run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
+                   head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
+                   created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored,last_resolution_attempt_at
+                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![
+                    run_id,
+                    repository_id,
+                    910_i64,
+                    "DB Runtime Authority Suite",
+                    ".github/workflows/db-runtime-authority-suite.yml",
+                    "db runtime authority",
+                    "pull_request",
+                    "fix/frontend-integration/runtime-authority",
+                    format!("sha-{run_id}"),
+                    run_id,
+                    1_i64,
+                    "completed",
+                    "success",
+                    format!("https://example/{run_id}"),
+                    "2026-09-24T01:00:00Z",
+                    Option::<String>::None,
+                    "2026-09-24T01:01:00Z",
+                    "2026-09-24T01:01:00Z",
+                    "assigned",
+                    0_i64,
+                    Option::<String>::None,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO run_assignments(
+                   run_id,track_id,confidence,source,reason,manual,assigned_at
+                 ) VALUES(?,?,?,?,?,?,?)",
+                params![
+                    run_id,
+                    ops_track_id,
+                    if manual == 1 { 100_i64 } else { 90_i64 },
+                    if manual == 1 { "manual" } else { "branch" },
+                    "fixture",
+                    manual,
+                    "2026-09-24T01:02:00Z",
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        migrate_project_scope(&Connection::open(&path).unwrap()).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let scoped_rules: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM project_workflow_rules
+                 WHERE project_id=? AND repository_id=?
+                   AND workflow_name IN (
+                     'DB Content Reading Suite',
+                     'DB Runtime Authority Suite',
+                     'DB PostgreSQL 17 Authority Suite'
+                   )
+                   AND active=1",
+                params![project_id, myeongha_repository_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(scoped_rules, 3);
+
+        let automatic_status: String = conn
+            .query_row(
+                "SELECT resolution_status FROM workflow_runs WHERE run_id=9100001",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let automatic_assignment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9100001",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(automatic_status, "project");
+        assert_eq!(automatic_assignment_count, 0);
+
+        let manual_row: (String, i64) = conn
+            .query_row(
+                "SELECT wr.resolution_status,ra.manual
+                 FROM workflow_runs wr
+                 JOIN run_assignments ra ON ra.run_id=wr.run_id
+                 WHERE wr.run_id=9100002",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(manual_row, ("assigned".into(), 1));
+
+        let saju_row: (String, i64) = conn
+            .query_row(
+                "SELECT wr.resolution_status,COUNT(ra.run_id)
+                 FROM workflow_runs wr
+                 LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
+                 WHERE wr.run_id=9100003
+                 GROUP BY wr.run_id,wr.resolution_status",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(saju_row, ("assigned".into(), 1));
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
     #[test]
