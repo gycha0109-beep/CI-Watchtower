@@ -1744,6 +1744,169 @@ async fn poll_now(app: AppHandle) -> std::result::Result<Dashboard, String> {
 }
 
 #[tauri::command]
+fn save_project(input: ProjectInput, state: State<'_, AppState>) -> std::result::Result<i64, String> {
+    let result = (|| -> Result<i64> {
+        let name = input.name.trim();
+        let project_key = input.project_key.trim().to_lowercase();
+        if name.is_empty() {
+            return Err(anyhow!("프로젝트 이름을 입력하십시오."));
+        }
+        validate_track_key(&project_key)?;
+        let conn = db(&state)?;
+        let now = Utc::now().to_rfc3339();
+        let id = if let Some(id) = input.id {
+            conn.execute(
+                "UPDATE projects SET name=?,project_key=?,active=1,updated_at=? WHERE id=?",
+                params![name, project_key, now, id],
+            )?;
+            if conn.changes() == 0 {
+                return Err(anyhow!("수정할 프로젝트를 찾지 못했습니다."));
+            }
+            id
+        } else {
+            conn.execute(
+                "INSERT INTO projects(name,project_key,active,created_at,updated_at) VALUES(?,?,1,?,?)",
+                params![name, project_key, now, now],
+            )?;
+            conn.last_insert_rowid()
+        };
+        Ok(id)
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_project(id: i64, state: State<'_, AppState>) -> std::result::Result<(), String> {
+    let result = (|| -> Result<()> {
+        let conn = db(&state)?;
+        let repository_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM monitored_repositories WHERE project_id=?",
+            params![id],
+            |row| row.get(0),
+        )?;
+        let track_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM watch_tracks WHERE project_id=?",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if repository_count > 0 || track_count > 0 {
+            return Err(anyhow!("프로젝트에 저장소 또는 트랙이 남아 있어 삭제할 수 없습니다."));
+        }
+        let deleted = conn.execute("DELETE FROM projects WHERE id=?", params![id])?;
+        if deleted == 0 {
+            return Err(anyhow!("삭제할 프로젝트를 찾지 못했습니다."));
+        }
+        Ok(())
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_project_workflow_rule(
+    input: ProjectWorkflowRuleInput,
+    state: State<'_, AppState>,
+) -> std::result::Result<i64, String> {
+    let result = (|| -> Result<i64> {
+        let workflow_name = input.workflow_name.trim();
+        if workflow_name.is_empty() {
+            return Err(anyhow!("Workflow 이름을 입력하십시오."));
+        }
+        let conn = db(&state)?;
+        if let Some(repository_id) = input.repository_id {
+            let belongs: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM monitored_repositories WHERE id=? AND project_id=?)",
+                params![repository_id, input.project_id],
+                |row| Ok(row.get::<_, i64>(0)? != 0),
+            )?;
+            if !belongs {
+                return Err(anyhow!("저장소가 선택한 프로젝트에 속하지 않습니다."));
+            }
+        }
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
+             VALUES(?,?,?,1,?)
+             ON CONFLICT(project_id,repository_id,workflow_name) DO UPDATE SET active=1",
+            params![input.project_id, input.repository_id, workflow_name, now],
+        )?;
+        let id: i64 = conn.query_row(
+            "SELECT id FROM project_workflow_rules
+             WHERE project_id=? AND workflow_name=? AND ((repository_id IS NULL AND ? IS NULL) OR repository_id=?)",
+            params![input.project_id, workflow_name, input.repository_id, input.repository_id],
+            |row| row.get(0),
+        )?;
+
+        conn.execute(
+            "DELETE FROM run_assignments
+             WHERE manual=0 AND run_id IN (
+               SELECT wr.run_id FROM workflow_runs wr
+               JOIN monitored_repositories mr ON mr.id=wr.repository_id
+               WHERE mr.project_id=? AND wr.workflow_name=?
+                 AND (? IS NULL OR wr.repository_id=?)
+             )",
+            params![input.project_id, workflow_name, input.repository_id, input.repository_id],
+        )?;
+        conn.execute(
+            "UPDATE workflow_runs
+             SET resolution_status='project'
+             WHERE ignored=0
+               AND workflow_name=?
+               AND repository_id IN (
+                 SELECT id FROM monitored_repositories
+                 WHERE project_id=? AND (? IS NULL OR id=?)
+               )
+               AND NOT EXISTS(
+                 SELECT 1 FROM run_assignments ra
+                 WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+               )",
+            params![workflow_name, input.project_id, input.repository_id, input.repository_id],
+        )?;
+        Ok(id)
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_project_workflow_rule(id: i64, state: State<'_, AppState>) -> std::result::Result<(), String> {
+    let result = (|| -> Result<()> {
+        let conn = db(&state)?;
+        let rule: Option<(i64, Option<i64>, String)> = conn
+            .query_row(
+                "SELECT project_id,repository_id,workflow_name FROM project_workflow_rules WHERE id=?",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((project_id, repository_id, workflow_name)) = rule else {
+            return Err(anyhow!("삭제할 공용 CI 규칙을 찾지 못했습니다."));
+        };
+        conn.execute("DELETE FROM project_workflow_rules WHERE id=?", params![id])?;
+        conn.execute(
+            "UPDATE workflow_runs
+             SET resolution_status='unassigned'
+             WHERE ignored=0
+               AND resolution_status='project'
+               AND workflow_name=?
+               AND repository_id IN (
+                 SELECT mr.id FROM monitored_repositories mr
+                 WHERE mr.project_id=? AND (? IS NULL OR mr.id=?)
+               )
+               AND NOT EXISTS(
+                 SELECT 1 FROM project_workflow_rules pwr
+                 JOIN monitored_repositories mr2 ON mr2.id=workflow_runs.repository_id
+                 WHERE pwr.active=1
+                   AND pwr.project_id=mr2.project_id
+                   AND pwr.workflow_name=workflow_runs.workflow_name
+                   AND (pwr.repository_id IS NULL OR pwr.repository_id=workflow_runs.repository_id)
+               )",
+            params![workflow_name, project_id, repository_id, repository_id],
+        )?;
+        Ok(())
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn save_track(input: TrackInput, state: State<'_, AppState>) -> std::result::Result<i64, String> {
     let result = (|| -> Result<i64> {
         let name = input.name.trim();
@@ -1756,11 +1919,19 @@ fn save_track(input: TrackInput, state: State<'_, AppState>) -> std::result::Res
             return Err(anyhow!("장기 CI 기준시간은 1~10080분 사이로 입력하십시오."));
         }
         let conn = db(&state)?;
+        let project_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1)",
+            params![input.project_id],
+            |row| Ok(row.get::<_, i64>(0)? != 0),
+        )?;
+        if !project_exists {
+            return Err(anyhow!("프로젝트를 찾지 못했습니다."));
+        }
         let now = Utc::now().to_rfc3339();
         let id = if let Some(id) = input.id {
             conn.execute(
-                "UPDATE watch_tracks SET name=?,track_key=?,long_ci_minutes=?,active=1,updated_at=? WHERE id=?",
-                params![name, track_key, input.long_ci_minutes, now, id],
+                "UPDATE watch_tracks SET project_id=?,name=?,track_key=?,long_ci_minutes=?,active=1,updated_at=? WHERE id=?",
+                params![input.project_id, name, track_key, input.long_ci_minutes, now, id],
             )?;
             if conn.changes() == 0 {
                 return Err(anyhow!("수정할 트랙을 찾지 못했습니다."));
@@ -1768,8 +1939,8 @@ fn save_track(input: TrackInput, state: State<'_, AppState>) -> std::result::Res
             id
         } else {
             conn.execute(
-                "INSERT INTO watch_tracks(name,track_key,long_ci_minutes,active,created_at,updated_at) VALUES(?,?,?,1,?,?)",
-                params![name, track_key, input.long_ci_minutes, now, now],
+                "INSERT INTO watch_tracks(project_id,name,track_key,long_ci_minutes,active,created_at,updated_at) VALUES(?,?,?,?,1,?,?)",
+                params![input.project_id, name, track_key, input.long_ci_minutes, now, now],
             )?;
             conn.last_insert_rowid()
         };
@@ -1808,11 +1979,19 @@ fn save_repository(
         let repo = input.repo.trim();
         validate_repo(repo)?;
         let conn = db(&state)?;
+        let project_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1)",
+            params![input.project_id],
+            |row| Ok(row.get::<_, i64>(0)? != 0),
+        )?;
+        if !project_exists {
+            return Err(anyhow!("프로젝트를 찾지 못했습니다."));
+        }
         let now = Utc::now().to_rfc3339();
         let id = if let Some(id) = input.id {
             conn.execute(
-                "UPDATE monitored_repositories SET repo=?,enabled=?,updated_at=? WHERE id=?",
-                params![repo, if input.enabled { 1 } else { 0 }, now, id],
+                "UPDATE monitored_repositories SET project_id=?,repo=?,enabled=?,updated_at=? WHERE id=?",
+                params![input.project_id, repo, if input.enabled { 1 } else { 0 }, now, id],
             )?;
             if conn.changes() == 0 {
                 return Err(anyhow!("수정할 저장소를 찾지 못했습니다."));
@@ -1820,8 +1999,8 @@ fn save_repository(
             id
         } else {
             conn.execute(
-                "INSERT INTO monitored_repositories(repo,enabled,created_at,updated_at) VALUES(?,?,?,?)",
-                params![repo, if input.enabled { 1 } else { 0 }, now, now],
+                "INSERT INTO monitored_repositories(project_id,repo,enabled,created_at,updated_at) VALUES(?,?,?,?,?)",
+                params![input.project_id, repo, if input.enabled { 1 } else { 0 }, now, now],
             )?;
             conn.last_insert_rowid()
         };
@@ -1836,6 +2015,65 @@ fn delete_repository(id: i64, state: State<'_, AppState>) -> std::result::Result
     conn.execute("DELETE FROM monitored_repositories WHERE id=?", params![id])
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn assign_run_to_project(
+    run_id: i64,
+    project_id: i64,
+    learn_rule: bool,
+    state: State<'_, AppState>,
+) -> std::result::Result<(), String> {
+    let result = (|| -> Result<()> {
+        let conn = db(&state)?;
+        let (repository_id, repository_project_id, workflow_name): (i64, i64, String) = conn.query_row(
+            "SELECT wr.repository_id,mr.project_id,wr.workflow_name
+             FROM workflow_runs wr JOIN monitored_repositories mr ON mr.id=wr.repository_id
+             WHERE wr.run_id=?",
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if repository_project_id != project_id {
+            return Err(anyhow!("Run과 프로젝트가 일치하지 않습니다."));
+        }
+        conn.execute("DELETE FROM run_assignments WHERE run_id=?", params![run_id])?;
+        conn.execute(
+            "UPDATE workflow_runs SET resolution_status='project',ignored=0 WHERE run_id=?",
+            params![run_id],
+        )?;
+        if learn_rule {
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
+                 VALUES(?,NULL,?,1,?)
+                 ON CONFLICT(project_id,repository_id,workflow_name) DO UPDATE SET active=1",
+                params![project_id, workflow_name, now],
+            )?;
+            conn.execute(
+                "DELETE FROM run_assignments
+                 WHERE manual=0 AND run_id IN (
+                   SELECT wr.run_id FROM workflow_runs wr
+                   JOIN monitored_repositories mr ON mr.id=wr.repository_id
+                   WHERE mr.project_id=? AND wr.workflow_name=?
+                 )",
+                params![project_id, workflow_name],
+            )?;
+            conn.execute(
+                "UPDATE workflow_runs
+                 SET resolution_status='project'
+                 WHERE ignored=0 AND workflow_name=?
+                   AND repository_id IN (SELECT id FROM monitored_repositories WHERE project_id=?)
+                   AND NOT EXISTS(
+                     SELECT 1 FROM run_assignments ra
+                     WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+                   )",
+                params![workflow_name, project_id],
+            )?;
+        }
+        let _ = repository_id;
+        Ok(())
+    })();
+    result.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
