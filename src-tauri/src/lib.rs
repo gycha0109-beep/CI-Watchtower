@@ -30,8 +30,46 @@ struct AppState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct Project {
+    id: i64,
+    name: String,
+    project_key: String,
+    active: bool,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectInput {
+    id: Option<i64>,
+    name: String,
+    project_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectWorkflowRule {
+    id: i64,
+    project_id: i64,
+    repository_id: Option<i64>,
+    workflow_name: String,
+    active: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectWorkflowRuleInput {
+    project_id: i64,
+    repository_id: Option<i64>,
+    workflow_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Track {
     id: i64,
+    project_id: i64,
     name: String,
     track_key: String,
     long_ci_minutes: i64,
@@ -44,6 +82,7 @@ struct Track {
 #[serde(rename_all = "camelCase")]
 struct TrackInput {
     id: Option<i64>,
+    project_id: i64,
     name: String,
     track_key: String,
     long_ci_minutes: i64,
@@ -53,6 +92,7 @@ struct TrackInput {
 #[serde(rename_all = "camelCase")]
 struct MonitoredRepository {
     id: i64,
+    project_id: i64,
     repo: String,
     enabled: bool,
     running_count: i64,
@@ -65,6 +105,7 @@ struct MonitoredRepository {
 #[serde(rename_all = "camelCase")]
 struct RepositoryInput {
     id: Option<i64>,
+    project_id: i64,
     repo: String,
     enabled: bool,
 }
@@ -73,6 +114,8 @@ struct RepositoryInput {
 #[serde(rename_all = "camelCase")]
 struct WorkflowRunSummary {
     id: i64,
+    project_id: i64,
+    repository_id: i64,
     repository: String,
     workflow_name: String,
     display_title: String,
@@ -121,8 +164,11 @@ struct Dashboard {
     congestion_level: String,
     token_configured: bool,
     settings: Settings,
+    projects: Vec<Project>,
     repositories: Vec<MonitoredRepository>,
     tracks: Vec<DashboardTrack>,
+    project_workflow_rules: Vec<ProjectWorkflowRule>,
+    project_runs: Vec<WorkflowRunSummary>,
     unassigned_runs: Vec<WorkflowRunSummary>,
 }
 
