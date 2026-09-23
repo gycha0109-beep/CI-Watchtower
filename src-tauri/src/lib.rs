@@ -309,7 +309,7 @@ fn init_db(path: &Path) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS watch_tracks (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
-          project_id INTEGER REFERENCES projects(id) ON DELETE RESTRICT,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
           name TEXT NOT NULL,
           track_key TEXT NOT NULL UNIQUE,
           long_ci_minutes INTEGER NOT NULL CHECK(long_ci_minutes > 0),
@@ -318,9 +318,6 @@ fn init_db(path: &Path) -> Result<()> {
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
-
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_tracks_project_key
-          ON watch_tracks(project_id, track_key);
 
         CREATE TABLE IF NOT EXISTS monitored_repositories (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
