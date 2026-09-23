@@ -4470,6 +4470,7 @@ mod tests {
     #[test]
     fn myeongha_db_authority_suites_are_repository_scoped_project_wide() {
         let path = legacy_v02_db_path("myeongha-db-project-wide");
+        seed_legacy_v02_database(&path);
         init_db(&path).unwrap();
 
         let conn = Connection::open(&path).unwrap();
