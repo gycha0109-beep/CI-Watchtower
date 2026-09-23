@@ -2194,15 +2194,15 @@ fn persist_resolution_with_trigger(
              WHERE run_id=?
              ORDER BY score DESC,id ASC",
         )?;
-        stmt.query_map(params![run_id], |row| {
+        let rows = stmt.query_map(params![run_id], |row| {
             Ok(Evidence {
                 track_key: row.get(0)?,
                 signal_type: row.get(1)?,
                 score: row.get(2)?,
                 value: row.get(3)?,
             })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
     conn.execute("DELETE FROM run_evidence WHERE run_id=?", params![run_id])?;
