@@ -319,6 +319,9 @@ fn init_db(path: &Path) -> Result<()> {
           updated_at TEXT NOT NULL
         );
 
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_tracks_project_key
+          ON watch_tracks(project_id, track_key);
+
         CREATE TABLE IF NOT EXISTS monitored_repositories (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           project_id INTEGER REFERENCES projects(id) ON DELETE RESTRICT,
@@ -446,6 +449,7 @@ fn init_db(path: &Path) -> Result<()> {
     )?;
     migrate_legacy(&conn)?;
     migrate_project_scope(&conn)?;
+    migrate_track_key_scope(&conn)?;
     Ok(())
 }
 
@@ -497,6 +501,47 @@ fn migrate_legacy(conn: &Connection) -> Result<()> {
             params![repo, now, now],
         )?;
     }
+    Ok(())
+}
+
+fn migrate_track_key_scope(conn: &Connection) -> Result<()> {
+    let table_sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='watch_tracks'",
+        [],
+        |row| row.get(0),
+    )?;
+    let legacy_global_unique = table_sql
+        .to_ascii_lowercase()
+        .replace(['\n', '\r', '\t'], " ")
+        .contains("track_key text not null unique");
+    if !legacy_global_unique {
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_tracks_project_key ON watch_tracks(project_id,track_key)",
+            [],
+        )?;
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         CREATE TABLE watch_tracks_v03 (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+           name TEXT NOT NULL,
+           track_key TEXT NOT NULL,
+           long_ci_minutes INTEGER NOT NULL,
+           active INTEGER NOT NULL DEFAULT 1,
+           created_at TEXT NOT NULL,
+           updated_at TEXT NOT NULL,
+           UNIQUE(project_id, track_key)
+         );
+         INSERT INTO watch_tracks_v03(id,project_id,name,track_key,long_ci_minutes,active,created_at,updated_at)
+           SELECT id,project_id,name,track_key,long_ci_minutes,active,created_at,updated_at FROM watch_tracks;
+         DROP TABLE watch_tracks;
+         ALTER TABLE watch_tracks_v03 RENAME TO watch_tracks;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_tracks_project_key ON watch_tracks(project_id,track_key);
+         PRAGMA foreign_keys=ON;"
+    )?;
     Ok(())
 }
 
