@@ -96,6 +96,30 @@ export interface RunAttributionEvidence {
   createdAt: string;
 }
 
+export interface ReconciliationEvidence {
+  trackKey: string;
+  signalType: string;
+  score: number;
+  value: string;
+}
+
+export interface ReconciliationAuditEntry {
+  id: number;
+  trigger: string;
+  fromStatus: string;
+  fromTrackKey: string | null;
+  fromSource: string | null;
+  fromConfidence: number | null;
+  toStatus: string;
+  toTrackKey: string | null;
+  toSource: string | null;
+  toConfidence: number | null;
+  toReason: string | null;
+  previousEvidence: ReconciliationEvidence[];
+  evidence: ReconciliationEvidence[];
+  reconciledAt: string;
+}
+
 export interface RunAttributionDetail {
   runId: number;
   projectId: number;
@@ -114,6 +138,7 @@ export interface RunAttributionDetail {
   projectRuleId: number | null;
   projectRuleRepositoryId: number | null;
   evidence: RunAttributionEvidence[];
+  reconciliationHistory: ReconciliationAuditEntry[];
 }
 
 export type TrackHealth =

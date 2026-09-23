@@ -606,6 +606,30 @@ function App() {
                       </div>
                     ))}
                   </div>
+                  <div className="reconciliation-history">
+                    <div className="audit-evidence-head"><b>Historical Reconciliation</b><span>{auditDetail.reconciliationHistory.length}건</span></div>
+                    {auditDetail.reconciliationHistory.length === 0 ? (
+                      <p className="muted-copy">과거 미귀속/충돌 Run의 최종 판정이 변경된 이력이 없습니다.</p>
+                    ) : auditDetail.reconciliationHistory.map(entry => (
+                      <div className="reconciliation-entry" key={entry.id}>
+                        <div className="reconciliation-transition">
+                          <span className="reconciliation-time">{new Date(entry.reconciledAt).toLocaleString()}</span>
+                          <b>{entry.fromStatus}{entry.fromTrackKey ? ` / ${entry.fromTrackKey}` : ''}</b>
+                          <span>→</span>
+                          <b>{entry.toStatus}{entry.toTrackKey ? ` / ${entry.toTrackKey}` : ''}</b>
+                          <span className="reconciliation-trigger">{entry.trigger}</span>
+                        </div>
+                        <p>{entry.toReason ?? '판정 이유 없음'}{entry.toSource ? ` · ${entry.toSource}` : ''}{entry.toConfidence != null ? ` · confidence ${entry.toConfidence}` : ''}</p>
+                        {entry.evidence.length > 0 && (
+                          <div className="reconciliation-evidence">
+                            {entry.evidence.map((item, index) => (
+                              <span key={`${entry.id}-${item.signalType}-${index}`}><b>{item.score}</b> {item.signalType} · <span className="mono">{item.trackKey}</span></span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </>
               )}
             </section>
