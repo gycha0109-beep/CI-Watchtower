@@ -29,6 +29,17 @@ h2 { font-size: 16px; margin: 0 0 15px; }
 .summary-card.congestion.safe strong { color: #61d993; }
 .summary-card.congestion.busy strong { color: #f1c75b; }
 .summary-card.congestion.congested strong { color: #ff6f7d; }
+.producer-contract-panel { padding: 18px 20px; margin-bottom: 18px; }
+.producer-contract-head { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.producer-contract-head h2 { margin-bottom: 0; }
+.contract-coverage { min-width: 96px; border: 1px solid #2a3550; border-radius: 12px; background: #0c1120; padding: 10px 14px; display: grid; justify-items: end; gap: 2px; }
+.contract-coverage strong { font-size: 22px; }
+.contract-coverage span { color: #71809c; font-size: 11px; font-weight: 750; }
+.contract-coverage.healthy strong { color: #61d993; }
+.contract-coverage.drift strong { color: #f1c75b; }
+.contract-coverage.risk strong { color: #ff6f7d; }
+.metrics-row.producer-contract-metrics { grid-template-columns: repeat(5,minmax(0,1fr)); margin-bottom: 0; }
+.producer-contract-metrics small { color: #62718e; font-size: 10px; line-height: 1.4; }
 .layout-grid { display: grid; grid-template-columns: 350px minmax(0,1fr); gap: 18px; align-items: start; }
 .panel { background: rgba(14,19,33,.93); border: 1px solid #202a42; border-radius: 16px; box-shadow: 0 18px 50px rgba(0,0,0,.22); }
 .controls-panel { padding: 20px; position: sticky; top: 20px; max-height: calc(100vh - 40px); overflow: auto; }
@@ -99,6 +110,7 @@ input:focus { border-color: #4a73ee; box-shadow: 0 0 0 3px rgba(74,115,238,.12);
 @media (max-width: 1200px) {
   body { min-width: 900px; }
   .summary-grid.five { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .metrics-row.producer-contract-metrics { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .layout-grid { grid-template-columns: 320px minmax(0,1fr); }
   .run-row.v2 { grid-template-columns: 10px minmax(220px,1fr) 130px 70px; }
   .run-row.v2 .attribution { display: none; }
