@@ -169,8 +169,18 @@ struct Dashboard {
     repositories: Vec<MonitoredRepository>,
     tracks: Vec<DashboardTrack>,
     project_workflow_rules: Vec<ProjectWorkflowRule>,
+    repository_scope_stats: Vec<RepositoryScopeStats>,
     project_runs: Vec<WorkflowRunSummary>,
     unassigned_runs: Vec<WorkflowRunSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryScopeStats {
+    repository_id: i64,
+    project_id: i64,
+    unassigned_count: i64,
+    project_run_count: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1323,7 +1333,11 @@ fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<Wo
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn project_runs(conn: &Connection, limit: i64) -> Result<Vec<WorkflowRunSummary>> {
+fn project_runs_for_repository(
+    conn: &Connection,
+    repository_id: i64,
+    limit: i64,
+) -> Result<Vec<WorkflowRunSummary>> {
     let now = Utc::now();
     let mut stmt = conn.prepare(
         "SELECT wr.run_id,mr.project_id,mr.id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,
@@ -1332,14 +1346,22 @@ fn project_runs(conn: &Connection, limit: i64) -> Result<Vec<WorkflowRunSummary>
                 100 AS confidence
          FROM workflow_runs wr
          JOIN monitored_repositories mr ON mr.id=wr.repository_id
-         WHERE wr.resolution_status='project' AND wr.ignored=0
+         WHERE wr.repository_id=?
+           AND wr.resolution_status='project'
+           AND wr.ignored=0
          ORDER BY wr.created_at DESC LIMIT ?",
     )?;
-    let rows = stmt.query_map(params![limit], |row| run_summary_from_row(row, now))?;
+    let rows = stmt.query_map(params![repository_id, limit], |row| {
+        run_summary_from_row(row, now)
+    })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn unassigned_runs(conn: &Connection, limit: i64) -> Result<Vec<WorkflowRunSummary>> {
+fn unassigned_runs_for_repository(
+    conn: &Connection,
+    repository_id: i64,
+    limit: i64,
+) -> Result<Vec<WorkflowRunSummary>> {
     let now = Utc::now();
     let mut stmt = conn.prepare(
         "SELECT wr.run_id,mr.project_id,mr.id,mr.repo,wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,wr.created_at,wr.run_started_at,wr.updated_at,
@@ -1350,10 +1372,49 @@ fn unassigned_runs(conn: &Connection, limit: i64) -> Result<Vec<WorkflowRunSumma
          FROM workflow_runs wr
          JOIN monitored_repositories mr ON mr.id=wr.repository_id
          LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
-         WHERE ra.run_id IS NULL AND wr.ignored=0 AND wr.resolution_status IN ('unassigned','conflict')
-         ORDER BY CASE WHEN wr.status='completed' THEN 1 ELSE 0 END, wr.created_at DESC LIMIT ?",
+         WHERE wr.repository_id=?
+           AND ra.run_id IS NULL
+           AND wr.ignored=0
+           AND wr.resolution_status IN ('unassigned','conflict')
+         ORDER BY CASE WHEN wr.status='completed' THEN 1 ELSE 0 END, wr.created_at DESC
+         LIMIT ?",
     )?;
-    let rows = stmt.query_map(params![limit], |row| run_summary_from_row(row, now))?;
+    let rows = stmt.query_map(params![repository_id, limit], |row| {
+        run_summary_from_row(row, now)
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn repository_scope_stats(conn: &Connection) -> Result<Vec<RepositoryScopeStats>> {
+    let mut stmt = conn.prepare(
+        "SELECT mr.id,mr.project_id,
+                SUM(CASE
+                      WHEN wr.run_id IS NOT NULL
+                       AND wr.ignored=0
+                       AND wr.resolution_status IN ('unassigned','conflict')
+                       AND ra.run_id IS NULL
+                      THEN 1 ELSE 0
+                    END) AS unassigned_count,
+                SUM(CASE
+                      WHEN wr.run_id IS NOT NULL
+                       AND wr.ignored=0
+                       AND wr.resolution_status='project'
+                      THEN 1 ELSE 0
+                    END) AS project_run_count
+         FROM monitored_repositories mr
+         LEFT JOIN workflow_runs wr ON wr.repository_id=mr.id
+         LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
+         GROUP BY mr.id,mr.project_id
+         ORDER BY mr.id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(RepositoryScopeStats {
+            repository_id: row.get(0)?,
+            project_id: row.get(1)?,
+            unassigned_count: row.get(2)?,
+            project_run_count: row.get(3)?,
+        })
+    })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
@@ -1426,8 +1487,21 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
     }
     let running_count: i64 = repositories.iter().filter(|r| r.enabled).map(|r| r.running_count).sum();
     let queued_count: i64 = repositories.iter().filter(|r| r.enabled).map(|r| r.queued_count).sum();
-    let project_runs = project_runs(&conn, 200)?;
-    let unassigned_runs = unassigned_runs(&conn, 200)?;
+    let repository_scope_stats = repository_scope_stats(&conn)?;
+    let mut project_runs = Vec::new();
+    let mut unassigned_runs = Vec::new();
+    for repository in &repositories {
+        project_runs.extend(project_runs_for_repository(&conn, repository.id, 200)?);
+        unassigned_runs.extend(unassigned_runs_for_repository(&conn, repository.id, 200)?);
+    }
+    project_runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    unassigned_runs.sort_by(|a, b| {
+        let a_completed = a.status == "completed";
+        let b_completed = b.status == "completed";
+        a_completed
+            .cmp(&b_completed)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+    });
     let unassigned_count: i64 = conn.query_row(
         "SELECT COUNT(*)
          FROM workflow_runs wr
@@ -1456,6 +1530,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         repositories,
         tracks: dashboard_tracks,
         project_workflow_rules,
+        repository_scope_stats,
         project_runs,
         unassigned_runs,
     })
@@ -2949,6 +3024,52 @@ mod tests {
         assert_eq!(resolution.status, "assigned");
         assert_eq!(resolution.track_id, Some(1));
         assert_eq!(resolution.confidence, Some(100));
+    }
+
+    #[test]
+    fn repository_scope_stats_keep_project_and_repository_counts_exact() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE monitored_repositories(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL
+             );
+             CREATE TABLE workflow_runs(
+               run_id INTEGER PRIMARY KEY,
+               repository_id INTEGER NOT NULL,
+               resolution_status TEXT NOT NULL,
+               ignored INTEGER NOT NULL
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL
+             );
+             INSERT INTO monitored_repositories(id,project_id)
+               VALUES(10,1),(20,1),(30,2);
+             INSERT INTO workflow_runs(run_id,repository_id,resolution_status,ignored)
+               VALUES(101,10,'unassigned',0),
+                     (102,10,'conflict',0),
+                     (103,10,'project',0),
+                     (104,10,'unassigned',1),
+                     (201,20,'unassigned',0),
+                     (202,20,'project',0),
+                     (301,30,'project',0),
+                     (302,30,'unassigned',0);
+             INSERT INTO run_assignments(run_id,track_id) VALUES(102,999);"
+        ).unwrap();
+
+        let stats = repository_scope_stats(&conn).unwrap();
+        let by_repo: HashMap<i64, (i64, i64, i64)> = stats
+            .into_iter()
+            .map(|item| (
+                item.repository_id,
+                (item.project_id, item.unassigned_count, item.project_run_count),
+            ))
+            .collect();
+
+        assert_eq!(by_repo.get(&10), Some(&(1, 1, 1)));
+        assert_eq!(by_repo.get(&20), Some(&(1, 1, 1)));
+        assert_eq!(by_repo.get(&30), Some(&(2, 1, 1)));
     }
 
     #[test]
