@@ -3634,6 +3634,221 @@ mod tests {
     }
 
     #[test]
+    fn workflow_name_fingerprint_alone_stays_below_auto_assignment_threshold() {
+        let tracks = vec![track(10, "ops")];
+        let fingerprints = vec![Fingerprint {
+            track_key: "ops".into(),
+            signal_type: "workflow_name".into(),
+            pattern: "Shared CI".into(),
+            weight: 50,
+        }];
+        let run = GithubRun {
+            id: 101,
+            workflow_id: 1,
+            name: "Shared CI".into(),
+            path: None,
+            display_title: Some("Shared CI".into()),
+            event: "push".into(),
+            head_branch: Some("main".into()),
+            head_sha: "sha-101".into(),
+            run_number: 101,
+            run_attempt: 1,
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            html_url: "https://github.com/example/repo/actions/runs/101".into(),
+            created_at: "2026-09-24T01:00:00Z".into(),
+            run_started_at: Some("2026-09-24T01:00:01Z".into()),
+            updated_at: "2026-09-24T01:01:00Z".into(),
+            pull_requests: Vec::new(),
+        };
+
+        let resolution = resolve_evidence(
+            &tracks,
+            &HashMap::new(),
+            fingerprint_evidence(&fingerprints, &run),
+        );
+
+        assert_eq!(resolution.status, "unassigned");
+        assert_eq!(resolution.track_id, None);
+        assert_eq!(resolution.confidence, Some(50));
+    }
+
+    #[test]
+    fn manual_assignment_learning_and_project_wide_transition_complete_acceptance_cycle() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE watch_tracks(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               active INTEGER NOT NULL
+             );
+             CREATE TABLE monitored_repositories(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL
+             );
+             CREATE TABLE workflow_runs(
+               run_id INTEGER PRIMARY KEY,
+               repository_id INTEGER NOT NULL,
+               workflow_name TEXT NOT NULL,
+               workflow_path TEXT,
+               resolution_status TEXT NOT NULL,
+               ignored INTEGER NOT NULL,
+               last_resolution_attempt_at TEXT
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               manual INTEGER NOT NULL,
+               assigned_at TEXT NOT NULL
+             );
+             CREATE TABLE run_evidence(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               run_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               signal_type TEXT NOT NULL,
+               score INTEGER NOT NULL,
+               value TEXT NOT NULL,
+               created_at TEXT NOT NULL
+             );
+             CREATE TABLE track_fingerprints(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               track_id INTEGER NOT NULL,
+               signal_type TEXT NOT NULL,
+               pattern TEXT NOT NULL,
+               repository_id INTEGER,
+               weight INTEGER NOT NULL,
+               learned_from_run_id INTEGER,
+               active INTEGER NOT NULL,
+               created_at TEXT NOT NULL,
+               UNIQUE(track_id,signal_type,pattern,repository_id)
+             );
+             CREATE TABLE project_workflow_rules(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               project_id INTEGER NOT NULL,
+               repository_id INTEGER,
+               workflow_name TEXT NOT NULL,
+               active INTEGER NOT NULL,
+               created_at TEXT NOT NULL
+             );
+             CREATE UNIQUE INDEX idx_test_project_workflow_rules_scope
+               ON project_workflow_rules(project_id,COALESCE(repository_id,0),workflow_name);
+
+             INSERT INTO watch_tracks(id,project_id,track_key,active)
+               VALUES(10,1,'ops',1),(20,2,'ops',1);
+             INSERT INTO monitored_repositories(id,project_id)
+               VALUES(100,1),(110,1),(200,2);
+             INSERT INTO workflow_runs(
+               run_id,repository_id,workflow_name,workflow_path,resolution_status,ignored,last_resolution_attempt_at
+             ) VALUES
+               (1000,100,'Shared CI','.github/workflows/shared.yml','unassigned',0,NULL),
+               (1001,100,'Shared CI','.github/workflows/shared.yml','unassigned',0,NULL),
+               (2000,200,'Shared CI','.github/workflows/shared.yml','unassigned',0,NULL);"
+        ).unwrap();
+
+        assign_run_in_conn(&conn, 1000, 10, "2026-09-24T01:00:00Z").unwrap();
+
+        let manual: (i64, i64, String) = conn.query_row(
+            "SELECT track_id,manual,source FROM run_assignments WHERE run_id=1000",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(manual, (10, 1, "manual".into()));
+
+        let learned = load_fingerprints(&conn, 1, 100).unwrap();
+        let learned_signals: HashMap<_, _> = learned
+            .iter()
+            .map(|item| (item.signal_type.as_str(), item.weight))
+            .collect();
+        assert_eq!(learned_signals.get("workflow_name"), Some(&50));
+        assert_eq!(learned_signals.get("workflow_path"), Some(&35));
+        assert!(load_fingerprints(&conn, 2, 200).unwrap().is_empty());
+
+        let next_run = GithubRun {
+            id: 1001,
+            workflow_id: 1,
+            name: "Shared CI".into(),
+            path: Some(".github/workflows/shared.yml".into()),
+            display_title: Some("Shared CI".into()),
+            event: "push".into(),
+            head_branch: Some("main".into()),
+            head_sha: "sha-1001".into(),
+            run_number: 2,
+            run_attempt: 1,
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            html_url: "https://github.com/example/repo/actions/runs/1001".into(),
+            created_at: "2026-09-24T01:10:00Z".into(),
+            run_started_at: Some("2026-09-24T01:10:01Z".into()),
+            updated_at: "2026-09-24T01:11:00Z".into(),
+            pull_requests: Vec::new(),
+        };
+        let inferred = resolve_evidence(
+            &[track(10, "ops")],
+            &HashMap::new(),
+            fingerprint_evidence(&learned, &next_run),
+        );
+        assert_eq!(inferred.status, "assigned");
+        assert_eq!(inferred.track_id, Some(10));
+        assert_eq!(inferred.confidence, Some(85));
+        assert_eq!(inferred.source.as_deref(), Some("inference"));
+
+        persist_resolution(&conn, 1001, &inferred, "2026-09-24T01:11:00Z").unwrap();
+        let automatic: (i64, i64, String) = conn.query_row(
+            "SELECT track_id,manual,source FROM run_assignments WHERE run_id=1001",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(automatic, (10, 0, "inference".into()));
+
+        assign_run_to_project_in_conn(
+            &conn,
+            1001,
+            1,
+            true,
+            "2026-09-24T01:12:00Z",
+        ).unwrap();
+
+        let rules = list_project_workflow_rules(&conn).unwrap();
+        assert!(project_rule_matches(&rules, 1, 100, "Shared CI"));
+        assert!(project_rule_matches(&rules, 1, 110, "Shared CI"));
+        assert!(!project_rule_matches(&rules, 2, 200, "Shared CI"));
+
+        let promoted_status: String = conn.query_row(
+            "SELECT resolution_status FROM workflow_runs WHERE run_id=1001",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(promoted_status, "project");
+        let promoted_assignment_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM run_assignments WHERE run_id=1001",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(promoted_assignment_count, 0);
+
+        let preserved_manual: (String, i64) = conn.query_row(
+            "SELECT wr.resolution_status,ra.manual
+             FROM workflow_runs wr
+             JOIN run_assignments ra ON ra.run_id=wr.run_id
+             WHERE wr.run_id=1000",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(preserved_manual, ("assigned".into(), 1));
+
+        let other_project_status: String = conn.query_row(
+            "SELECT resolution_status FROM workflow_runs WHERE run_id=2000",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(other_project_status, "unassigned");
+    }
+
+    #[test]
     fn explicit_conflict_model_has_distinct_keys() {
         let tracks = vec![track(1, "ops"), track(2, "saju")];
         let known: HashSet<_> = tracks.iter().map(|t| t.track_key.as_str()).collect();
