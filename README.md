@@ -215,6 +215,19 @@ Manual Resolution의 판단과 결과를 immutable event history로 추적합니
 - Inbox 상단은 Open / Deferred / Attention / Blocked 건수를 분리해 운영 우선순위를 보여줍니다.
 - Resolution History의 Open 필터에서 재검토 재개와 mutation 후 still-open 사건을 함께 추적할 수 있습니다.
 
+### Responsibility Review Aging / Priority (v0.3.25)
+
+Review Inbox를 단순 상태 목록이 아니라 실제 운영 우선순위 큐로 정렬합니다.
+
+- `responsibility_review_state`는 `review_key + fingerprint`별 최초 관측 시각과 최근 관측 시각을 보존합니다.
+- Aging은 최초 관측 기준으로 `FRESH(<24h)`, `AGING(24~71h)`, `OVERDUE(>=72h)`로 계산합니다.
+- 우선순위는 `P0=ATTENTION`, `P1=72시간 이상 OPEN`, `P2=일반 OPEN`, `P3=DEFERRED`, `BLOCKED` 순으로 분리합니다.
+- 같은 우선순위 안에서는 오래된 항목, 실패 시도가 많은 항목을 먼저 노출합니다.
+- 각 Inbox 카드에 first seen, review event 수, failed attempt 수, last reviewed 시각을 표시합니다.
+- 실패 시도는 `failed`, `stale_rejected`, 실제 mutation 뒤 남은 `still_open`을 집계하며 단순 `reopen` event는 실패로 세지 않습니다.
+- fingerprint가 바뀌면 새로운 review 상태로 취급하므로 과거 drift의 aging이 새 계약 상태에 잘못 이어지지 않습니다.
+- 기존 fail-closed 경계, repository scope, canonical Track, producer YAML, responsibility map, manual assignment 불변 조건은 유지합니다.
+
 ## Producer Contract Health
 
 Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.
