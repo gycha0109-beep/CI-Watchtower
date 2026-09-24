@@ -862,14 +862,63 @@ fn seed_bejewely_project_scope(conn: &Connection) -> Result<()> {
     for workflow_name in [
         "BEJEWELY Current Main Health",
         "PIE Prospective Shadow",
-        "BEJEWELY Security Boundary",
-        "BEJEWELY Supply Chain Security",
     ] {
         tx.execute(
             "INSERT OR IGNORE INTO project_workflow_rules(
                project_id,repository_id,workflow_name,active,created_at
              ) VALUES(?,NULL,?,1,?)",
             params![project_id, workflow_name, now],
+        )?;
+    }
+
+    // Visualy's repository-owned responsibility map is authoritative for producer class.
+    // Security/Supply Chain were previously seeded as Project-wide, but are now
+    // explicitly shared-dynamic producers. Remove the stale classification and
+    // return affected non-manual runs to fail-closed reconciliation.
+    tx.execute(
+        "DELETE FROM project_workflow_rules
+         WHERE project_id=?
+           AND workflow_name IN ('BEJEWELY Security Boundary','BEJEWELY Supply Chain Security')",
+        params![project_id],
+    )?;
+    tx.execute(
+        "UPDATE workflow_runs
+         SET resolution_status='unassigned'
+         WHERE repository_id=?
+           AND ignored=0
+           AND resolution_status='project'
+           AND workflow_name IN ('BEJEWELY Security Boundary','BEJEWELY Supply Chain Security')
+           AND NOT EXISTS(
+             SELECT 1 FROM run_assignments ra
+             WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+           )",
+        params![repository_id],
+    )?;
+
+    for workflow_name in [
+        "Admin - Access Foundation",
+        "Admin - Product Current Main Integration",
+        "Product Offer Runtime - DATA-OFFER17 Controlled RPC Diagnostic",
+        "Product Data Pipeline - Hwahae Provenance Non-Main PR Guard",
+        "Product Data Pipeline - Identity Key Repair Confirm",
+        "Product Data Pipeline - Product Offers",
+        "Product Data Pipeline - Source Bindings",
+        "BEJEWELY Security Boundary",
+        "Recommendation Admission - G3A PF Authority Read",
+        "BEJEWELY Supply Chain Security",
+        "BEJEWELY AI Provider Runtime",
+    ] {
+        tx.execute(
+            "INSERT OR IGNORE INTO dynamic_workflow_rules(
+               project_id,repository_id,workflow_name,active,protected,created_at
+             ) VALUES(?,?,?,1,1,?)",
+            params![project_id, repository_id, workflow_name, now],
+        )?;
+        tx.execute(
+            "UPDATE dynamic_workflow_rules
+             SET active=1,protected=1
+             WHERE project_id=? AND repository_id=? AND workflow_name=?",
+            params![project_id, repository_id, workflow_name],
         )?;
     }
 
@@ -1285,7 +1334,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.13")
+        .user_agent("ci-watchtower/0.3.14")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
