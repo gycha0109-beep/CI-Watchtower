@@ -18,95 +18,27 @@ jobs:
         with:
           ref: feat/responsibility-review-aging
           fetch-depth: 0
-      - name: Finalize Rust split and review metrics
+      - name: Finalize v0.3.25 Rust metadata
         shell: python
         run: |
           from pathlib import Path
-
-          lib_path = Path("src-tauri/src/lib.rs")
-          source = lib_path.read_text()
-          marker = "#[cfg(test)]\nmod tests {\n"
-          if marker not in source:
-              raise SystemExit("inline test module marker missing")
-          source = source.split(marker, 1)[0] + "#[cfg(test)]\nmod tests;\n"
-
-          old = """                review_key: String::new(),
-                          fingerprint: String::new(),
-                          review_status: "open".into(),"""
-          new = """                review_key: String::new(),
-                          fingerprint: String::new(),
-                          review_status: "open".into(),
-                          review_priority: "p2".into(),
-                          review_age_bucket: "fresh".into(),
-                          review_age_hours: 0,
-                          review_event_count: 0,
-                          failed_attempt_count: 0,
-                          last_reviewed_at: None,
-                          first_seen_at: String::new(),"""
-          count = source.count(old)
-          if count != 1:
-              raise SystemExit(f"expected 1 production drift initializer, got {count}")
-          source = source.replace(old, new)
-
-          old_sort = """    drifts.sort_by(|a, b| {
-                  a.repository
-                      .cmp(&b.repository)
-                      .then_with(|| a.workflow_name.cmp(&b.workflow_name))
-                      .then_with(|| a.drift_type.cmp(&b.drift_type))
-              });"""
-          new_sort = """    drifts.sort_by(|a, b| {
-                  responsibility_review_priority_rank(&a.review_priority)
-                      .cmp(&responsibility_review_priority_rank(&b.review_priority))
-                      .then_with(|| b.review_age_hours.cmp(&a.review_age_hours))
-                      .then_with(|| b.failed_attempt_count.cmp(&a.failed_attempt_count))
-                      .then_with(|| a.repository.cmp(&b.repository))
-                      .then_with(|| a.workflow_name.cmp(&b.workflow_name))
-                      .then_with(|| a.drift_type.cmp(&b.drift_type))
-              });"""
-          if old_sort not in source:
-              raise SystemExit("drift sort anchor missing")
-          source = source.replace(old_sort, new_sort)
-          lib_path.write_text(source)
-
-          tests_path = Path("src-tauri/src/tests.rs")
-          tests = tests_path.read_text()
-          test_name = "responsibility_review_priority_and_age_bucket_follow_operational_order"
-          if test_name not in tests:
-              tests += """
-
-              #[test]
-              fn responsibility_review_priority_and_age_bucket_follow_operational_order() {
-                  assert_eq!(responsibility_review_priority("attention", 0), "p0");
-                  assert_eq!(responsibility_review_priority("open", 72), "p1");
-                  assert_eq!(responsibility_review_priority("open", 71), "p2");
-                  assert_eq!(responsibility_review_priority("deferred", 120), "p3");
-                  assert_eq!(responsibility_review_priority("blocked", 120), "blocked");
-                  assert_eq!(responsibility_review_age_bucket(23), "fresh");
-                  assert_eq!(responsibility_review_age_bucket(24), "aging");
-                  assert_eq!(responsibility_review_age_bucket(71), "aging");
-                  assert_eq!(responsibility_review_age_bucket(72), "overdue");
-                  assert!(
-                      responsibility_review_priority_rank("p0")
-                          < responsibility_review_priority_rank("p1")
-                  );
-                  assert!(
-                      responsibility_review_priority_rank("p1")
-                          < responsibility_review_priority_rank("p2")
-                  );
-                  assert!(
-                      responsibility_review_priority_rank("p2")
-                          < responsibility_review_priority_rank("p3")
-                  );
-              }
-              """
-              tests_path.write_text(tests)
+          path = Path("src-tauri/src/lib.rs")
+          source = path.read_text()
+          old = "ci-watchtower/0.3.24"
+          new = "ci-watchtower/0.3.25"
+          if old not in source:
+              if new not in source:
+                  raise SystemExit("WatchTower user-agent version anchor missing")
+          else:
+              source = source.replace(old, new)
+              path.write_text(source)
       - name: Format Rust
         run: cargo fmt --manifest-path src-tauri/Cargo.toml
-      - name: Commit finalized source
+      - name: Commit finalized Rust metadata
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src-tauri/src/lib.rs src-tauri/src/tests.rs
+          git add src-tauri/src/lib.rs
           git diff --cached --quiet && exit 0
-          git commit -m "test: finalize responsibility review aging implementation"
+          git commit -m "chore: bump WatchTower user agent to 0.3.25"
           git push origin HEAD:feat/responsibility-review-aging
