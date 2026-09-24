@@ -129,6 +129,14 @@ run-name: "[WT:${{ inputs.watchtower_track }}] ${{ github.workflow }}"
 
 `[WT:<track-key>]`는 Workflow 파일명이 아니라 GitHub Actions **run-name**에 노출되는 귀속 신호입니다.
 
+
+### Workflow Responsibility Review
+
+- Current Run이 PR/commit/branch marker로 정상 귀속돼도 Workflow 자체의 책임 선언이 없으면 Responsibility Review에 표시합니다.
+- 고정 Track-owned는 `[WT:<track-key>]`, Project-wide는 `project_workflow_rules`, 여러 Track이 공유하는 producer는 `dynamic_workflow_rules`로 선언합니다.
+- Dynamic 규칙은 Track을 강제하지 않습니다. 각 Run은 계속 명시 신호로 fail-closed 귀속됩니다.
+- Saju `MESH6J Manual Browser Capture Surface CI`는 repository-scoped Dynamic Workflow입니다.
+
 ## Producer Contract Health
 
 Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.
