@@ -62,6 +62,8 @@ h2 { font-size: 16px; margin: 0 0 15px; }
 }
 .producer-drift-row:hover, .producer-drift-row.selected { border-color: #40527a; background: #11182a; }
 .producer-drift-row.selected { box-shadow: inset 3px 0 0 #4a73ee; }
+.producer-drift.responsibility-review { border-top-style: dashed; }
+.producer-drift.responsibility-review .producer-drift-head b { color: #e4c66d; }
 .producer-drift.historical-drift { border-top-style: dashed; }
 .producer-drift.historical-drift .producer-drift-head b { color: #91a0ba; }
 .producer-drift-row.historical { background: #090e1b; opacity: .76; }
