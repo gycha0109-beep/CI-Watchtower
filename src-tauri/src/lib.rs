@@ -263,6 +263,7 @@ struct ProducerContractRun {
     run: WorkflowRunSummary,
     bucket: String,
     contract_compliant: bool,
+    responsibility_declared: bool,
     is_current_producer_run: bool,
 }
 
@@ -506,6 +507,18 @@ fn init_db(path: &Path) -> Result<()> {
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_project_workflow_rules_scope
           ON project_workflow_rules(project_id, COALESCE(repository_id,0), workflow_name);
+
+        CREATE TABLE IF NOT EXISTS dynamic_workflow_rules (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          repository_id INTEGER REFERENCES monitored_repositories(id) ON DELETE CASCADE,
+          workflow_name TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_dynamic_workflow_rules_scope
+          ON dynamic_workflow_rules(project_id, COALESCE(repository_id,0), workflow_name);
 
         CREATE TABLE IF NOT EXISTS track_aliases (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -999,6 +1012,24 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
                 )?;
             }
         }
+
+        let saju_repository_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories
+                 WHERE repo='gycha0109-beep/Saju'
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(repository_id) = saju_repository_id {
+            conn.execute(
+                "INSERT OR IGNORE INTO dynamic_workflow_rules(
+                   project_id,repository_id,workflow_name,active,created_at
+                 ) VALUES(?,?,'MESH6J Manual Browser Capture Surface CI',1,?)",
+                params![myeongha_project_id, repository_id, now],
+            )?;
+        }
     }
 
     conn.execute(
@@ -1225,7 +1256,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.11")
+        .user_agent("ci-watchtower/0.3.12")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -1884,6 +1915,18 @@ fn producer_contract_runs(
                     THEN 1
                   ELSE 0
                 END AS contract_compliant,
+                CASE
+                  WHEN resolution_status='project' THEN 1
+                  WHEN resolution_status='assigned' AND manual=0 AND attribution_source='run_name' THEN 1
+                  WHEN EXISTS(
+                    SELECT 1 FROM dynamic_workflow_rules dwr
+                    WHERE dwr.project_id=recent.project_id
+                      AND dwr.active=1
+                      AND dwr.workflow_name=recent.workflow_name
+                      AND (dwr.repository_id IS NULL OR dwr.repository_id=recent.repository_id)
+                  ) THEN 1
+                  ELSE 0
+                END AS responsibility_declared,
                 CASE WHEN workflow_rank=1 THEN 1 ELSE 0 END AS is_current_producer_run
          FROM recent
          WHERE repository_rank<=?
@@ -1894,7 +1937,8 @@ fn producer_contract_runs(
             run: run_summary_from_row(row, now)?,
             bucket: row.get(20)?,
             contract_compliant: row.get::<_, i64>(21)? != 0,
-            is_current_producer_run: row.get::<_, i64>(22)? != 0,
+            responsibility_declared: row.get::<_, i64>(22)? != 0,
+            is_current_producer_run: row.get::<_, i64>(23)? != 0,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -5048,6 +5092,123 @@ mod tests {
             )
             .unwrap();
         assert_eq!(manual_row, ("assigned".into(), 1));
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn dynamic_workflow_rule_declares_responsibility_without_forcing_track_ownership() {
+        let path = legacy_v02_db_path("dynamic-workflow-responsibility");
+        seed_legacy_v02_database(&path);
+        init_db(&path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let repository_id: i64 = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/Saju'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let project_id: i64 = conn
+            .query_row(
+                "SELECT project_id FROM monitored_repositories WHERE id=?",
+                params![repository_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let track_id: i64 = conn
+            .query_row(
+                "SELECT id FROM watch_tracks WHERE project_id=? AND active=1 ORDER BY id LIMIT 1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let dynamic_rule_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dynamic_workflow_rules
+                 WHERE project_id=? AND repository_id=?
+                   AND workflow_name='MESH6J Manual Browser Capture Surface CI' AND active=1",
+                params![project_id, repository_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dynamic_rule_count, 1);
+
+        conn.execute(
+            "INSERT INTO workflow_runs(
+               run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
+               head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
+               created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored,last_resolution_attempt_at
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![
+                9_220_001_i64,
+                repository_id,
+                922_i64,
+                "MESH6J Manual Browser Capture Surface CI",
+                ".github/workflows/mesh6j-localhost-manual-browser-capture-ci.yml",
+                "research(face-reading): FR274",
+                "pull_request",
+                "research/face-research/fr274-still-image-diagnostic",
+                "sha-9220001",
+                9220001_i64,
+                1_i64,
+                "completed",
+                "success",
+                "https://example/9220001",
+                "2026-09-24T03:00:00Z",
+                Option::<String>::None,
+                "2026-09-24T03:01:00Z",
+                "2026-09-24T03:01:00Z",
+                "assigned",
+                0_i64,
+                Option::<String>::None,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO run_assignments(
+               run_id,track_id,confidence,source,reason,manual,assigned_at
+             ) VALUES(?,?,?,?,?,0,?)",
+            params![
+                9_220_001_i64,
+                track_id,
+                98_i64,
+                "pr_marker",
+                "PR #1407",
+                "2026-09-24T03:02:00Z",
+            ],
+        )
+        .unwrap();
+
+        let rows = producer_contract_runs(&conn, 50).unwrap();
+        let mesh = rows
+            .iter()
+            .find(|item| item.run.id == 9_220_001_i64)
+            .unwrap();
+        assert!(mesh.contract_compliant);
+        assert!(mesh.responsibility_declared);
+        assert_eq!(mesh.bucket, "pr_marker");
+        assert_eq!(mesh.run.resolution_status, "assigned");
+
+        conn.execute(
+            "UPDATE workflow_runs
+             SET workflow_name='New Shared Gate',workflow_id=923
+             WHERE run_id=9220001",
+            [],
+        )
+        .unwrap();
+        let rows = producer_contract_runs(&conn, 50).unwrap();
+        let undeclared = rows
+            .iter()
+            .find(|item| item.run.id == 9_220_001_i64)
+            .unwrap();
+        assert!(undeclared.contract_compliant);
+        assert!(!undeclared.responsibility_declared);
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
