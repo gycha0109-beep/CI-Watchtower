@@ -7663,6 +7663,13 @@ mod tests {
             params![project_id, repository_id, now],
         )
         .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO dynamic_workflow_rules(
+               project_id,repository_id,workflow_name,active,protected,created_at
+             ) VALUES(?,?,'Kind Mismatch Project',1,1,?)",
+            params![project_id, repository_id, now],
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO monitored_repositories(
@@ -7709,6 +7716,13 @@ mod tests {
                 ".github/workflows/wrong-static.yml",
                 "[WT:trust] Wrong Static",
             ),
+            (
+                9_800_005_i64,
+                9805_i64,
+                "Missing Project",
+                ".github/workflows/missing-project.yml",
+                "Missing Project",
+            ),
         ] {
             let run = GithubRun {
                 id: run_id,
@@ -7735,7 +7749,7 @@ mod tests {
         conn.execute(
             "INSERT OR IGNORE INTO dynamic_workflow_rules(
                project_id,repository_id,workflow_name,active,protected,created_at
-             ) VALUES(?,?,'Stale Dynamic',1,0,?)",
+             ) VALUES(?,?,'Stale Dynamic',1,1,?)",
             params![project_id, repository_id, now],
         )
         .unwrap();
@@ -7781,11 +7795,27 @@ mod tests {
                 source_path: RESPONSIBILITY_MAP_PATH.into(),
             },
             RepositoryResponsibilityContract {
+                workflow_path: ".github/workflows/missing-project.yml".into(),
+                workflow_name: "Missing Project".into(),
+                binding_kind: "project-wide".into(),
+                track_key: None,
+                source_binding: "unassigned-by-design".into(),
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            },
+            RepositoryResponsibilityContract {
                 workflow_path: ".github/workflows/kind-mismatch.yml".into(),
                 workflow_name: "Kind Mismatch".into(),
                 binding_kind: "dynamic".into(),
                 track_key: None,
                 source_binding: "dynamic-by-run".into(),
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            },
+            RepositoryResponsibilityContract {
+                workflow_path: ".github/workflows/kind-mismatch-project.yml".into(),
+                workflow_name: "Kind Mismatch Project".into(),
+                binding_kind: "project-wide".into(),
+                track_key: None,
+                source_binding: "unassigned-by-design".into(),
                 source_path: RESPONSIBILITY_MAP_PATH.into(),
             },
             RepositoryResponsibilityContract {
@@ -7820,6 +7850,21 @@ mod tests {
         let assignment_count_before: i64 =
             conn.query_row("SELECT COUNT(*) FROM run_assignments", [], |row| row.get(0)).unwrap();
 
+        let mobile_track_id: i64 = conn
+            .query_row(
+                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='mobile' AND active=1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO run_assignments(
+               run_id,track_id,confidence,source,reason,manual,assigned_at
+             ) VALUES(9_800_005,?,100,'manual','manual preservation fixture',1,?)",
+            params![mobile_track_id, now],
+        )
+        .unwrap();
+
         let drifts = responsibility_map_drifts(&conn).unwrap();
 
         let track_count_after: i64 =
@@ -7839,6 +7884,7 @@ mod tests {
             .map(|item| item.workflow_name.as_str())
             .collect();
         assert!(missing_names.contains("Missing Dynamic"));
+        assert!(missing_names.contains("Missing Project"));
         assert!(missing_names.contains("Scoped Dynamic"));
 
         let missing_dynamic = drifts
@@ -7900,6 +7946,184 @@ mod tests {
             stale_project.recommended_action,
             "review_remove_or_confirm_stale_rule"
         );
+
+        let preview = resolution_preview_for_drift(&conn, missing_dynamic).unwrap();
+        assert!(preview.executable);
+        assert_eq!(preview.action, "add_dynamic_rule");
+        assert!(preview.changes.iter().any(|item| item.contains("protected Dynamic")));
+        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Missing Dynamic")
+            .unwrap()
+            .is_none());
+
+        let deferred = defer_responsibility_drift_with_conn(
+            &conn,
+            &DeferResponsibilityDriftInput {
+                review_key: missing_dynamic.review_key.clone(),
+                fingerprint: missing_dynamic.fingerprint.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(deferred.status, "deferred");
+        let deferred_drift = current_responsibility_drift(&conn, &missing_dynamic.review_key).unwrap();
+        assert_eq!(deferred_drift.review_status, "deferred");
+
+        let resolved_missing_dynamic = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: missing_dynamic.review_key.clone(),
+                fingerprint: missing_dynamic.fingerprint.clone(),
+                action: "add_dynamic_rule".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved_missing_dynamic.status, "resolved");
+        let created_dynamic = exact_dynamic_rule(&conn, project_id, repository_id, "Missing Dynamic")
+            .unwrap()
+            .unwrap();
+        assert!(created_dynamic.protected);
+
+        let missing_project = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Missing Project")
+            .unwrap();
+        let resolved_missing_project = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: missing_project.review_key.clone(),
+                fingerprint: missing_project.fingerprint.clone(),
+                action: "add_project_wide_rule".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved_missing_project.status, "resolved");
+        assert!(exact_project_rule(&conn, project_id, repository_id, "Missing Project")
+            .unwrap()
+            .is_some());
+        let manual_preserved: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9_800_005 AND manual=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(manual_preserved, 1);
+
+        let kind_dynamic = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Kind Mismatch")
+            .unwrap();
+        let kind_dynamic_result = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: kind_dynamic.review_key.clone(),
+                fingerprint: kind_dynamic.fingerprint.clone(),
+                action: "reclassify_to_dynamic".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(kind_dynamic_result.status, "resolved");
+        assert!(exact_project_rule(&conn, project_id, repository_id, "Kind Mismatch")
+            .unwrap()
+            .is_none());
+        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Kind Mismatch")
+            .unwrap()
+            .unwrap()
+            .protected);
+
+        let kind_project = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Kind Mismatch Project")
+            .unwrap();
+        let kind_project_result = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: kind_project.review_key.clone(),
+                fingerprint: kind_project.fingerprint.clone(),
+                action: "reclassify_to_project_wide".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(kind_project_result.status, "resolved");
+        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Kind Mismatch Project")
+            .unwrap()
+            .is_none());
+        assert!(exact_project_rule(&conn, project_id, repository_id, "Kind Mismatch Project")
+            .unwrap()
+            .is_some());
+
+        let stale_dynamic_current = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Stale Dynamic")
+            .unwrap();
+        let stale_dynamic_result = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: stale_dynamic_current.review_key.clone(),
+                fingerprint: stale_dynamic_current.fingerprint.clone(),
+                action: "remove_stale_rule".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(stale_dynamic_result.status, "resolved");
+        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Stale Dynamic")
+            .unwrap()
+            .is_none());
+
+        let wrong_static_current = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Wrong Static")
+            .unwrap();
+        let blocked_preview = resolution_preview_for_drift(&conn, &wrong_static_current).unwrap();
+        assert!(!blocked_preview.executable);
+        assert_eq!(blocked_preview.action, "blocked");
+
+        let scoped_dynamic = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Scoped Dynamic")
+            .unwrap();
+        let old_fingerprint = scoped_dynamic.fingerprint.clone();
+        conn.execute(
+            "UPDATE repository_responsibility_contracts
+             SET binding_kind='project-wide',source_binding='unassigned-by-design'
+             WHERE repository_id=? AND workflow_name='Scoped Dynamic'",
+            params![repository_id],
+        )
+        .unwrap();
+        let stale_rejected = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: scoped_dynamic.review_key.clone(),
+                fingerprint: old_fingerprint,
+                action: "add_dynamic_rule".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(stale_rejected.status, "stale_rejected");
+        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Scoped Dynamic")
+            .unwrap()
+            .is_none());
+
+        let track_count_final: i64 =
+            conn.query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0)).unwrap();
+        assert_eq!(track_count_before, track_count_final);
+        let audit_results: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT result FROM responsibility_resolution_audit ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert!(audit_results.contains(&"deferred".to_string()));
+        assert!(audit_results.contains(&"resolved".to_string()));
+        assert!(audit_results.contains(&"stale_rejected".to_string()));
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
