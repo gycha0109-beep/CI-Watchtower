@@ -1349,7 +1349,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.16")
+        .user_agent("ci-watchtower/0.3.17")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -1847,6 +1847,7 @@ fn unassigned_runs_for_repository(
          WHERE wr.repository_id=?
            AND ra.run_id IS NULL
            AND wr.ignored=0
+           AND COALESCE(wr.workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
            AND wr.resolution_status IN ('unassigned','conflict')
          ORDER BY CASE WHEN wr.status='completed' THEN 1 ELSE 0 END, wr.created_at DESC
          LIMIT ?",
@@ -1863,6 +1864,7 @@ fn repository_scope_stats(conn: &Connection) -> Result<Vec<RepositoryScopeStats>
                 SUM(CASE
                       WHEN wr.run_id IS NOT NULL
                        AND wr.ignored=0
+                       AND COALESCE(wr.workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
                        AND wr.resolution_status IN ('unassigned','conflict')
                        AND ra.run_id IS NULL
                       THEN 1 ELSE 0
@@ -1906,6 +1908,7 @@ fn producer_contract_stats(
            JOIN monitored_repositories mr ON mr.id=wr.repository_id
            LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
            WHERE wr.ignored=0
+             AND COALESCE(wr.workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
          )
          SELECT repository_id,project_id,
                 COUNT(*) AS sampled_runs,
@@ -2002,6 +2005,7 @@ fn producer_contract_runs(
            JOIN monitored_repositories mr ON mr.id=wr.repository_id
            LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
            WHERE wr.ignored=0
+             AND COALESCE(wr.workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
          )
          SELECT run_id,project_id,repository_id,repo,workflow_name,display_title,event,
                 head_branch,head_sha,run_attempt,status,conclusion,html_url,resolution_status,
@@ -2150,6 +2154,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
          LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
          WHERE ra.run_id IS NULL
            AND wr.ignored=0
+           AND COALESCE(wr.workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
            AND wr.resolution_status IN ('unassigned','conflict')",
         [],
         |row| row.get(0),
@@ -2752,6 +2757,7 @@ fn load_stored_unresolved_runs(
          FROM workflow_runs
          WHERE repository_id=?
            AND ignored=0
+           AND COALESCE(workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
            AND resolution_status IN ('unassigned','conflict')
            AND NOT EXISTS(
              SELECT 1 FROM run_assignments ra
@@ -4136,6 +4142,7 @@ mod tests {
              CREATE TABLE workflow_runs(
                run_id INTEGER PRIMARY KEY,
                repository_id INTEGER NOT NULL,
+               workflow_path TEXT,
                resolution_status TEXT NOT NULL,
                ignored INTEGER NOT NULL
              );
@@ -4145,15 +4152,15 @@ mod tests {
              );
              INSERT INTO monitored_repositories(id,project_id)
                VALUES(10,1),(20,1),(30,2);
-             INSERT INTO workflow_runs(run_id,repository_id,resolution_status,ignored)
-               VALUES(101,10,'unassigned',0),
-                     (102,10,'conflict',0),
-                     (103,10,'project',0),
-                     (104,10,'unassigned',1),
-                     (201,20,'unassigned',0),
-                     (202,20,'project',0),
-                     (301,30,'project',0),
-                     (302,30,'unassigned',0);
+             INSERT INTO workflow_runs(run_id,repository_id,workflow_path,resolution_status,ignored)
+               VALUES(101,10,NULL,'unassigned',0),
+                     (102,10,NULL,'conflict',0),
+                     (103,10,NULL,'project',0),
+                     (104,10,NULL,'unassigned',1),
+                     (201,20,NULL,'unassigned',0),
+                     (202,20,NULL,'project',0),
+                     (301,30,NULL,'project',0),
+                     (302,30,NULL,'unassigned',0);
              INSERT INTO run_assignments(run_id,track_id) VALUES(102,999);"
         ).unwrap();
 
@@ -4169,6 +4176,116 @@ mod tests {
         assert_eq!(by_repo.get(&10), Some(&(1, 1, 1)));
         assert_eq!(by_repo.get(&20), Some(&(1, 1, 1)));
         assert_eq!(by_repo.get(&30), Some(&(2, 1, 1)));
+    }
+
+    #[test]
+    fn dependabot_dynamic_workflows_do_not_pollute_attribution_surfaces() {
+        let path = legacy_v02_db_path("dependabot-dynamic-noise");
+        init_db(&path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let repository_id: i64 = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        for (
+            run_id,
+            workflow_id,
+            workflow_name,
+            workflow_path,
+            event,
+            created_at,
+        ) in [
+            (
+                9_400_001_i64,
+                940_i64,
+                "Undeclared Repository Workflow",
+                ".github/workflows/undeclared.yml",
+                "pull_request",
+                "2026-09-24T04:00:00Z",
+            ),
+            (
+                9_400_002_i64,
+                941_i64,
+                "npm_and_yarn in /. - Update #1589675854",
+                "dynamic/dependabot/dependabot-updates",
+                "dynamic",
+                "2026-09-24T04:01:00Z",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO workflow_runs(
+                   run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
+                   head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
+                   created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored,last_resolution_attempt_at
+                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![
+                    run_id,
+                    repository_id,
+                    workflow_id,
+                    workflow_name,
+                    workflow_path,
+                    workflow_name,
+                    event,
+                    "main",
+                    format!("sha-{run_id}"),
+                    run_id,
+                    1_i64,
+                    "completed",
+                    "success",
+                    format!("https://example/{run_id}"),
+                    created_at,
+                    Option::<String>::None,
+                    created_at,
+                    created_at,
+                    "unassigned",
+                    0_i64,
+                    Option::<String>::None,
+                ],
+            )
+            .unwrap();
+        }
+
+        let inbox = unassigned_runs_for_repository(&conn, repository_id, 50).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].id, 9_400_001_i64);
+
+        let contract_runs = producer_contract_runs(&conn, 50).unwrap();
+        let repo_contract_runs: Vec<_> = contract_runs
+            .iter()
+            .filter(|item| item.run.repository_id == repository_id)
+            .collect();
+        assert_eq!(repo_contract_runs.len(), 1);
+        assert_eq!(repo_contract_runs[0].run.id, 9_400_001_i64);
+        assert!(repo_contract_runs[0].is_current_producer_run);
+
+        let stats = producer_contract_stats(&conn, 50).unwrap();
+        let repo_stats = stats
+            .iter()
+            .find(|item| item.repository_id == repository_id)
+            .unwrap();
+        assert_eq!(repo_stats.sampled_runs, 1);
+        assert_eq!(repo_stats.unresolved_runs, 1);
+
+        let scope = repository_scope_stats(&conn).unwrap();
+        let repo_scope = scope
+            .iter()
+            .find(|item| item.repository_id == repository_id)
+            .unwrap();
+        assert_eq!(repo_scope.unassigned_count, 1);
+
+        let unresolved = load_stored_unresolved_runs(&conn, repository_id, 50).unwrap();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].id, 9_400_001_i64);
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
     #[test]
