@@ -4384,15 +4384,32 @@ fn defer_responsibility_drift_with_conn(
     input: &DeferResponsibilityDriftInput,
 ) -> Result<ResponsibilityResolutionResult> {
     let drift = current_responsibility_drift(conn, &input.review_key)?;
+    let current_binding = current_watchtower_responsibility_binding(conn, &drift)?;
     if drift.fingerprint != input.fingerprint {
-        let audit_id = insert_resolution_audit(conn, &drift, "defer", Some(&drift), "stale_rejected")?;
+        let audit_id = insert_resolution_audit(
+            conn,
+            &drift,
+            "defer",
+            &input.fingerprint,
+            &drift.fingerprint,
+            current_binding.as_deref(),
+            "stale_rejected",
+        )?;
         return Ok(ResponsibilityResolutionResult {
             status: "stale_rejected".into(),
             audit_id,
             current_drift: Some(drift),
         });
     }
-    let audit_id = insert_resolution_audit(conn, &drift, "defer", Some(&drift), "deferred")?;
+    let audit_id = insert_resolution_audit(
+        conn,
+        &drift,
+        "defer",
+        &input.fingerprint,
+        &drift.fingerprint,
+        current_binding.as_deref(),
+        "deferred",
+    )?;
     let mut current = drift.clone();
     current.review_status = "deferred".into();
     Ok(ResponsibilityResolutionResult {
@@ -4407,12 +4424,15 @@ fn resolve_responsibility_drift_with_conn(
     input: &ResolveResponsibilityDriftInput,
 ) -> Result<ResponsibilityResolutionResult> {
     let drift = current_responsibility_drift(conn, &input.review_key)?;
+    let current_binding = current_watchtower_responsibility_binding(conn, &drift)?;
     if drift.fingerprint != input.fingerprint {
         let audit_id = insert_resolution_audit(
             conn,
             &drift,
             &input.action,
-            Some(&drift),
+            &input.fingerprint,
+            &drift.fingerprint,
+            current_binding.as_deref(),
             "stale_rejected",
         )?;
         return Ok(ResponsibilityResolutionResult {
@@ -4427,7 +4447,9 @@ fn resolve_responsibility_drift_with_conn(
             conn,
             &drift,
             &input.action,
-            Some(&drift),
+            &input.fingerprint,
+            &drift.fingerprint,
+            current_binding.as_deref(),
             "blocked",
         )?;
         return Ok(ResponsibilityResolutionResult {
@@ -4438,25 +4460,43 @@ fn resolve_responsibility_drift_with_conn(
     }
 
     let tx = conn.unchecked_transaction()?;
-    match input.action.as_str() {
-        "add_project_wide_rule" => add_project_rule_for_resolution(&tx, &drift)?,
-        "add_dynamic_rule" => add_dynamic_rule_for_resolution(&tx, &drift)?,
-        "reclassify_to_project_wide" => {
-            remove_dynamic_rule_for_resolution(&tx, &drift)?;
-            add_project_rule_for_resolution(&tx, &drift)?;
+    let mutation_result: Result<()> = (|| {
+        match input.action.as_str() {
+            "add_project_wide_rule" => add_project_rule_for_resolution(&tx, &drift)?,
+            "add_dynamic_rule" => add_dynamic_rule_for_resolution(&tx, &drift)?,
+            "reclassify_to_project_wide" => {
+                remove_dynamic_rule_for_resolution(&tx, &drift)?;
+                add_project_rule_for_resolution(&tx, &drift)?;
+            }
+            "reclassify_to_dynamic" => {
+                remove_project_rule_for_resolution(&tx, &drift)?;
+                add_dynamic_rule_for_resolution(&tx, &drift)?;
+            }
+            "remove_stale_rule" => match drift.watchtower_binding.as_deref() {
+                Some("project-wide") => remove_project_rule_for_resolution(&tx, &drift)?,
+                Some("dynamic") => remove_dynamic_rule_for_resolution(&tx, &drift)?,
+                _ => return Err(anyhow!("제거할 stale responsibility 규칙을 판정하지 못했습니다.")),
+            },
+            _ => return Err(anyhow!("지원하지 않는 Responsibility resolution action입니다.")),
         }
-        "reclassify_to_dynamic" => {
-            remove_project_rule_for_resolution(&tx, &drift)?;
-            add_dynamic_rule_for_resolution(&tx, &drift)?;
-        }
-        "remove_stale_rule" => match drift.watchtower_binding.as_deref() {
-            Some("project-wide") => remove_project_rule_for_resolution(&tx, &drift)?,
-            Some("dynamic") => remove_dynamic_rule_for_resolution(&tx, &drift)?,
-            _ => return Err(anyhow!("제거할 stale responsibility 규칙을 판정하지 못했습니다.")),
-        },
-        _ => return Err(anyhow!("지원하지 않는 Responsibility resolution action입니다.")),
+        Ok(())
+    })();
+    if let Err(error) = mutation_result {
+        tx.rollback()?;
+        let resulting_binding = current_watchtower_responsibility_binding(conn, &drift)?;
+        let audit_id = insert_resolution_audit(
+            conn,
+            &drift,
+            &input.action,
+            &input.fingerprint,
+            &drift.fingerprint,
+            resulting_binding.as_deref(),
+            "failed",
+        )?;
+        return Err(anyhow!("Responsibility resolution 실패 (audit #{audit_id}): {error}"));
     }
 
+    let resulting_binding = current_watchtower_responsibility_binding(&tx, &drift)?;
     let after = responsibility_map_drifts(&tx)?
         .into_iter()
         .find(|item| item.review_key == drift.review_key);
@@ -4465,7 +4505,9 @@ fn resolve_responsibility_drift_with_conn(
         &tx,
         &drift,
         &input.action,
-        after.as_ref(),
+        &input.fingerprint,
+        &drift.fingerprint,
+        resulting_binding.as_deref(),
         result_status,
     )?;
     tx.commit()?;
