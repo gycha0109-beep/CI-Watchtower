@@ -96,6 +96,8 @@ function resolutionActionLabel(action: string) {
     case 'reclassify_to_project_wide': return 'Dynamic → Project-wide 재분류';
     case 'reclassify_to_dynamic': return 'Project-wide → Dynamic 재분류';
     case 'remove_stale_rule': return 'Stale responsibility 규칙 제거';
+    case 'defer': return '검토 보류';
+    case 'blocked': return 'WatchTower 내부 변경 차단';
     default: return 'WatchTower 내부 해결 불가';
   }
 }
