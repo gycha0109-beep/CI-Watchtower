@@ -1,6 +1,6 @@
 [package]
 name = "ci-watchtower"
-version = "0.3.24"
+version = "0.3.25"
 description = "GitHub Actions track monitor for parallel ChatGPT development work"
 authors = ["gycha0109-beep"]
 edition = "2021"
