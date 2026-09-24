@@ -97,6 +97,7 @@ h2 { font-size: 16px; margin: 0 0 15px; }
 .responsibility-review-head-actions { display: grid; gap: 5px; justify-items: end; }
 .responsibility-review-state { width: fit-content; border: 1px solid #33415d; border-radius: 999px; color: #8fa2c6; padding: 3px 6px; font-size: 8px; font-weight: 900; letter-spacing: .07em; }
 .responsibility-review-state.deferred { border-color: #4d4229; color: #e4c66d; }
+.responsibility-review-state.attention { border-color: #51426d; color: #c6a8ef; }
 .responsibility-review-state.blocked { border-color: #5b2b38; color: #ff8796; }
 .responsibility-review-buttons { display: flex; gap: 6px; align-items: center; }
 .responsibility-resolution-preview { display: grid; gap: 10px; border: 1px solid #36517f; border-radius: 10px; background: #080e1b; padding: 12px; }
@@ -137,6 +138,7 @@ h2 { font-size: 16px; margin: 0 0 15px; }
 .resolution-history-result.deferred { border-color: #4d4229; color: #e4c66d; }
 .resolution-history-result.blocked, .resolution-history-result.failed { border-color: #5b2b38; color: #ff8796; }
 .resolution-history-result.stale_rejected { border-color: #51426d; color: #c6a8ef; }
+.resolution-history-result.still_open { border-color: #36517f; color: #8fb8ff; }
 .resolution-history-main { min-width: 0; display: grid; gap: 2px; }
 .resolution-history-main b, .resolution-history-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .resolution-history-main b { color: #dce5f6; font-size: 10px; }

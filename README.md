@@ -197,10 +197,23 @@ Manual Resolution의 판단과 결과를 immutable event history로 추적합니
 - `requested_fingerprint`와 `current_fingerprint`를 분리해 Preview 이후 상태가 바뀐 `stale_rejected` 사건을 명확히 설명합니다.
 - `expected_repository_binding`과 `resulting_watchtower_binding`을 보존해 Repository authority → 승인 action → 실제 WatchTower 결과를 복원할 수 있습니다.
 - `Deferred → Resolved`는 기존 audit row를 갱신하지 않고 별도 event를 추가합니다.
-- Dashboard의 Resolution History는 현재 Project / Repository scope를 따르며 Resolved, Deferred, Blocked, Stale, Failed 필터를 제공합니다.
+- Dashboard의 Resolution History는 현재 Project / Repository scope를 따르며 Resolved, Deferred, Blocked, Stale, Open, Failed 필터를 제공합니다.
 - Review Inbox의 같은 `review_key`에 과거 이력이 있으면 이전 검토 횟수와 최신 결과를 연결해서 보여줍니다.
 - 상세 Audit에서는 before/after contract, action, requested/current fingerprint, actor, audit id와 resolution safety invariant를 확인할 수 있습니다.
 - transaction 실행 실패는 rollback 후 `failed` audit event를 남기며 canonical Track, producer YAML, repository responsibility map, manual assignment는 Resolution 경로에서 변경하지 않습니다.
+
+### Responsibility Re-review Queue (v0.3.24)
+
+처리되지 않은 Responsibility resolution을 다시 운영 큐로 회수합니다.
+
+- 같은 fingerprint의 최신 event가 `deferred`면 Inbox 상태를 `DEFERRED`로 유지합니다.
+- `failed`, `still_open`, `stale_rejected`처럼 사람이 다시 판단해야 하는 사건은 `ATTENTION`으로 표시합니다.
+- 사용자가 `재검토`를 누르면 현재 drift와 fingerprint를 다시 검증한 뒤 `OPEN`으로 되돌리고 즉시 최신 Resolution Preview를 엽니다.
+- 재검토 재개 자체도 기존 audit row를 수정하지 않고 `action=reopen`, `result=still_open` event로 추가합니다.
+- 재검토 요청 사이에 drift fingerprint가 바뀌면 mutation 없이 `stale_rejected`로 기록합니다.
+- Blocked 계약은 재검토 명령으로 우회할 수 없으며 기존 fail-closed 경계를 유지합니다.
+- Inbox 상단은 Open / Deferred / Attention / Blocked 건수를 분리해 운영 우선순위를 보여줍니다.
+- Resolution History의 Open 필터에서 재검토 재개와 mutation 후 still-open 사건을 함께 추적할 수 있습니다.
 
 ## Producer Contract Health
 
