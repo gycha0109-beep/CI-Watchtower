@@ -112,6 +112,20 @@ struct ResponsibilityMapDrift {
     actual_track_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponsibilityMapSourceStatus {
+    project_id: i64,
+    repository_id: i64,
+    repository: String,
+    source_path: String,
+    status: String,
+    last_attempt_at: Option<String>,
+    last_success_at: Option<String>,
+    last_error: Option<String>,
+    contract_count: i64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RepositoryResponsibilityMap {
@@ -295,6 +309,7 @@ struct Dashboard {
     producer_contract_stats: Vec<ProducerContractStats>,
     producer_contract_runs: Vec<ProducerContractRun>,
     responsibility_map_drifts: Vec<ResponsibilityMapDrift>,
+    responsibility_map_sources: Vec<ResponsibilityMapSourceStatus>,
     project_runs: Vec<WorkflowRunSummary>,
     unassigned_runs: Vec<WorkflowRunSummary>,
 }
@@ -605,6 +620,15 @@ fn init_db(path: &Path) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_repository_responsibility_contracts_name
           ON repository_responsibility_contracts(repository_id, workflow_name);
+
+        CREATE TABLE IF NOT EXISTS repository_responsibility_sources (
+          repository_id INTEGER PRIMARY KEY REFERENCES monitored_repositories(id) ON DELETE CASCADE,
+          source_path TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('synced','not_found','error')),
+          last_attempt_at TEXT NOT NULL,
+          last_success_at TEXT,
+          last_error TEXT
+        );
 
         CREATE TABLE IF NOT EXISTS track_aliases (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1414,7 +1438,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.18")
+        .user_agent("ci-watchtower/0.3.19")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -1655,6 +1679,77 @@ fn dynamic_rule_matches(
             && rule.workflow_name == workflow_name
             && (rule.repository_id.is_none() || rule.repository_id == Some(repository_id))
     })
+}
+
+fn update_repository_responsibility_source(
+    conn: &Connection,
+    repository_id: i64,
+    status: &str,
+    now: &str,
+    error: Option<&str>,
+) -> Result<()> {
+    if !matches!(status, "synced" | "not_found" | "error") {
+        return Err(anyhow!("지원하지 않는 responsibility map source status: {status}"));
+    }
+    let successful_at = (status == "synced").then_some(now);
+    conn.execute(
+        "INSERT INTO repository_responsibility_sources(
+           repository_id,source_path,status,last_attempt_at,last_success_at,last_error
+         ) VALUES(?,?,?,?,?,?)
+         ON CONFLICT(repository_id) DO UPDATE SET
+           source_path=excluded.source_path,
+           status=excluded.status,
+           last_attempt_at=excluded.last_attempt_at,
+           last_success_at=CASE
+             WHEN excluded.status='synced' THEN excluded.last_attempt_at
+             ELSE repository_responsibility_sources.last_success_at
+           END,
+           last_error=excluded.last_error",
+        params![
+            repository_id,
+            RESPONSIBILITY_MAP_PATH,
+            status,
+            now,
+            successful_at,
+            error
+        ],
+    )?;
+    Ok(())
+}
+
+fn responsibility_map_source_statuses(
+    conn: &Connection,
+) -> Result<Vec<ResponsibilityMapSourceStatus>> {
+    let mut stmt = conn.prepare(
+        "SELECT mr.project_id,mr.id,mr.repo,
+                COALESCE(rrs.source_path,?),
+                COALESCE(rrs.status,'pending'),
+                rrs.last_attempt_at,rrs.last_success_at,rrs.last_error,
+                (
+                  SELECT COUNT(*)
+                  FROM repository_responsibility_contracts rrc
+                  WHERE rrc.repository_id=mr.id
+                )
+         FROM monitored_repositories mr
+         LEFT JOIN repository_responsibility_sources rrs
+           ON rrs.repository_id=mr.id
+         WHERE mr.enabled=1
+         ORDER BY mr.project_id,mr.repo",
+    )?;
+    let rows = stmt.query_map(params![RESPONSIBILITY_MAP_PATH], |row| {
+        Ok(ResponsibilityMapSourceStatus {
+            project_id: row.get(0)?,
+            repository_id: row.get(1)?,
+            repository: row.get(2)?,
+            source_path: row.get(3)?,
+            status: row.get(4)?,
+            last_attempt_at: row.get(5)?,
+            last_success_at: row.get(6)?,
+            last_error: row.get(7)?,
+            contract_count: row.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn replace_repository_responsibility_contracts(
@@ -2517,6 +2612,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
     let producer_contract_runs =
         producer_contract_runs(&conn, PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY)?;
     let responsibility_map_drifts = responsibility_map_drifts(&conn)?;
+    let responsibility_map_sources = responsibility_map_source_statuses(&conn)?;
     let mut project_runs = Vec::new();
     let mut unassigned_runs = Vec::new();
     for repository in &repositories {
@@ -2565,6 +2661,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         producer_contract_stats,
         producer_contract_runs,
         responsibility_map_drifts,
+        responsibility_map_sources,
         project_runs,
         unassigned_runs,
     })
@@ -3357,16 +3454,44 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     }
                 }
 
-                if let Ok(Some(contracts)) =
-                    github_repository_responsibility_contracts(&client, &repository.repo).await
-                {
-                    let conn = db(state)?;
-                    replace_repository_responsibility_contracts(
-                        &conn,
-                        repository.id,
-                        &contracts,
-                        &now_str,
-                    )?;
+                match github_repository_responsibility_contracts(&client, &repository.repo).await {
+                    Ok(Some(contracts)) => {
+                        let conn = db(state)?;
+                        replace_repository_responsibility_contracts(
+                            &conn,
+                            repository.id,
+                            &contracts,
+                            &now_str,
+                        )?;
+                        update_repository_responsibility_source(
+                            &conn,
+                            repository.id,
+                            "synced",
+                            &now_str,
+                            None,
+                        )?;
+                    }
+                    Ok(None) => {
+                        let conn = db(state)?;
+                        update_repository_responsibility_source(
+                            &conn,
+                            repository.id,
+                            "not_found",
+                            &now_str,
+                            None,
+                        )?;
+                    }
+                    Err(error) => {
+                        let conn = db(state)?;
+                        let error_text = error.to_string();
+                        update_repository_responsibility_source(
+                            &conn,
+                            repository.id,
+                            "error",
+                            &now_str,
+                            Some(&error_text),
+                        )?;
+                    }
                 }
 
                 let fingerprints = {
@@ -6648,6 +6773,106 @@ mod tests {
         assert_eq!(detail.evidence[0].signal_type, "run_name");
         assert_eq!(detail.evidence[0].score, 100);
         assert_eq!(detail.evidence[1].signal_type, "branch");
+    }
+
+    #[test]
+    fn responsibility_map_source_health_preserves_last_good_snapshot_on_failure() {
+        let path = legacy_v02_db_path("responsibility-map-source-health");
+        init_db(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
+
+        let repository_id: i64 = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let contracts = vec![RepositoryResponsibilityContract {
+            workflow_path: ".github/workflows/current-main-health.yml".into(),
+            workflow_name: "BEJEWELY Current Main Health".into(),
+            binding_kind: "project-wide".into(),
+            track_key: None,
+            source_binding: "unassigned-by-design".into(),
+            source_path: RESPONSIBILITY_MAP_PATH.into(),
+        }];
+        replace_repository_responsibility_contracts(
+            &conn,
+            repository_id,
+            &contracts,
+            "2026-09-24T07:00:00Z",
+        )
+        .unwrap();
+        update_repository_responsibility_source(
+            &conn,
+            repository_id,
+            "synced",
+            "2026-09-24T07:00:00Z",
+            None,
+        )
+        .unwrap();
+
+        update_repository_responsibility_source(
+            &conn,
+            repository_id,
+            "error",
+            "2026-09-24T07:05:00Z",
+            Some("HTTP 503"),
+        )
+        .unwrap();
+
+        let statuses = responsibility_map_source_statuses(&conn).unwrap();
+        let visualy = statuses
+            .iter()
+            .find(|item| item.repository_id == repository_id)
+            .unwrap();
+        assert_eq!(visualy.status, "error");
+        assert_eq!(
+            visualy.last_attempt_at.as_deref(),
+            Some("2026-09-24T07:05:00Z")
+        );
+        assert_eq!(
+            visualy.last_success_at.as_deref(),
+            Some("2026-09-24T07:00:00Z")
+        );
+        assert_eq!(visualy.last_error.as_deref(), Some("HTTP 503"));
+        assert_eq!(visualy.contract_count, 1);
+
+        let contract_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM repository_responsibility_contracts WHERE repository_id=?",
+                params![repository_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(contract_count, 1);
+
+        update_repository_responsibility_source(
+            &conn,
+            repository_id,
+            "not_found",
+            "2026-09-24T07:10:00Z",
+            None,
+        )
+        .unwrap();
+        let statuses = responsibility_map_source_statuses(&conn).unwrap();
+        let visualy = statuses
+            .iter()
+            .find(|item| item.repository_id == repository_id)
+            .unwrap();
+        assert_eq!(visualy.status, "not_found");
+        assert_eq!(
+            visualy.last_success_at.as_deref(),
+            Some("2026-09-24T07:00:00Z")
+        );
+        assert_eq!(visualy.contract_count, 1);
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
     #[test]

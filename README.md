@@ -156,6 +156,16 @@ Repository에 `docs/ci/workflow-responsibility-map.json`이 있으면 polling �
 - drift 감지는 Track, Project-wide/Dynamic 규칙, Run assignment를 자동 생성·수정·삭제하지 않습니다.
 - map 조회가 일시 실패하면 기존 CI polling/resolution을 실패시키지 않고 마지막으로 성공한 snapshot을 유지합니다.
 
+### Responsibility Map Source Health (v0.3.19)
+
+Drift 0건이 곧 source 정상이라는 잘못된 결론으로 이어지지 않도록 repository별 map source 상태를 별도로 추적합니다.
+
+- `synced`: 현재 poll에서 map을 정상 읽었고 snapshot을 갱신했습니다.
+- `not_found`: repository에 map이 없습니다. 이전 snapshot이 있다면 stale-source 경고로 취급합니다.
+- `error`: GitHub/API/parse 조회 실패입니다. 마지막 정상 snapshot과 `last_success_at`은 보존합니다.
+- `pending`: v0.3.19 이후 아직 source poll을 수행하지 않은 상태입니다.
+- source 실패는 Actions run polling이나 attribution을 중단시키지 않지만, UI는 stale/unavailable source가 있을 때 drift 0건을 clean으로 표시하지 않습니다.
+
 ## Producer Contract Health
 
 Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.

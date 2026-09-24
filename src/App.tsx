@@ -288,6 +288,18 @@ function App() {
     ),
     [dashboard, selectedProject, selectedRepository],
   );
+  const responsibilityMapSourcesInScope = useMemo(
+    () => (dashboard?.responsibilityMapSources ?? []).filter(item =>
+      (selectedProject === 'all' || item.projectId === selectedProject) &&
+      (selectedRepository === 'all' || item.repositoryId === selectedRepository)
+    ),
+    [dashboard, selectedProject, selectedRepository],
+  );
+  const responsibilityMapSourceWarnings = responsibilityMapSourcesInScope.filter(item =>
+    item.status === 'error' || (item.status === 'not_found' && item.contractCount > 0)
+  );
+  const responsibilityMapSourcePending = responsibilityMapSourcesInScope.filter(item => item.status === 'pending');
+  const responsibilityMapSynced = responsibilityMapSourcesInScope.filter(item => item.status === 'synced');
   const contractCompliantRuns = currentProducerRuns.filter(item => item.contractCompliant).length;
   const contractDriftRuns = currentProducerDriftRuns.length;
   const currentUnresolvedDriftRuns = currentProducerDriftRuns.filter(
@@ -612,11 +624,47 @@ function App() {
         </div>
         <div className="producer-drift responsibility-map-drift">
           <div className="producer-drift-head">
-            <div><b>Responsibility Map Drift</b><span>detect-only {responsibilityMapDriftsInScope.length}건</span></div>
+            <div>
+              <b>Responsibility Map Drift</b>
+              <span>detect-only {responsibilityMapDriftsInScope.length}건 · source synced {responsibilityMapSynced.length}</span>
+            </div>
             <small>Repository-owned responsibility map과 WatchTower 선언만 비교합니다. Track/규칙/Run 귀속은 자동 변경하지 않습니다.</small>
           </div>
-          {responsibilityMapDriftsInScope.length === 0 ? (
-            <div className="producer-drift-empty">현재 repository responsibility map과 WatchTower 책임 선언이 일치합니다.</div>
+          {responsibilityMapSourcesInScope.length > 0 && (
+            <div className="responsibility-source-list">
+              {responsibilityMapSourcesInScope.map(source => (
+                <div
+                  className={'responsibility-source-row ' + source.status + (source.status === 'not_found' && source.contractCount > 0 ? ' stale' : '')}
+                  key={source.repositoryId}
+                >
+                  <span className="responsibility-source-state">{source.status.toUpperCase()}</span>
+                  <span className="producer-drift-main">
+                    <b>{source.repository}</b>
+                    <small>{source.sourcePath}</small>
+                  </span>
+                  <span className="producer-drift-source">
+                    {source.contractCount > 0 ? source.contractCount + ' contracts' : 'no snapshot'}
+                  </span>
+                  <span className="mono producer-drift-branch">
+                    {source.lastSuccessAt ? 'last good ' + source.lastSuccessAt : source.lastAttemptAt ?? 'not polled'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {responsibilityMapSourceWarnings.length > 0 ? (
+            <div className="producer-drift-source-warning">
+              responsibility map source가 현재 신뢰 가능하지 않습니다. 마지막 정상 snapshot은 유지되지만 0건을 clean으로 판정하지 않습니다.
+              {responsibilityMapSourceWarnings.map(source => (
+                <small key={source.repositoryId}>
+                  {source.repository}: {source.lastError ?? (source.status === 'not_found' ? 'map not found after prior snapshot' : source.status)}
+                </small>
+              ))}
+            </div>
+          ) : responsibilityMapSourcePending.length > 0 && responsibilityMapSynced.length === 0 ? (
+            <div className="producer-drift-source-pending">아직 responsibility map source를 poll하지 않았습니다.</div>
+          ) : responsibilityMapDriftsInScope.length === 0 ? (
+            <div className="producer-drift-empty">현재 동기화된 repository responsibility map과 WatchTower 책임 선언이 일치합니다.</div>
           ) : (
             <div className="producer-drift-list">
               {responsibilityMapDriftsInScope.map(item => (

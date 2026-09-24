@@ -224,6 +224,18 @@ export interface ResponsibilityMapDrift {
   actualTrackKey: string | null;
 }
 
+export interface ResponsibilityMapSourceStatus {
+  projectId: number;
+  repositoryId: number;
+  repository: string;
+  sourcePath: string;
+  status: 'pending' | 'synced' | 'not_found' | 'error' | string;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  contractCount: number;
+}
+
 export interface Dashboard {
   runningCount: number;
   queuedCount: number;
@@ -240,6 +252,7 @@ export interface Dashboard {
   producerContractStats: ProducerContractStats[];
   producerContractRuns: ProducerContractRun[];
   responsibilityMapDrifts: ResponsibilityMapDrift[];
+  responsibilityMapSources: ResponsibilityMapSourceStatus[];
   projectRuns: WorkflowRunSummary[];
   unassignedRuns: WorkflowRunSummary[];
 }
