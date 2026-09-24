@@ -8198,6 +8198,17 @@ mod tests {
         assert_eq!(deferred.status, "deferred");
         let deferred_drift = current_responsibility_drift(&conn, &missing_dynamic.review_key).unwrap();
         assert_eq!(deferred_drift.review_status, "deferred");
+        let reopened = reopen_responsibility_drift_with_conn(
+            &conn,
+            &DeferResponsibilityDriftInput {
+                review_key: missing_dynamic.review_key.clone(),
+                fingerprint: missing_dynamic.fingerprint.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(reopened.status, "open");
+        let reopened_drift = current_responsibility_drift(&conn, &missing_dynamic.review_key).unwrap();
+        assert_eq!(reopened_drift.review_status, "open");
 
         let resolved_missing_dynamic = resolve_responsibility_drift_with_conn(
             &conn,
@@ -8350,6 +8361,55 @@ mod tests {
         assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Scoped Dynamic")
             .unwrap()
             .is_none());
+        let stale_attention = current_responsibility_drift(&conn, &scoped_dynamic.review_key).unwrap();
+        assert_eq!(stale_attention.review_status, "attention");
+        let reopened_stale = reopen_responsibility_drift_with_conn(
+            &conn,
+            &DeferResponsibilityDriftInput {
+                review_key: stale_attention.review_key.clone(),
+                fingerprint: stale_attention.fingerprint.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(reopened_stale.status, "open");
+        assert_eq!(
+            current_responsibility_drift(&conn, &stale_attention.review_key)
+                .unwrap()
+                .review_status,
+            "open"
+        );
+
+        let failed_drift = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Stale Project")
+            .unwrap();
+        let failed_binding = current_watchtower_responsibility_binding(&conn, &failed_drift).unwrap();
+        insert_resolution_audit(
+            &conn,
+            &failed_drift,
+            "remove_stale_rule",
+            &failed_drift.fingerprint,
+            &failed_drift.fingerprint,
+            failed_binding.as_deref(),
+            "failed",
+        )
+        .unwrap();
+        assert_eq!(
+            current_responsibility_drift(&conn, &failed_drift.review_key)
+                .unwrap()
+                .review_status,
+            "attention"
+        );
+        let reopened_failed = reopen_responsibility_drift_with_conn(
+            &conn,
+            &DeferResponsibilityDriftInput {
+                review_key: failed_drift.review_key.clone(),
+                fingerprint: failed_drift.fingerprint.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(reopened_failed.status, "open");
 
         let track_count_final: i64 =
             conn.query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0)).unwrap();
@@ -8382,8 +8442,11 @@ mod tests {
             .iter()
             .filter(|item| item.review_key == missing_dynamic.review_key)
             .collect();
-        assert_eq!(missing_dynamic_history.len(), 2);
+        assert_eq!(missing_dynamic_history.len(), 3);
         assert!(missing_dynamic_history.iter().any(|item| item.result == "deferred"));
+        assert!(missing_dynamic_history
+            .iter()
+            .any(|item| item.action == "reopen" && item.result == "still_open"));
         let resolved_dynamic_history = missing_dynamic_history
             .iter()
             .find(|item| item.result == "resolved")
