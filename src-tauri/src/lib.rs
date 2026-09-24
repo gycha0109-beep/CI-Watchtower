@@ -4256,6 +4256,103 @@ fn get_responsibility_resolution_preview(
     result.map_err(|e| e.to_string())
 }
 
+fn defer_responsibility_drift_with_conn(
+    conn: &Connection,
+    input: &DeferResponsibilityDriftInput,
+) -> Result<ResponsibilityResolutionResult> {
+    let drift = current_responsibility_drift(conn, &input.review_key)?;
+    if drift.fingerprint != input.fingerprint {
+        let audit_id = insert_resolution_audit(conn, &drift, "defer", Some(&drift), "stale_rejected")?;
+        return Ok(ResponsibilityResolutionResult {
+            status: "stale_rejected".into(),
+            audit_id,
+            current_drift: Some(drift),
+        });
+    }
+    let audit_id = insert_resolution_audit(conn, &drift, "defer", Some(&drift), "deferred")?;
+    let mut current = drift.clone();
+    current.review_status = "deferred".into();
+    Ok(ResponsibilityResolutionResult {
+        status: "deferred".into(),
+        audit_id,
+        current_drift: Some(current),
+    })
+}
+
+fn resolve_responsibility_drift_with_conn(
+    conn: &Connection,
+    input: &ResolveResponsibilityDriftInput,
+) -> Result<ResponsibilityResolutionResult> {
+    let drift = current_responsibility_drift(conn, &input.review_key)?;
+    if drift.fingerprint != input.fingerprint {
+        let audit_id = insert_resolution_audit(
+            conn,
+            &drift,
+            &input.action,
+            Some(&drift),
+            "stale_rejected",
+        )?;
+        return Ok(ResponsibilityResolutionResult {
+            status: "stale_rejected".into(),
+            audit_id,
+            current_drift: Some(drift),
+        });
+    }
+    let preview = resolution_preview_for_drift(conn, &drift)?;
+    if !preview.executable || preview.action != input.action {
+        let audit_id = insert_resolution_audit(
+            conn,
+            &drift,
+            &input.action,
+            Some(&drift),
+            "blocked",
+        )?;
+        return Ok(ResponsibilityResolutionResult {
+            status: "blocked".into(),
+            audit_id,
+            current_drift: Some(drift),
+        });
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    match input.action.as_str() {
+        "add_project_wide_rule" => add_project_rule_for_resolution(&tx, &drift)?,
+        "add_dynamic_rule" => add_dynamic_rule_for_resolution(&tx, &drift)?,
+        "reclassify_to_project_wide" => {
+            remove_dynamic_rule_for_resolution(&tx, &drift)?;
+            add_project_rule_for_resolution(&tx, &drift)?;
+        }
+        "reclassify_to_dynamic" => {
+            remove_project_rule_for_resolution(&tx, &drift)?;
+            add_dynamic_rule_for_resolution(&tx, &drift)?;
+        }
+        "remove_stale_rule" => match drift.watchtower_binding.as_deref() {
+            Some("project-wide") => remove_project_rule_for_resolution(&tx, &drift)?,
+            Some("dynamic") => remove_dynamic_rule_for_resolution(&tx, &drift)?,
+            _ => return Err(anyhow!("제거할 stale responsibility 규칙을 판정하지 못했습니다.")),
+        },
+        _ => return Err(anyhow!("지원하지 않는 Responsibility resolution action입니다.")),
+    }
+
+    let after = responsibility_map_drifts(&tx)?
+        .into_iter()
+        .find(|item| item.review_key == drift.review_key);
+    let result_status = if after.is_none() { "resolved" } else { "still_open" };
+    let audit_id = insert_resolution_audit(
+        &tx,
+        &drift,
+        &input.action,
+        after.as_ref(),
+        result_status,
+    )?;
+    tx.commit()?;
+    Ok(ResponsibilityResolutionResult {
+        status: result_status.into(),
+        audit_id,
+        current_drift: after,
+    })
+}
+
 #[tauri::command]
 fn defer_responsibility_drift(
     input: DeferResponsibilityDriftInput,
@@ -4263,23 +4360,7 @@ fn defer_responsibility_drift(
 ) -> std::result::Result<ResponsibilityResolutionResult, String> {
     let result = (|| -> Result<ResponsibilityResolutionResult> {
         let conn = db(&state)?;
-        let drift = current_responsibility_drift(&conn, &input.review_key)?;
-        if drift.fingerprint != input.fingerprint {
-            let audit_id = insert_resolution_audit(&conn, &drift, "defer", Some(&drift), "stale_rejected")?;
-            return Ok(ResponsibilityResolutionResult {
-                status: "stale_rejected".into(),
-                audit_id,
-                current_drift: Some(drift),
-            });
-        }
-        let audit_id = insert_resolution_audit(&conn, &drift, "defer", Some(&drift), "deferred")?;
-        let mut current = drift.clone();
-        current.review_status = "deferred".into();
-        Ok(ResponsibilityResolutionResult {
-            status: "deferred".into(),
-            audit_id,
-            current_drift: Some(current),
-        })
+        defer_responsibility_drift_with_conn(&conn, &input)
     })();
     result.map_err(|e| e.to_string())
 }
@@ -4291,74 +4372,7 @@ fn resolve_responsibility_drift(
 ) -> std::result::Result<ResponsibilityResolutionResult, String> {
     let result = (|| -> Result<ResponsibilityResolutionResult> {
         let conn = db(&state)?;
-        let drift = current_responsibility_drift(&conn, &input.review_key)?;
-        if drift.fingerprint != input.fingerprint {
-            let audit_id = insert_resolution_audit(
-                &conn,
-                &drift,
-                &input.action,
-                Some(&drift),
-                "stale_rejected",
-            )?;
-            return Ok(ResponsibilityResolutionResult {
-                status: "stale_rejected".into(),
-                audit_id,
-                current_drift: Some(drift),
-            });
-        }
-        let preview = resolution_preview_for_drift(&conn, &drift)?;
-        if !preview.executable || preview.action != input.action {
-            let audit_id = insert_resolution_audit(
-                &conn,
-                &drift,
-                &input.action,
-                Some(&drift),
-                "blocked",
-            )?;
-            return Ok(ResponsibilityResolutionResult {
-                status: "blocked".into(),
-                audit_id,
-                current_drift: Some(drift),
-            });
-        }
-
-        let tx = conn.unchecked_transaction()?;
-        match input.action.as_str() {
-            "add_project_wide_rule" => add_project_rule_for_resolution(&tx, &drift)?,
-            "add_dynamic_rule" => add_dynamic_rule_for_resolution(&tx, &drift)?,
-            "reclassify_to_project_wide" => {
-                remove_dynamic_rule_for_resolution(&tx, &drift)?;
-                add_project_rule_for_resolution(&tx, &drift)?;
-            }
-            "reclassify_to_dynamic" => {
-                remove_project_rule_for_resolution(&tx, &drift)?;
-                add_dynamic_rule_for_resolution(&tx, &drift)?;
-            }
-            "remove_stale_rule" => match drift.watchtower_binding.as_deref() {
-                Some("project-wide") => remove_project_rule_for_resolution(&tx, &drift)?,
-                Some("dynamic") => remove_dynamic_rule_for_resolution(&tx, &drift)?,
-                _ => return Err(anyhow!("제거할 stale responsibility 규칙을 판정하지 못했습니다.")),
-            },
-            _ => return Err(anyhow!("지원하지 않는 Responsibility resolution action입니다.")),
-        }
-
-        let after = responsibility_map_drifts(&tx)?
-            .into_iter()
-            .find(|item| item.review_key == drift.review_key);
-        let result_status = if after.is_none() { "resolved" } else { "still_open" };
-        let audit_id = insert_resolution_audit(
-            &tx,
-            &drift,
-            &input.action,
-            after.as_ref(),
-            result_status,
-        )?;
-        tx.commit()?;
-        Ok(ResponsibilityResolutionResult {
-            status: result_status.into(),
-            audit_id,
-            current_drift: after,
-        })
+        resolve_responsibility_drift_with_conn(&conn, &input)
     })();
     result.map_err(|e| e.to_string())
 }
