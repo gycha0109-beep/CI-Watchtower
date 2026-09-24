@@ -249,16 +249,30 @@ function App() {
       otherRuns: 0,
     },
   );
-  const contractCompliantRuns = producerContract.projectWideRuns + producerContract.explicitRuns;
-  const contractDriftRuns = producerContract.sampledRuns - contractCompliantRuns;
-  const contractCoverage = producerContract.sampledRuns === 0
-    ? 100
-    : Math.round((contractCompliantRuns / producerContract.sampledRuns) * 100);
-  const producerContractDriftRuns = useMemo(
-    () => (dashboard?.producerContractRuns ?? [])
-      .filter(item => !item.contractCompliant && runInScope(item.run)),
+  const producerContractRunsInScope = useMemo(
+    () => (dashboard?.producerContractRuns ?? []).filter(item => runInScope(item.run)),
     [dashboard, runInScope],
   );
+  const currentProducerRuns = useMemo(
+    () => producerContractRunsInScope.filter(item => item.isCurrentProducerRun),
+    [producerContractRunsInScope],
+  );
+  const currentProducerDriftRuns = useMemo(
+    () => currentProducerRuns.filter(item => !item.contractCompliant),
+    [currentProducerRuns],
+  );
+  const historicalProducerDriftRuns = useMemo(
+    () => producerContractRunsInScope.filter(item => !item.contractCompliant && !item.isCurrentProducerRun),
+    [producerContractRunsInScope],
+  );
+  const contractCompliantRuns = currentProducerRuns.filter(item => item.contractCompliant).length;
+  const contractDriftRuns = currentProducerDriftRuns.length;
+  const currentUnresolvedDriftRuns = currentProducerDriftRuns.filter(
+    item => item.bucket === 'unassigned' || item.bucket === 'conflict',
+  ).length;
+  const contractCoverage = currentProducerRuns.length === 0
+    ? 100
+    : Math.round((contractCompliantRuns / currentProducerRuns.length) * 100);
 
   const runningCount = repositoriesInScope.reduce((sum, repo) => sum + repo.runningCount, 0);
   const queuedCount = repositoriesInScope.reduce((sum, repo) => sum + repo.queuedCount, 0);
@@ -482,30 +496,30 @@ function App() {
           <div>
             <p className="eyebrow">PRODUCER CONTRACT</p>
             <h2>최근 Run 귀속 계약</h2>
-            <p className="muted-copy">Repository별 최근 최대 50개 Run 기준 · Project-wide 규칙 또는 명시 신호(run-name / PR / commit / branch)를 정상 계약으로 집계합니다.</p>
+            <p className="muted-copy">Repository별 최근 최대 50개 Run을 보존하되, 동일 GitHub Workflow의 최신 Run만 현재 producer 상태로 판정합니다.</p>
           </div>
-          <div className={`contract-coverage ${contractDriftRuns === 0 ? 'healthy' : producerContract.unresolvedRuns > 0 ? 'risk' : 'drift'}`}>
+          <div className={`contract-coverage ${contractDriftRuns === 0 ? 'healthy' : currentUnresolvedDriftRuns > 0 ? 'risk' : 'drift'}`}>
             <strong>{contractCoverage}%</strong>
-            <span>{contractCompliantRuns}/{producerContract.sampledRuns}</span>
+            <span>{contractCompliantRuns}/{currentProducerRuns.length}</span>
           </div>
         </div>
         <div className="metrics-row producer-contract-metrics">
-          <div><span>명시 신호</span><b>{producerContract.explicitRuns}</b><small>run-name {producerContract.runNameRuns} · PR {producerContract.prMarkerRuns} · commit {producerContract.commitMarkerRuns} · branch {producerContract.branchRuns}</small></div>
-          <div><span>Project-wide</span><b>{producerContract.projectWideRuns}</b><small>Track marker 없이 공용 규칙으로 정상 분류</small></div>
-          <div><span>Heuristic / 호환</span><b>{producerContract.heuristicRuns + producerContract.compatibilityRuns}</b><small>inference {producerContract.heuristicRuns} · alias {producerContract.compatibilityRuns}</small></div>
-          <div><span>수동 / 기타</span><b>{producerContract.manualRuns + producerContract.otherRuns}</b><small>manual {producerContract.manualRuns} · other {producerContract.otherRuns}</small></div>
-          <div><span>미해결</span><b>{producerContract.unresolvedRuns}</b><small>unassigned / conflict</small></div>
+          <div><span>명시 신호 · 표본</span><b>{producerContract.explicitRuns}</b><small>run-name {producerContract.runNameRuns} · PR {producerContract.prMarkerRuns} · commit {producerContract.commitMarkerRuns} · branch {producerContract.branchRuns}</small></div>
+          <div><span>Project-wide · 표본</span><b>{producerContract.projectWideRuns}</b><small>Track marker 없이 공용 규칙으로 정상 분류</small></div>
+          <div><span>Heuristic / 호환 · 표본</span><b>{producerContract.heuristicRuns + producerContract.compatibilityRuns}</b><small>inference {producerContract.heuristicRuns} · alias {producerContract.compatibilityRuns}</small></div>
+          <div><span>수동 / 기타 · 표본</span><b>{producerContract.manualRuns + producerContract.otherRuns}</b><small>manual {producerContract.manualRuns} · other {producerContract.otherRuns}</small></div>
+          <div><span>미해결 · 표본</span><b>{producerContract.unresolvedRuns}</b><small>unassigned / conflict · historical 포함</small></div>
         </div>
         <div className="producer-drift">
           <div className="producer-drift-head">
-            <div><b>Contract Drift</b><span>현재 범위 {producerContractDriftRuns.length}건</span></div>
-            <small>행을 누르면 저장된 resolver 근거와 reconciliation 이력을 확인합니다.</small>
+            <div><b>Current Drift</b><span>현재 producer {currentProducerDriftRuns.length}건</span></div>
+            <small>같은 workflow_id의 최신 Run만 현재 이상으로 계산합니다.</small>
           </div>
-          {producerContractDriftRuns.length === 0 ? (
-            <div className="producer-drift-empty">최근 표본에서 heuristic / alias / manual / unresolved drift가 없습니다.</div>
+          {currentProducerDriftRuns.length === 0 ? (
+            <div className="producer-drift-empty">현재 producer 기준으로 조치가 필요한 계약 drift가 없습니다.</div>
           ) : (
             <div className="producer-drift-list">
-              {producerContractDriftRuns.map(item => (
+              {currentProducerDriftRuns.map(item => (
                 <button
                   className={`producer-drift-row ${auditRun?.id === item.run.id ? 'selected' : ''}`}
                   key={item.run.id}
@@ -524,6 +538,32 @@ function App() {
             </div>
           )}
         </div>
+        {historicalProducerDriftRuns.length > 0 && (
+          <div className="producer-drift historical-drift">
+            <div className="producer-drift-head">
+              <div><b>Historical Drift</b><span>최근 표본 {historicalProducerDriftRuns.length}건</span></div>
+              <small>더 최신 Run이 존재하는 과거 evidence입니다. 현재 producer 이상에는 포함하지 않습니다.</small>
+            </div>
+            <div className="producer-drift-list">
+              {historicalProducerDriftRuns.map(item => (
+                <button
+                  className={`producer-drift-row historical ${auditRun?.id === item.run.id ? 'selected' : ''}`}
+                  key={item.run.id}
+                  onClick={() => void inspectAttribution(item.run)}
+                >
+                  <span className={`producer-bucket ${item.bucket}`}>{producerBucketLabel(item.bucket)}</span>
+                  <span className="producer-drift-main">
+                    <b>{item.run.workflowName}</b>
+                    <small>{item.run.displayTitle}</small>
+                  </span>
+                  <span className="producer-drift-repo">{item.run.repository}</span>
+                  <span className="producer-drift-source">{item.run.attributionSource ?? item.run.resolutionStatus}</span>
+                  <span className="mono producer-drift-branch">{item.run.headBranch ?? '—'}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       <div className="layout-grid">
