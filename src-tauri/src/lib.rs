@@ -24,6 +24,7 @@ const DEFAULT_IDLE_POLL_SECONDS: i64 = 90;
 const DEFAULT_QUEUE_THRESHOLD: i64 = 6;
 const HISTORICAL_RECONCILE_BATCH: i64 = 12;
 const PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY: i64 = 50;
+const RESPONSIBILITY_MAP_PATH: &str = "docs/ci/workflow-responsibility-map.json";
 
 struct AppState {
     db_path: PathBuf,
@@ -84,6 +85,54 @@ struct DynamicWorkflowRuleInput {
     project_id: i64,
     repository_id: Option<i64>,
     workflow_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct RepositoryResponsibilityContract {
+    workflow_path: String,
+    workflow_name: String,
+    binding_kind: String,
+    track_key: Option<String>,
+    source_binding: String,
+    source_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponsibilityMapDrift {
+    project_id: i64,
+    repository_id: i64,
+    repository: String,
+    workflow_path: String,
+    workflow_name: String,
+    drift_type: String,
+    repository_binding: String,
+    watchtower_binding: Option<String>,
+    expected_track_key: Option<String>,
+    actual_track_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryResponsibilityMap {
+    workflows: HashMap<String, RepositoryWorkflowResponsibility>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryWorkflowResponsibility {
+    watchtower_track_binding: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubWorkflowsResponse {
+    workflows: Vec<GithubWorkflowDefinition>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubWorkflowDefinition {
+    name: String,
+    path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,6 +294,7 @@ struct Dashboard {
     repository_scope_stats: Vec<RepositoryScopeStats>,
     producer_contract_stats: Vec<ProducerContractStats>,
     producer_contract_runs: Vec<ProducerContractRun>,
+    responsibility_map_drifts: Vec<ResponsibilityMapDrift>,
     project_runs: Vec<WorkflowRunSummary>,
     unassigned_runs: Vec<WorkflowRunSummary>,
 }
@@ -540,6 +590,21 @@ fn init_db(path: &Path) -> Result<()> {
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_dynamic_workflow_rules_scope
           ON dynamic_workflow_rules(project_id, COALESCE(repository_id,0), workflow_name);
+
+        CREATE TABLE IF NOT EXISTS repository_responsibility_contracts (
+          repository_id INTEGER NOT NULL REFERENCES monitored_repositories(id) ON DELETE CASCADE,
+          workflow_path TEXT NOT NULL,
+          workflow_name TEXT NOT NULL,
+          binding_kind TEXT NOT NULL CHECK(binding_kind IN ('project-wide','dynamic','static','unknown')),
+          track_key TEXT,
+          source_binding TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          PRIMARY KEY(repository_id, workflow_path)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_repository_responsibility_contracts_name
+          ON repository_responsibility_contracts(repository_id, workflow_name);
 
         CREATE TABLE IF NOT EXISTS track_aliases (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1349,7 +1414,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.17")
+        .user_agent("ci-watchtower/0.3.18")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -1414,6 +1479,23 @@ fn normalize_evidence_track_key(value: &str) -> String {
         "taxonomy&ai" => "taxonomy-ai".into(),
         key => key.into(),
     }
+}
+
+fn normalize_repository_binding(binding: &str) -> (String, Option<String>) {
+    let binding = binding.trim();
+    if binding == "unassigned-by-design" {
+        return ("project-wide".into(), None);
+    }
+    if binding == "dynamic-by-run" {
+        return ("dynamic".into(), None);
+    }
+    if let Some(track_key) = binding.strip_prefix("static:") {
+        let track_key = normalize_evidence_track_key(track_key.trim());
+        if validate_track_key(&track_key).is_ok() {
+            return ("static".into(), Some(track_key));
+        }
+    }
+    ("unknown".into(), None)
 }
 
 fn extract_marker(text: &str) -> Option<String> {
@@ -1559,6 +1641,306 @@ fn list_dynamic_workflow_rules(conn: &Connection) -> Result<Vec<DynamicWorkflowR
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn dynamic_rule_matches(
+    rules: &[DynamicWorkflowRule],
+    project_id: i64,
+    repository_id: i64,
+    workflow_name: &str,
+) -> bool {
+    rules.iter().any(|rule| {
+        rule.active
+            && rule.project_id == project_id
+            && rule.workflow_name == workflow_name
+            && (rule.repository_id.is_none() || rule.repository_id == Some(repository_id))
+    })
+}
+
+fn replace_repository_responsibility_contracts(
+    conn: &Connection,
+    repository_id: i64,
+    contracts: &[RepositoryResponsibilityContract],
+    now: &str,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM repository_responsibility_contracts WHERE repository_id=?",
+        params![repository_id],
+    )?;
+    for contract in contracts {
+        tx.execute(
+            "INSERT INTO repository_responsibility_contracts(
+               repository_id,workflow_path,workflow_name,binding_kind,track_key,
+               source_binding,source_path,last_seen_at
+             ) VALUES(?,?,?,?,?,?,?,?)",
+            params![
+                repository_id,
+                contract.workflow_path,
+                contract.workflow_name,
+                contract.binding_kind,
+                contract.track_key,
+                contract.source_binding,
+                contract.source_path,
+                now
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn repository_has_workflow_run(
+    conn: &Connection,
+    repository_id: i64,
+    workflow_name: &str,
+) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM workflow_runs
+           WHERE repository_id=? AND workflow_name=?
+         )",
+        params![repository_id, workflow_name],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )
+    .map_err(Into::into)
+}
+
+fn latest_workflow_path(
+    conn: &Connection,
+    repository_id: i64,
+    workflow_name: &str,
+) -> Result<String> {
+    let value: Option<Option<String>> = conn
+        .query_row(
+            "SELECT workflow_path FROM workflow_runs
+             WHERE repository_id=? AND workflow_name=?
+             ORDER BY updated_at DESC LIMIT 1",
+            params![repository_id, workflow_name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value.flatten().unwrap_or_default())
+}
+
+fn latest_workflow_run_title(
+    conn: &Connection,
+    repository_id: i64,
+    workflow_path: &str,
+    workflow_name: &str,
+) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT display_title FROM workflow_runs
+             WHERE repository_id=?
+               AND (workflow_path=? OR workflow_name=?)
+             ORDER BY updated_at DESC LIMIT 1",
+            params![repository_id, workflow_path, workflow_name],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapDrift>> {
+    let project_rules = list_project_workflow_rules(conn)?;
+    let dynamic_rules = list_dynamic_workflow_rules(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT rrc.repository_id,mr.project_id,mr.repo,
+                rrc.workflow_path,rrc.workflow_name,rrc.binding_kind,
+                rrc.track_key,rrc.source_binding,rrc.source_path
+         FROM repository_responsibility_contracts rrc
+         JOIN monitored_repositories mr ON mr.id=rrc.repository_id
+         ORDER BY rrc.repository_id,rrc.workflow_path",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            RepositoryResponsibilityContract {
+                workflow_path: row.get(3)?,
+                workflow_name: row.get(4)?,
+                binding_kind: row.get(5)?,
+                track_key: row.get(6)?,
+                source_binding: row.get(7)?,
+                source_path: row.get(8)?,
+            },
+        ))
+    })?;
+    let contracts = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let mut drifts = Vec::new();
+    let mut repository_contract_names: HashMap<i64, HashSet<String>> = HashMap::new();
+    let mut repository_meta: HashMap<i64, (i64, String)> = HashMap::new();
+
+    for (repository_id, project_id, repository, contract) in &contracts {
+        repository_contract_names
+            .entry(*repository_id)
+            .or_default()
+            .insert(contract.workflow_name.clone());
+        repository_meta
+            .entry(*repository_id)
+            .or_insert((*project_id, repository.clone()));
+
+        let project_declared = project_rule_matches(
+            &project_rules,
+            *project_id,
+            *repository_id,
+            &contract.workflow_name,
+        );
+        let dynamic_declared = dynamic_rule_matches(
+            &dynamic_rules,
+            *project_id,
+            *repository_id,
+            &contract.workflow_name,
+        );
+        let latest_run_title = latest_workflow_run_title(
+            conn,
+            *repository_id,
+            &contract.workflow_path,
+            &contract.workflow_name,
+        )?;
+        let actual_track_key = latest_run_title
+            .as_deref()
+            .and_then(extract_marker);
+        let actual_binding = if project_declared && dynamic_declared {
+            Some("project-wide + dynamic".to_string())
+        } else if project_declared {
+            Some("project-wide".to_string())
+        } else if dynamic_declared {
+            Some("dynamic".to_string())
+        } else {
+            actual_track_key
+                .as_ref()
+                .map(|key| format!("static:{key}"))
+        };
+
+        let drift_type = match contract.binding_kind.as_str() {
+            "project-wide" => {
+                if dynamic_declared {
+                    Some("responsibility_kind_mismatch")
+                } else if !project_declared {
+                    Some("missing_in_watchtower")
+                } else {
+                    None
+                }
+            }
+            "dynamic" => {
+                if project_declared {
+                    Some("responsibility_kind_mismatch")
+                } else if !dynamic_declared {
+                    Some("missing_in_watchtower")
+                } else {
+                    None
+                }
+            }
+            "static" => {
+                if project_declared || dynamic_declared {
+                    Some("responsibility_kind_mismatch")
+                } else {
+                    let expected = contract.track_key.as_deref();
+                    let track_exists = expected
+                        .map(|key| {
+                            conn.query_row(
+                                "SELECT EXISTS(
+                                   SELECT 1 FROM watch_tracks
+                                   WHERE project_id=? AND track_key=? AND active=1
+                                 )",
+                                params![project_id, key],
+                                |row| Ok(row.get::<_, i64>(0)? != 0),
+                            )
+                            .unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+                    if !track_exists {
+                        Some("track_binding_mismatch")
+                    } else if latest_run_title.is_some()
+                        && actual_track_key.as_deref() != expected
+                    {
+                        Some("track_binding_mismatch")
+                    } else {
+                        None
+                    }
+                }
+            }
+            _ => Some("responsibility_kind_mismatch"),
+        };
+
+        if let Some(drift_type) = drift_type {
+            drifts.push(ResponsibilityMapDrift {
+                project_id: *project_id,
+                repository_id: *repository_id,
+                repository: repository.clone(),
+                workflow_path: contract.workflow_path.clone(),
+                workflow_name: contract.workflow_name.clone(),
+                drift_type: drift_type.into(),
+                repository_binding: contract.source_binding.clone(),
+                watchtower_binding: actual_binding,
+                expected_track_key: contract.track_key.clone(),
+                actual_track_key,
+            });
+        }
+    }
+
+    let mut stale_seen: HashSet<(i64, String, String)> = HashSet::new();
+    for (repository_id, contract_names) in &repository_contract_names {
+        let Some((project_id, repository)) = repository_meta.get(repository_id) else {
+            continue;
+        };
+        for rule in project_rules.iter().filter(|rule| {
+            rule.project_id == *project_id
+                && (rule.repository_id.is_none() || rule.repository_id == Some(*repository_id))
+        }) {
+            if !contract_names.contains(&rule.workflow_name)
+                && repository_has_workflow_run(conn, *repository_id, &rule.workflow_name)?
+                && stale_seen.insert((*repository_id, rule.workflow_name.clone(), "project-wide".into()))
+            {
+                drifts.push(ResponsibilityMapDrift {
+                    project_id: *project_id,
+                    repository_id: *repository_id,
+                    repository: repository.clone(),
+                    workflow_path: latest_workflow_path(conn, *repository_id, &rule.workflow_name)?,
+                    workflow_name: rule.workflow_name.clone(),
+                    drift_type: "stale_in_watchtower".into(),
+                    repository_binding: "missing-from-repository-map".into(),
+                    watchtower_binding: Some("project-wide".into()),
+                    expected_track_key: None,
+                    actual_track_key: None,
+                });
+            }
+        }
+        for rule in dynamic_rules.iter().filter(|rule| {
+            rule.project_id == *project_id
+                && (rule.repository_id.is_none() || rule.repository_id == Some(*repository_id))
+        }) {
+            if !contract_names.contains(&rule.workflow_name)
+                && repository_has_workflow_run(conn, *repository_id, &rule.workflow_name)?
+                && stale_seen.insert((*repository_id, rule.workflow_name.clone(), "dynamic".into()))
+            {
+                drifts.push(ResponsibilityMapDrift {
+                    project_id: *project_id,
+                    repository_id: *repository_id,
+                    repository: repository.clone(),
+                    workflow_path: latest_workflow_path(conn, *repository_id, &rule.workflow_name)?,
+                    workflow_name: rule.workflow_name.clone(),
+                    drift_type: "stale_in_watchtower".into(),
+                    repository_binding: "missing-from-repository-map".into(),
+                    watchtower_binding: Some("dynamic".into()),
+                    expected_track_key: None,
+                    actual_track_key: None,
+                });
+            }
+        }
+    }
+
+    drifts.sort_by(|a, b| {
+        a.repository
+            .cmp(&b.repository)
+            .then_with(|| a.workflow_name.cmp(&b.workflow_name))
+            .then_with(|| a.drift_type.cmp(&b.drift_type))
+    });
+    Ok(drifts)
 }
 
 fn load_run_attribution_detail(conn: &Connection, run_id: i64) -> Result<RunAttributionDetail> {
@@ -2134,6 +2516,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         producer_contract_stats(&conn, PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY)?;
     let producer_contract_runs =
         producer_contract_runs(&conn, PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY)?;
+    let responsibility_map_drifts = responsibility_map_drifts(&conn)?;
     let mut project_runs = Vec::new();
     let mut unassigned_runs = Vec::new();
     for repository in &repositories {
@@ -2181,6 +2564,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         repository_scope_stats,
         producer_contract_stats,
         producer_contract_runs,
+        responsibility_map_drifts,
         project_runs,
         unassigned_runs,
     })
@@ -2198,6 +2582,70 @@ async fn github_repository_runs(client: &Client, repo: &str) -> Result<Vec<Githu
     let url = format!("https://api.github.com/repos/{repo}/actions/runs?per_page=100");
     let data: GithubRunsResponse = fetch_json(client, url, "GitHub Actions 조회 실패").await?;
     Ok(data.workflow_runs)
+}
+
+async fn github_repository_responsibility_contracts(
+    client: &Client,
+    repo: &str,
+) -> Result<Option<Vec<RepositoryResponsibilityContract>>> {
+    let url = format!(
+        "https://api.github.com/repos/{repo}/contents/{RESPONSIBILITY_MAP_PATH}"
+    );
+    let response = client
+        .get(url)
+        .header(
+            header::ACCEPT,
+            header::HeaderValue::from_static("application/vnd.github.raw+json"),
+        )
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "Responsibility map 조회 실패: HTTP {}",
+            response.status()
+        ));
+    }
+    let map: RepositoryResponsibilityMap = serde_json::from_str(&response.text().await?)?;
+    let workflows_url = format!(
+        "https://api.github.com/repos/{repo}/actions/workflows?per_page=100"
+    );
+    let workflow_data: GithubWorkflowsResponse =
+        fetch_json(client, workflows_url, "Workflow inventory 조회 실패").await?;
+    let workflow_names: HashMap<String, String> = workflow_data
+        .workflows
+        .into_iter()
+        .map(|workflow| (workflow.path, workflow.name))
+        .collect();
+
+    let contracts = map
+        .workflows
+        .into_iter()
+        .map(|(workflow_file, responsibility)| {
+            let workflow_path = if workflow_file.starts_with(".github/workflows/") {
+                workflow_file.clone()
+            } else {
+                format!(".github/workflows/{workflow_file}")
+            };
+            let workflow_name = workflow_names
+                .get(&workflow_path)
+                .cloned()
+                .unwrap_or_else(|| workflow_file.clone());
+            let source_binding = responsibility.watchtower_track_binding;
+            let (binding_kind, track_key) = normalize_repository_binding(&source_binding);
+            RepositoryResponsibilityContract {
+                workflow_path,
+                workflow_name,
+                binding_kind,
+                track_key,
+                source_binding,
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            }
+        })
+        .collect();
+    Ok(Some(contracts))
 }
 
 async fn github_commit_message(
@@ -2907,6 +3355,18 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     for run in &runs {
                         upsert_run(&conn, repository.id, run, &now_str)?;
                     }
+                }
+
+                if let Ok(Some(contracts)) =
+                    github_repository_responsibility_contracts(&client, &repository.repo).await
+                {
+                    let conn = db(state)?;
+                    replace_repository_responsibility_contracts(
+                        &conn,
+                        repository.id,
+                        &contracts,
+                        &now_str,
+                    )?;
                 }
 
                 let fingerprints = {
@@ -6188,6 +6648,253 @@ mod tests {
         assert_eq!(detail.evidence[0].signal_type, "run_name");
         assert_eq!(detail.evidence[0].score, 100);
         assert_eq!(detail.evidence[1].signal_type, "branch");
+    }
+
+    #[test]
+    fn responsibility_map_drift_is_detect_only_and_repository_scoped() {
+        let path = legacy_v02_db_path("responsibility-map-drift");
+        init_db(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
+
+        let repository_id: i64 = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let project_id: i64 = conn
+            .query_row(
+                "SELECT project_id FROM monitored_repositories WHERE id=?",
+                params![repository_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let now = "2026-09-24T06:30:00Z";
+        conn.execute(
+            "INSERT OR IGNORE INTO project_workflow_rules(
+               project_id,repository_id,workflow_name,active,created_at
+             ) VALUES(?,?,'Kind Mismatch',1,?)",
+            params![project_id, repository_id, now],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO monitored_repositories(
+               project_id,repo,enabled,running_count,queued_count,created_at,updated_at
+             ) VALUES(?,'example/other-visualy-repo',1,0,0,?,?)",
+            params![project_id, now, now],
+        )
+        .unwrap();
+        let other_repository_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO dynamic_workflow_rules(
+               project_id,repository_id,workflow_name,active,protected,created_at
+             ) VALUES(?,?,'Scoped Dynamic',1,0,?)",
+            params![project_id, other_repository_id, now],
+        )
+        .unwrap();
+
+        for (run_id, workflow_id, workflow_name, workflow_path, display_title) in [
+            (
+                9_800_001_i64,
+                9801_i64,
+                "Stale Dynamic",
+                ".github/workflows/stale-dynamic.yml",
+                "Stale Dynamic",
+            ),
+            (
+                9_800_002_i64,
+                9802_i64,
+                "Stale Project",
+                ".github/workflows/stale-project.yml",
+                "Stale Project",
+            ),
+            (
+                9_800_003_i64,
+                9803_i64,
+                "Static Clean",
+                ".github/workflows/static-clean.yml",
+                "[WT:mobile] Static Clean",
+            ),
+            (
+                9_800_004_i64,
+                9804_i64,
+                "Wrong Static",
+                ".github/workflows/wrong-static.yml",
+                "[WT:trust] Wrong Static",
+            ),
+        ] {
+            let run = GithubRun {
+                id: run_id,
+                workflow_id,
+                name: workflow_name.into(),
+                path: Some(workflow_path.into()),
+                display_title: Some(display_title.into()),
+                event: "push".into(),
+                head_branch: Some("main".into()),
+                head_sha: format!("sha-{run_id}"),
+                run_number: run_id,
+                run_attempt: 1,
+                status: "completed".into(),
+                conclusion: Some("success".into()),
+                html_url: format!("https://example/{run_id}"),
+                created_at: now.into(),
+                run_started_at: Some(now.into()),
+                updated_at: now.into(),
+                pull_requests: vec![],
+            };
+            upsert_run(&conn, repository_id, &run, now).unwrap();
+        }
+
+        conn.execute(
+            "INSERT OR IGNORE INTO dynamic_workflow_rules(
+               project_id,repository_id,workflow_name,active,protected,created_at
+             ) VALUES(?,?,'Stale Dynamic',1,0,?)",
+            params![project_id, repository_id, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO project_workflow_rules(
+               project_id,repository_id,workflow_name,active,created_at
+             ) VALUES(?,?,'Stale Project',1,?)",
+            params![project_id, repository_id, now],
+        )
+        .unwrap();
+
+        let contracts = vec![
+            RepositoryResponsibilityContract {
+                workflow_path: ".github/workflows/current-main-health.yml".into(),
+                workflow_name: "BEJEWELY Current Main Health".into(),
+                binding_kind: "project-wide".into(),
+                track_key: None,
+                source_binding: "unassigned-by-design".into(),
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            },
+            RepositoryResponsibilityContract {
+                workflow_path: ".github/workflows/security-boundary.yml".into(),
+                workflow_name: "BEJEWELY Security Boundary".into(),
+                binding_kind: "dynamic".into(),
+                track_key: None,
+                source_binding: "dynamic-by-run".into(),
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            },
+            RepositoryResponsibilityContract {
+                workflow_path: ".github/workflows/static-clean.yml".into(),
+                workflow_name: "Static Clean".into(),
+                binding_kind: "static".into(),
+                track_key: Some("mobile".into()),
+                source_binding: "static:mobile".into(),
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            },
+            RepositoryResponsibilityContract {
+                workflow_path: ".github/workflows/missing-dynamic.yml".into(),
+                workflow_name: "Missing Dynamic".into(),
+                binding_kind: "dynamic".into(),
+                track_key: None,
+                source_binding: "dynamic-by-run".into(),
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            },
+            RepositoryResponsibilityContract {
+                workflow_path: ".github/workflows/kind-mismatch.yml".into(),
+                workflow_name: "Kind Mismatch".into(),
+                binding_kind: "dynamic".into(),
+                track_key: None,
+                source_binding: "dynamic-by-run".into(),
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            },
+            RepositoryResponsibilityContract {
+                workflow_path: ".github/workflows/wrong-static.yml".into(),
+                workflow_name: "Wrong Static".into(),
+                binding_kind: "static".into(),
+                track_key: Some("mobile".into()),
+                source_binding: "static:mobile".into(),
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            },
+            RepositoryResponsibilityContract {
+                workflow_path: ".github/workflows/scoped-dynamic.yml".into(),
+                workflow_name: "Scoped Dynamic".into(),
+                binding_kind: "dynamic".into(),
+                track_key: None,
+                source_binding: "dynamic-by-run".into(),
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            },
+        ];
+        replace_repository_responsibility_contracts(&conn, repository_id, &contracts, now).unwrap();
+
+        let track_count_before: i64 =
+            conn.query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0)).unwrap();
+        let assignment_count_before: i64 =
+            conn.query_row("SELECT COUNT(*) FROM run_assignments", [], |row| row.get(0)).unwrap();
+
+        let drifts = responsibility_map_drifts(&conn).unwrap();
+
+        let track_count_after: i64 =
+            conn.query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0)).unwrap();
+        let assignment_count_after: i64 =
+            conn.query_row("SELECT COUNT(*) FROM run_assignments", [], |row| row.get(0)).unwrap();
+        assert_eq!(track_count_before, track_count_after);
+        assert_eq!(assignment_count_before, assignment_count_after);
+
+        assert!(!drifts.iter().any(|item| item.workflow_name == "BEJEWELY Current Main Health"));
+        assert!(!drifts.iter().any(|item| item.workflow_name == "BEJEWELY Security Boundary"));
+        assert!(!drifts.iter().any(|item| item.workflow_name == "Static Clean"));
+
+        let missing_names: HashSet<&str> = drifts
+            .iter()
+            .filter(|item| item.drift_type == "missing_in_watchtower")
+            .map(|item| item.workflow_name.as_str())
+            .collect();
+        assert!(missing_names.contains("Missing Dynamic"));
+        assert!(missing_names.contains("Scoped Dynamic"));
+
+        assert!(drifts.iter().any(|item| {
+            item.workflow_name == "Kind Mismatch"
+                && item.drift_type == "responsibility_kind_mismatch"
+        }));
+        assert!(drifts.iter().any(|item| {
+            item.workflow_name == "Wrong Static"
+                && item.drift_type == "track_binding_mismatch"
+                && item.expected_track_key.as_deref() == Some("mobile")
+                && item.actual_track_key.as_deref() == Some("trust")
+        }));
+        assert!(drifts.iter().any(|item| {
+            item.workflow_name == "Stale Dynamic"
+                && item.drift_type == "stale_in_watchtower"
+                && item.watchtower_binding.as_deref() == Some("dynamic")
+        }));
+        assert!(drifts.iter().any(|item| {
+            item.workflow_name == "Stale Project"
+                && item.drift_type == "stale_in_watchtower"
+                && item.watchtower_binding.as_deref() == Some("project-wide")
+        }));
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn repository_responsibility_binding_normalizes_supported_contracts() {
+        assert_eq!(
+            normalize_repository_binding("unassigned-by-design"),
+            ("project-wide".into(), None)
+        );
+        assert_eq!(
+            normalize_repository_binding("dynamic-by-run"),
+            ("dynamic".into(), None)
+        );
+        assert_eq!(
+            normalize_repository_binding("static:taxonomy&AI"),
+            ("static".into(), Some("taxonomy-ai".into()))
+        );
+        assert_eq!(
+            normalize_repository_binding("future-contract"),
+            ("unknown".into(), None)
+        );
     }
 
     #[test]
