@@ -110,6 +110,9 @@ struct ResponsibilityMapDrift {
     watchtower_binding: Option<String>,
     expected_track_key: Option<String>,
     actual_track_key: Option<String>,
+    source_path: String,
+    reason: String,
+    recommended_action: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1438,7 +1441,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.20")
+        .user_agent("ci-watchtower/0.3.21")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -1911,28 +1914,66 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                 .map(|key| format!("static:{key}"))
         };
 
-        let drift_type = match contract.binding_kind.as_str() {
+        let drift_review: Option<(&str, String, &str)> = match contract.binding_kind.as_str() {
             "project-wide" => {
                 if dynamic_declared {
-                    Some("responsibility_kind_mismatch")
+                    Some((
+                        "responsibility_kind_mismatch",
+                        format!(
+                            "Repository map declares {}, but WatchTower currently declares {}.",
+                            contract.source_binding,
+                            actual_binding.as_deref().unwrap_or("missing")
+                        ),
+                        "review_reclassify_project_wide",
+                    ))
                 } else if !project_declared {
-                    Some("missing_in_watchtower")
+                    Some((
+                        "missing_in_watchtower",
+                        format!(
+                            "Repository map declares {}, but WatchTower has no matching active Project-wide rule.",
+                            contract.source_binding
+                        ),
+                        "review_add_project_wide_rule",
+                    ))
                 } else {
                     None
                 }
             }
             "dynamic" => {
                 if project_declared {
-                    Some("responsibility_kind_mismatch")
+                    Some((
+                        "responsibility_kind_mismatch",
+                        format!(
+                            "Repository map declares {}, but WatchTower currently declares {}.",
+                            contract.source_binding,
+                            actual_binding.as_deref().unwrap_or("missing")
+                        ),
+                        "review_reclassify_dynamic",
+                    ))
                 } else if !dynamic_declared {
-                    Some("missing_in_watchtower")
+                    Some((
+                        "missing_in_watchtower",
+                        format!(
+                            "Repository map declares {}, but WatchTower has no matching active Dynamic rule.",
+                            contract.source_binding
+                        ),
+                        "review_add_dynamic_rule",
+                    ))
                 } else {
                     None
                 }
             }
             "static" => {
                 if project_declared || dynamic_declared {
-                    Some("responsibility_kind_mismatch")
+                    Some((
+                        "responsibility_kind_mismatch",
+                        format!(
+                            "Repository map declares {}, but WatchTower currently declares {} instead of a static Track binding.",
+                            contract.source_binding,
+                            actual_binding.as_deref().unwrap_or("missing")
+                        ),
+                        "review_remove_conflicting_responsibility_rule",
+                    ))
                 } else {
                     let expected = contract.track_key.as_deref();
                     let track_exists = expected
@@ -1949,20 +1990,42 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                         })
                         .unwrap_or(false);
                     if !track_exists {
-                        Some("track_binding_mismatch")
+                        Some((
+                            "track_binding_mismatch",
+                            format!(
+                                "Repository map expects {}, but the referenced canonical Track is not active in this Project.",
+                                contract.source_binding
+                            ),
+                            "review_track_registry_or_map",
+                        ))
                     } else if latest_run_title.is_some()
                         && actual_track_key.as_deref() != expected
                     {
-                        Some("track_binding_mismatch")
+                        Some((
+                            "track_binding_mismatch",
+                            format!(
+                                "Repository map expects {}, but the latest producer run-name evidence resolves to {}.",
+                                contract.source_binding,
+                                actual_track_key.as_deref().unwrap_or("no [WT:*] marker")
+                            ),
+                            "review_producer_run_name",
+                        ))
                     } else {
                         None
                     }
                 }
             }
-            _ => Some("responsibility_kind_mismatch"),
+            _ => Some((
+                "responsibility_kind_mismatch",
+                format!(
+                    "Repository map contains unsupported responsibility binding {}.",
+                    contract.source_binding
+                ),
+                "review_repository_map_binding",
+            )),
         };
 
-        if let Some(drift_type) = drift_type {
+        if let Some((drift_type, reason, recommended_action)) = drift_review {
             drifts.push(ResponsibilityMapDrift {
                 project_id: *project_id,
                 repository_id: *repository_id,
@@ -1974,6 +2037,9 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                 watchtower_binding: actual_binding,
                 expected_track_key: contract.track_key.clone(),
                 actual_track_key,
+                source_path: contract.source_path.clone(),
+                reason,
+                recommended_action: recommended_action.into(),
             });
         }
     }
@@ -2002,6 +2068,9 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                     watchtower_binding: Some("project-wide".into()),
                     expected_track_key: None,
                     actual_track_key: None,
+                    source_path: RESPONSIBILITY_MAP_PATH.into(),
+                    reason: "WatchTower still declares this workflow as Project-wide, but the current repository responsibility map no longer contains the producer.".into(),
+                    recommended_action: "review_remove_or_confirm_stale_rule".into(),
                 });
             }
         }
@@ -2024,6 +2093,9 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                     watchtower_binding: Some("dynamic".into()),
                     expected_track_key: None,
                     actual_track_key: None,
+                    source_path: RESPONSIBILITY_MAP_PATH.into(),
+                    reason: "WatchTower still declares this workflow as Dynamic, but the current repository responsibility map no longer contains the producer.".into(),
+                    recommended_action: "review_remove_or_confirm_stale_rule".into(),
                 });
             }
         }
@@ -7046,6 +7118,14 @@ mod tests {
                 source_binding: "dynamic-by-run".into(),
                 source_path: RESPONSIBILITY_MAP_PATH.into(),
             },
+            RepositoryResponsibilityContract {
+                workflow_path: ".github/workflows/ghost-static.yml".into(),
+                workflow_name: "Ghost Static".into(),
+                binding_kind: "static".into(),
+                track_key: Some("ghost-track".into()),
+                source_binding: "static:ghost-track".into(),
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            },
         ];
         replace_repository_responsibility_contracts(&conn, repository_id, &contracts, now).unwrap();
 
@@ -7075,26 +7155,65 @@ mod tests {
         assert!(missing_names.contains("Missing Dynamic"));
         assert!(missing_names.contains("Scoped Dynamic"));
 
-        assert!(drifts.iter().any(|item| {
-            item.workflow_name == "Kind Mismatch"
-                && item.drift_type == "responsibility_kind_mismatch"
-        }));
-        assert!(drifts.iter().any(|item| {
-            item.workflow_name == "Wrong Static"
-                && item.drift_type == "track_binding_mismatch"
-                && item.expected_track_key.as_deref() == Some("mobile")
-                && item.actual_track_key.as_deref() == Some("trust")
-        }));
-        assert!(drifts.iter().any(|item| {
-            item.workflow_name == "Stale Dynamic"
-                && item.drift_type == "stale_in_watchtower"
-                && item.watchtower_binding.as_deref() == Some("dynamic")
-        }));
-        assert!(drifts.iter().any(|item| {
-            item.workflow_name == "Stale Project"
-                && item.drift_type == "stale_in_watchtower"
-                && item.watchtower_binding.as_deref() == Some("project-wide")
-        }));
+        let missing_dynamic = drifts
+            .iter()
+            .find(|item| item.workflow_name == "Missing Dynamic")
+            .unwrap();
+        assert_eq!(missing_dynamic.source_path, RESPONSIBILITY_MAP_PATH);
+        assert_eq!(missing_dynamic.recommended_action, "review_add_dynamic_rule");
+        assert!(missing_dynamic.reason.contains("no matching active Dynamic rule"));
+
+        let kind_mismatch = drifts
+            .iter()
+            .find(|item| item.workflow_name == "Kind Mismatch")
+            .unwrap();
+        assert_eq!(kind_mismatch.drift_type, "responsibility_kind_mismatch");
+        assert_eq!(kind_mismatch.recommended_action, "review_reclassify_dynamic");
+        assert!(kind_mismatch.reason.contains("dynamic-by-run"));
+        assert!(kind_mismatch.reason.contains("project-wide"));
+        let wrong_static = drifts
+            .iter()
+            .find(|item| item.workflow_name == "Wrong Static")
+            .unwrap();
+        assert_eq!(wrong_static.drift_type, "track_binding_mismatch");
+        assert_eq!(wrong_static.expected_track_key.as_deref(), Some("mobile"));
+        assert_eq!(wrong_static.actual_track_key.as_deref(), Some("trust"));
+        assert_eq!(wrong_static.recommended_action, "review_producer_run_name");
+        assert!(wrong_static.reason.contains("static:mobile"));
+        assert!(wrong_static.reason.contains("trust"));
+
+        let ghost_static = drifts
+            .iter()
+            .find(|item| item.workflow_name == "Ghost Static")
+            .unwrap();
+        assert_eq!(ghost_static.drift_type, "track_binding_mismatch");
+        assert_eq!(ghost_static.recommended_action, "review_track_registry_or_map");
+        assert!(ghost_static.reason.contains("canonical Track"));
+
+        let stale_dynamic = drifts
+            .iter()
+            .find(|item| item.workflow_name == "Stale Dynamic")
+            .unwrap();
+        assert_eq!(stale_dynamic.drift_type, "stale_in_watchtower");
+        assert_eq!(stale_dynamic.watchtower_binding.as_deref(), Some("dynamic"));
+        assert_eq!(
+            stale_dynamic.recommended_action,
+            "review_remove_or_confirm_stale_rule"
+        );
+
+        let stale_project = drifts
+            .iter()
+            .find(|item| item.workflow_name == "Stale Project")
+            .unwrap();
+        assert_eq!(stale_project.drift_type, "stale_in_watchtower");
+        assert_eq!(
+            stale_project.watchtower_binding.as_deref(),
+            Some("project-wide")
+        );
+        assert_eq!(
+            stale_project.recommended_action,
+            "review_remove_or_confirm_stale_rule"
+        );
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
