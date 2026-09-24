@@ -1082,6 +1082,20 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
                     params![myeongha_project_id, repository_id, workflow_name, now],
                 )?;
             }
+
+            conn.execute(
+                "INSERT OR IGNORE INTO dynamic_workflow_rules(
+                   project_id,repository_id,workflow_name,active,protected,created_at
+                 ) VALUES(?,?,'Production Records Current-Subject Smoke',1,1,?)",
+                params![myeongha_project_id, repository_id, now],
+            )?;
+            conn.execute(
+                "UPDATE dynamic_workflow_rules
+                 SET active=1,protected=1
+                 WHERE project_id=? AND repository_id=?
+                   AND workflow_name='Production Records Current-Subject Smoke'",
+                params![myeongha_project_id, repository_id],
+            )?;
         }
 
         let saju_repository_id: Option<i64> = conn
@@ -1334,7 +1348,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.14")
+        .user_agent("ci-watchtower/0.3.15")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
