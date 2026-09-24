@@ -44,8 +44,8 @@ jobs:
                           last_reviewed_at: None,
                           first_seen_at: String::new(),"""
           count = source.count(old)
-          if count != 3:
-              raise SystemExit(f"expected 3 drift initializers, got {count}")
+          if count != 1:
+              raise SystemExit(f"expected 1 production drift initializer, got {count}")
           source = source.replace(old, new)
 
           old_sort = """    drifts.sort_by(|a, b| {
@@ -70,6 +70,10 @@ jobs:
 
           tests_path = Path("src-tauri/src/tests.rs")
           tests = tests_path.read_text()
+          test_count = tests.count(old)
+          if test_count != 2:
+              raise SystemExit(f"expected 2 test drift initializers, got {test_count}")
+          tests = tests.replace(old, new)
           test_name = "responsibility_review_priority_and_age_bucket_follow_operational_order"
           if test_name not in tests:
               tests += """
