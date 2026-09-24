@@ -164,6 +164,8 @@ Producer Contract 패널은 drift를 두 층으로 분리합니다.
 - **Current Drift**: `repository_id + workflow_id` 기준 최신 Run이 비정상 계약인 producer. 상단 coverage와 위험 색상은 이 집합만 기준으로 계산합니다.
 - **Historical Drift**: 같은 workflow에 더 최신 Run이 이미 존재하는 과거 비정상 Run. 최근 50-run evidence와 Attribution Audit에서는 계속 확인할 수 있지만 현재 producer 이상으로 계산하지 않습니다.
 
+GitHub가 Dependabot 업데이트를 위해 생성하는 `dynamic/dependabot/*` workflow는 repository의 `.github/workflows` producer가 아니므로 Track 귀속/Producer Contract/미귀속 Inbox 표본에서 제외합니다. Runner 혼잡을 보기 위한 repository Running/Queued 집계에는 그대로 남깁니다.
+
 최근 50-run bucket 통계는 historical evidence를 포함한 표본 통계로 남습니다. 따라서 과거 untagged Run이 표본에 남아 있어도 최신 producer가 정상 계약으로 회복됐다면 현재 coverage를 계속 낮추지 않습니다. 각 drift 행을 선택하면 기존 Attribution Audit에서 resolver evidence와 Historical Reconciliation 이력을 검토할 수 있습니다.
 
 ## Resolver
