@@ -165,6 +165,29 @@ struct ResponsibilityResolutionResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ResponsibilityResolutionAuditEntry {
+    id: i64,
+    project_id: i64,
+    project_name: String,
+    repository_id: i64,
+    repository: String,
+    workflow_name: String,
+    review_key: String,
+    drift_type: String,
+    action: String,
+    result: String,
+    actor: String,
+    created_at: String,
+    requested_fingerprint: String,
+    current_fingerprint: String,
+    repository_contract: String,
+    before_watchtower_contract: Option<String>,
+    after_watchtower_contract: Option<String>,
+    stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ResponsibilityMapSourceStatus {
     project_id: i64,
     repository_id: i64,
@@ -694,6 +717,10 @@ fn init_db(path: &Path) -> Result<()> {
           before_watchtower_binding TEXT,
           after_repository_binding TEXT,
           after_watchtower_binding TEXT,
+          requested_fingerprint TEXT,
+          current_fingerprint TEXT,
+          expected_repository_binding TEXT,
+          resulting_watchtower_binding TEXT,
           result TEXT NOT NULL CHECK(result IN ('resolved','deferred','blocked','stale_rejected','still_open','failed')),
           actor TEXT NOT NULL,
           created_at TEXT NOT NULL
@@ -779,6 +806,10 @@ fn init_db(path: &Path) -> Result<()> {
     ensure_column(&conn, "monitored_repositories", "project_id", "INTEGER")?;
     ensure_column(&conn, "workflow_runs", "last_resolution_attempt_at", "TEXT")?;
     ensure_column(&conn, "dynamic_workflow_rules", "protected", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(&conn, "responsibility_resolution_audit", "requested_fingerprint", "TEXT")?;
+    ensure_column(&conn, "responsibility_resolution_audit", "current_fingerprint", "TEXT")?;
+    ensure_column(&conn, "responsibility_resolution_audit", "expected_repository_binding", "TEXT")?;
+    ensure_column(&conn, "responsibility_resolution_audit", "resulting_watchtower_binding", "TEXT")?;
     conn.execute(
         "INSERT OR IGNORE INTO app_settings(id, queue_congestion_threshold, active_poll_seconds, idle_poll_seconds, auto_archive_completed, queue_congested) VALUES(1,?,?,?,?,0)",
         params![DEFAULT_QUEUE_THRESHOLD, DEFAULT_ACTIVE_POLL_SECONDS, DEFAULT_IDLE_POLL_SECONDS, 0],
@@ -1510,7 +1541,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.22")
+        .user_agent("ci-watchtower/0.3.23")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -4115,22 +4146,64 @@ fn resolution_preview_for_drift(
     })
 }
 
+fn current_watchtower_responsibility_binding(
+    conn: &Connection,
+    drift: &ResponsibilityMapDrift,
+) -> Result<Option<String>> {
+    let project_rules = list_project_workflow_rules(conn)?;
+    let dynamic_rules = list_dynamic_workflow_rules(conn)?;
+    let project_declared = project_rule_matches(
+        &project_rules,
+        drift.project_id,
+        drift.repository_id,
+        &drift.workflow_name,
+    );
+    let dynamic_declared = dynamic_rule_matches(
+        &dynamic_rules,
+        drift.project_id,
+        drift.repository_id,
+        &drift.workflow_name,
+    );
+    if project_declared && dynamic_declared {
+        return Ok(Some("project-wide + dynamic".into()));
+    }
+    if project_declared {
+        return Ok(Some("project-wide".into()));
+    }
+    if dynamic_declared {
+        return Ok(Some("dynamic".into()));
+    }
+    Ok(latest_workflow_run_title(
+        conn,
+        drift.repository_id,
+        &drift.workflow_path,
+        &drift.workflow_name,
+    )?
+    .as_deref()
+    .and_then(extract_marker)
+    .map(|key| format!("static:{key}")))
+}
+
 fn insert_resolution_audit(
     conn: &Connection,
     drift: &ResponsibilityMapDrift,
     action: &str,
-    after: Option<&ResponsibilityMapDrift>,
+    requested_fingerprint: &str,
+    current_fingerprint: &str,
+    resulting_watchtower_binding: Option<&str>,
     result: &str,
 ) -> Result<i64> {
     conn.execute(
         "INSERT INTO responsibility_resolution_audit(
            review_key,fingerprint,project_id,repository_id,workflow_name,drift_type,
            action,before_repository_binding,before_watchtower_binding,
-           after_repository_binding,after_watchtower_binding,result,actor,created_at
-         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+           after_repository_binding,after_watchtower_binding,
+           requested_fingerprint,current_fingerprint,expected_repository_binding,
+           resulting_watchtower_binding,result,actor,created_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         params![
             drift.review_key,
-            drift.fingerprint,
+            current_fingerprint,
             drift.project_id,
             drift.repository_id,
             drift.workflow_name,
@@ -4138,14 +4211,64 @@ fn insert_resolution_audit(
             action,
             drift.repository_binding,
             drift.watchtower_binding,
-            after.map(|item| item.repository_binding.clone()),
-            after.and_then(|item| item.watchtower_binding.clone()),
+            drift.repository_binding,
+            resulting_watchtower_binding,
+            requested_fingerprint,
+            current_fingerprint,
+            drift.repository_binding,
+            resulting_watchtower_binding,
             result,
             "local-user",
             Utc::now().to_rfc3339(),
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+fn responsibility_resolution_history(
+    conn: &Connection,
+    limit: i64,
+) -> Result<Vec<ResponsibilityResolutionAuditEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT rra.id,rra.project_id,p.name,rra.repository_id,mr.repo,
+                rra.workflow_name,rra.review_key,rra.drift_type,rra.action,rra.result,
+                rra.actor,rra.created_at,
+                COALESCE(rra.requested_fingerprint,rra.fingerprint),
+                COALESCE(rra.current_fingerprint,rra.fingerprint),
+                COALESCE(rra.expected_repository_binding,rra.before_repository_binding),
+                rra.before_watchtower_binding,
+                COALESCE(rra.resulting_watchtower_binding,rra.after_watchtower_binding)
+         FROM responsibility_resolution_audit rra
+         JOIN projects p ON p.id=rra.project_id
+         JOIN monitored_repositories mr ON mr.id=rra.repository_id
+         ORDER BY rra.id DESC
+         LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![limit.clamp(1, 500)], |row| {
+        let requested_fingerprint: String = row.get(12)?;
+        let current_fingerprint: String = row.get(13)?;
+        Ok(ResponsibilityResolutionAuditEntry {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            project_name: row.get(2)?,
+            repository_id: row.get(3)?,
+            repository: row.get(4)?,
+            workflow_name: row.get(5)?,
+            review_key: row.get(6)?,
+            drift_type: row.get(7)?,
+            action: row.get(8)?,
+            result: row.get(9)?,
+            actor: row.get(10)?,
+            created_at: row.get(11)?,
+            stale: requested_fingerprint != current_fingerprint,
+            requested_fingerprint,
+            current_fingerprint,
+            repository_contract: row.get(14)?,
+            before_watchtower_contract: row.get(15)?,
+            after_watchtower_contract: row.get(16)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn add_project_rule_for_resolution(conn: &Connection, drift: &ResponsibilityMapDrift) -> Result<()> {
@@ -4261,15 +4384,32 @@ fn defer_responsibility_drift_with_conn(
     input: &DeferResponsibilityDriftInput,
 ) -> Result<ResponsibilityResolutionResult> {
     let drift = current_responsibility_drift(conn, &input.review_key)?;
+    let current_binding = current_watchtower_responsibility_binding(conn, &drift)?;
     if drift.fingerprint != input.fingerprint {
-        let audit_id = insert_resolution_audit(conn, &drift, "defer", Some(&drift), "stale_rejected")?;
+        let audit_id = insert_resolution_audit(
+            conn,
+            &drift,
+            "defer",
+            &input.fingerprint,
+            &drift.fingerprint,
+            current_binding.as_deref(),
+            "stale_rejected",
+        )?;
         return Ok(ResponsibilityResolutionResult {
             status: "stale_rejected".into(),
             audit_id,
             current_drift: Some(drift),
         });
     }
-    let audit_id = insert_resolution_audit(conn, &drift, "defer", Some(&drift), "deferred")?;
+    let audit_id = insert_resolution_audit(
+        conn,
+        &drift,
+        "defer",
+        &input.fingerprint,
+        &drift.fingerprint,
+        current_binding.as_deref(),
+        "deferred",
+    )?;
     let mut current = drift.clone();
     current.review_status = "deferred".into();
     Ok(ResponsibilityResolutionResult {
@@ -4284,12 +4424,15 @@ fn resolve_responsibility_drift_with_conn(
     input: &ResolveResponsibilityDriftInput,
 ) -> Result<ResponsibilityResolutionResult> {
     let drift = current_responsibility_drift(conn, &input.review_key)?;
+    let current_binding = current_watchtower_responsibility_binding(conn, &drift)?;
     if drift.fingerprint != input.fingerprint {
         let audit_id = insert_resolution_audit(
             conn,
             &drift,
             &input.action,
-            Some(&drift),
+            &input.fingerprint,
+            &drift.fingerprint,
+            current_binding.as_deref(),
             "stale_rejected",
         )?;
         return Ok(ResponsibilityResolutionResult {
@@ -4304,7 +4447,9 @@ fn resolve_responsibility_drift_with_conn(
             conn,
             &drift,
             &input.action,
-            Some(&drift),
+            &input.fingerprint,
+            &drift.fingerprint,
+            current_binding.as_deref(),
             "blocked",
         )?;
         return Ok(ResponsibilityResolutionResult {
@@ -4315,25 +4460,43 @@ fn resolve_responsibility_drift_with_conn(
     }
 
     let tx = conn.unchecked_transaction()?;
-    match input.action.as_str() {
-        "add_project_wide_rule" => add_project_rule_for_resolution(&tx, &drift)?,
-        "add_dynamic_rule" => add_dynamic_rule_for_resolution(&tx, &drift)?,
-        "reclassify_to_project_wide" => {
-            remove_dynamic_rule_for_resolution(&tx, &drift)?;
-            add_project_rule_for_resolution(&tx, &drift)?;
+    let mutation_result: Result<()> = (|| {
+        match input.action.as_str() {
+            "add_project_wide_rule" => add_project_rule_for_resolution(&tx, &drift)?,
+            "add_dynamic_rule" => add_dynamic_rule_for_resolution(&tx, &drift)?,
+            "reclassify_to_project_wide" => {
+                remove_dynamic_rule_for_resolution(&tx, &drift)?;
+                add_project_rule_for_resolution(&tx, &drift)?;
+            }
+            "reclassify_to_dynamic" => {
+                remove_project_rule_for_resolution(&tx, &drift)?;
+                add_dynamic_rule_for_resolution(&tx, &drift)?;
+            }
+            "remove_stale_rule" => match drift.watchtower_binding.as_deref() {
+                Some("project-wide") => remove_project_rule_for_resolution(&tx, &drift)?,
+                Some("dynamic") => remove_dynamic_rule_for_resolution(&tx, &drift)?,
+                _ => return Err(anyhow!("제거할 stale responsibility 규칙을 판정하지 못했습니다.")),
+            },
+            _ => return Err(anyhow!("지원하지 않는 Responsibility resolution action입니다.")),
         }
-        "reclassify_to_dynamic" => {
-            remove_project_rule_for_resolution(&tx, &drift)?;
-            add_dynamic_rule_for_resolution(&tx, &drift)?;
-        }
-        "remove_stale_rule" => match drift.watchtower_binding.as_deref() {
-            Some("project-wide") => remove_project_rule_for_resolution(&tx, &drift)?,
-            Some("dynamic") => remove_dynamic_rule_for_resolution(&tx, &drift)?,
-            _ => return Err(anyhow!("제거할 stale responsibility 규칙을 판정하지 못했습니다.")),
-        },
-        _ => return Err(anyhow!("지원하지 않는 Responsibility resolution action입니다.")),
+        Ok(())
+    })();
+    if let Err(error) = mutation_result {
+        tx.rollback()?;
+        let resulting_binding = current_watchtower_responsibility_binding(conn, &drift)?;
+        let audit_id = insert_resolution_audit(
+            conn,
+            &drift,
+            &input.action,
+            &input.fingerprint,
+            &drift.fingerprint,
+            resulting_binding.as_deref(),
+            "failed",
+        )?;
+        return Err(anyhow!("Responsibility resolution 실패 (audit #{audit_id}): {error}"));
     }
 
+    let resulting_binding = current_watchtower_responsibility_binding(&tx, &drift)?;
     let after = responsibility_map_drifts(&tx)?
         .into_iter()
         .find(|item| item.review_key == drift.review_key);
@@ -4342,7 +4505,9 @@ fn resolve_responsibility_drift_with_conn(
         &tx,
         &drift,
         &input.action,
-        after.as_ref(),
+        &input.fingerprint,
+        &drift.fingerprint,
+        resulting_binding.as_deref(),
         result_status,
     )?;
     tx.commit()?;
@@ -4373,6 +4538,17 @@ fn resolve_responsibility_drift(
     let result = (|| -> Result<ResponsibilityResolutionResult> {
         let conn = db(&state)?;
         resolve_responsibility_drift_with_conn(&conn, &input)
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_responsibility_resolution_history(
+    state: State<'_, AppState>,
+) -> std::result::Result<Vec<ResponsibilityResolutionAuditEntry>, String> {
+    let result = (|| -> Result<Vec<ResponsibilityResolutionAuditEntry>> {
+        let conn = db(&state)?;
+        responsibility_resolution_history(&conn, 200)
     })();
     result.map_err(|e| e.to_string())
 }
@@ -5072,6 +5248,7 @@ pub fn run() {
             get_responsibility_resolution_preview,
             resolve_responsibility_drift,
             defer_responsibility_drift,
+            get_responsibility_resolution_history,
             get_run_attribution,
             poll_now,
             save_project,
@@ -8081,6 +8258,16 @@ mod tests {
         let blocked_preview = resolution_preview_for_drift(&conn, &wrong_static_current).unwrap();
         assert!(!blocked_preview.executable);
         assert_eq!(blocked_preview.action, "blocked");
+        let blocked_result = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: wrong_static_current.review_key.clone(),
+                fingerprint: wrong_static_current.fingerprint.clone(),
+                action: "blocked".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(blocked_result.status, "blocked");
 
         let scoped_dynamic = responsibility_map_drifts(&conn)
             .unwrap()
@@ -8123,7 +8310,100 @@ mod tests {
         };
         assert!(audit_results.contains(&"deferred".to_string()));
         assert!(audit_results.contains(&"resolved".to_string()));
+        assert!(audit_results.contains(&"blocked".to_string()));
         assert!(audit_results.contains(&"stale_rejected".to_string()));
+
+        let history = responsibility_resolution_history(&conn, 200).unwrap();
+        let deferred_history = history
+            .iter()
+            .find(|item| item.id == deferred.audit_id)
+            .unwrap();
+        assert_eq!(deferred_history.result, "deferred");
+        assert_eq!(deferred_history.before_watchtower_contract, None);
+        assert_eq!(deferred_history.after_watchtower_contract, None);
+        assert!(!deferred_history.stale);
+
+        let missing_dynamic_history: Vec<&ResponsibilityResolutionAuditEntry> = history
+            .iter()
+            .filter(|item| item.review_key == missing_dynamic.review_key)
+            .collect();
+        assert_eq!(missing_dynamic_history.len(), 2);
+        assert!(missing_dynamic_history.iter().any(|item| item.result == "deferred"));
+        let resolved_dynamic_history = missing_dynamic_history
+            .iter()
+            .find(|item| item.result == "resolved")
+            .unwrap();
+        assert_eq!(
+            resolved_dynamic_history.after_watchtower_contract.as_deref(),
+            Some("dynamic")
+        );
+        assert_eq!(resolved_dynamic_history.repository_contract, "dynamic-by-run");
+
+        let resolved_project_history = history
+            .iter()
+            .find(|item| item.id == resolved_missing_project.audit_id)
+            .unwrap();
+        assert_eq!(
+            resolved_project_history.after_watchtower_contract.as_deref(),
+            Some("project-wide")
+        );
+        let reclassified_dynamic_history = history
+            .iter()
+            .find(|item| item.id == kind_dynamic_result.audit_id)
+            .unwrap();
+        assert_eq!(
+            reclassified_dynamic_history.before_watchtower_contract.as_deref(),
+            Some("project-wide")
+        );
+        assert_eq!(
+            reclassified_dynamic_history.after_watchtower_contract.as_deref(),
+            Some("dynamic")
+        );
+        let reclassified_project_history = history
+            .iter()
+            .find(|item| item.id == kind_project_result.audit_id)
+            .unwrap();
+        assert_eq!(
+            reclassified_project_history.before_watchtower_contract.as_deref(),
+            Some("dynamic")
+        );
+        assert_eq!(
+            reclassified_project_history.after_watchtower_contract.as_deref(),
+            Some("project-wide")
+        );
+        let stale_history = history
+            .iter()
+            .find(|item| item.id == stale_rejected.audit_id)
+            .unwrap();
+        assert_eq!(stale_history.result, "stale_rejected");
+        assert!(stale_history.stale);
+        assert_ne!(
+            stale_history.requested_fingerprint,
+            stale_history.current_fingerprint
+        );
+        let blocked_history = history
+            .iter()
+            .find(|item| item.id == blocked_result.audit_id)
+            .unwrap();
+        assert_eq!(blocked_history.result, "blocked");
+        assert_eq!(blocked_history.repository_id, repository_id);
+
+        let deferred_row_unchanged: String = conn
+            .query_row(
+                "SELECT result FROM responsibility_resolution_audit WHERE id=?",
+                params![deferred.audit_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(deferred_row_unchanged, "deferred");
+        let manual_assignment_final: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9_800_005 AND manual=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(manual_assignment_final, 1);
 
         drop(conn);
         let _ = std::fs::remove_file(&path);

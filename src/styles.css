@@ -113,6 +113,49 @@ h2 { font-size: 16px; margin: 0 0 15px; }
 .responsibility-resolution-list code, .responsibility-resolution-list small { border: 1px solid #1d2941; border-radius: 7px; background: #0a1020; color: #9eacc5; padding: 7px 8px; font-size: 9px; line-height: 1.4; }
 .responsibility-resolution-confirm { display: flex; justify-content: space-between; gap: 14px; align-items: center; border-top: 1px solid #1d2941; padding-top: 9px; }
 .responsibility-resolution-confirm small { max-width: 620px; color: #7887a4; font-size: 9px; line-height: 1.45; }
+.responsibility-review-history-link { width: fit-content; display: flex; gap: 8px; align-items: center; border: 0; background: transparent; color: #8ea5d4; padding: 0; font-size: 9px; font-weight: 800; text-align: left; }
+.responsibility-review-history-link:hover { color: #b7c9ee; }
+.responsibility-review-history-link small { color: #667593; font-size: 9px; font-weight: 600; }
+.resolution-history { display: grid; gap: 9px; margin-top: 14px; border-top: 1px solid #202a42; padding-top: 14px; }
+.resolution-history-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.resolution-history-head > div { display: grid; gap: 3px; }
+.resolution-history-head b { color: #dce5f6; font-size: 12px; }
+.resolution-history-head span { color: #71809c; font-size: 9px; }
+.resolution-history-filters { display: flex; flex-wrap: wrap; gap: 5px; }
+.resolution-history-filters button { border: 1px solid #29354f; border-radius: 999px; background: #090e1b; color: #7887a4; padding: 4px 8px; font-size: 9px; font-weight: 800; }
+.resolution-history-filters button:hover, .resolution-history-filters button.selected { border-color: #45639b; background: #101a30; color: #b8caef; }
+.resolution-history-list { display: grid; gap: 6px; }
+.resolution-history-item { border: 1px solid #202a42; border-radius: 9px; background: #090e1b; overflow: hidden; }
+.resolution-history-item.resolved { border-left: 2px solid #31524a; }
+.resolution-history-item.deferred { border-left: 2px solid #4d4229; }
+.resolution-history-item.blocked, .resolution-history-item.failed { border-left: 2px solid #5b2b38; }
+.resolution-history-item.stale_rejected { border-left: 2px solid #51426d; }
+.resolution-history-row { width: 100%; display: grid; grid-template-columns: 84px minmax(210px,1fr) minmax(190px,.8fr) 132px; gap: 10px; align-items: center; border: 0; background: transparent; color: #b8c4da; padding: 9px 10px; text-align: left; }
+.resolution-history-row:hover { background: #0e1526; }
+.resolution-history-result { width: fit-content; border: 1px solid #33415d; border-radius: 999px; color: #8fa2c6; padding: 3px 6px; font-size: 8px; font-weight: 900; letter-spacing: .05em; }
+.resolution-history-result.resolved { border-color: #31524a; color: #78d9aa; }
+.resolution-history-result.deferred { border-color: #4d4229; color: #e4c66d; }
+.resolution-history-result.blocked, .resolution-history-result.failed { border-color: #5b2b38; color: #ff8796; }
+.resolution-history-result.stale_rejected { border-color: #51426d; color: #c6a8ef; }
+.resolution-history-main { min-width: 0; display: grid; gap: 2px; }
+.resolution-history-main b, .resolution-history-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resolution-history-main b { color: #dce5f6; font-size: 10px; }
+.resolution-history-main small, .resolution-history-time { color: #71809c; font-size: 9px; }
+.resolution-history-transition { display: flex; gap: 7px; align-items: center; color: #8e9bb3; font-size: 9px; }
+.resolution-history-transition b { color: #536786; }
+.resolution-history-time { text-align: right; }
+.resolution-history-detail { display: grid; gap: 9px; border-top: 1px solid #202a42; background: #070c17; padding: 11px; }
+.resolution-history-contracts { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 7px; }
+.resolution-history-contracts > div { display: grid; gap: 4px; border: 1px solid #1d2941; border-radius: 7px; background: #0a1020; padding: 8px; }
+.resolution-history-contracts span, .resolution-history-fingerprint > span, .resolution-history-invariants > span { color: #667593; font-size: 8px; font-weight: 900; letter-spacing: .07em; text-transform: uppercase; }
+.resolution-history-contracts b { color: #cbd7eb; font-size: 9px; }
+.resolution-history-fingerprint, .resolution-history-invariants { display: grid; gap: 5px; }
+.resolution-history-fingerprint code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid #1d2941; border-radius: 6px; background: #0a1020; color: #8797b4; padding: 6px 7px; font-size: 8px; }
+.resolution-history-fingerprint b { width: fit-content; color: #78d9aa; font-size: 8px; }
+.resolution-history-item.stale_rejected .resolution-history-fingerprint b { color: #c6a8ef; }
+.resolution-history-invariants small { color: #8291ad; font-size: 9px; }
+.resolution-history-meta { display: flex; flex-wrap: wrap; gap: 10px; border-top: 1px solid #1d2941; padding-top: 7px; color: #667593; font-size: 8px; }
+.resolution-history-empty { border: 1px dashed #29354f; border-radius: 8px; color: #71809c; padding: 11px; font-size: 10px; text-align: center; }
 .responsibility-source-list { display: grid; gap: 6px; margin-bottom: 8px; }
 .responsibility-source-row { display: grid; grid-template-columns: 74px minmax(220px,1.2fr) minmax(110px,.45fr) minmax(180px,.7fr); gap: 10px; align-items: center; border: 1px solid #202a42; border-radius: 8px; background: #090e1b; padding: 8px 9px; }
 .responsibility-source-state { width: fit-content; border: 1px solid #30456f; border-radius: 999px; color: #9db4ff; padding: 3px 6px; font-size: 9px; font-weight: 900; letter-spacing: .04em; }
@@ -200,6 +243,9 @@ input:focus { border-color: #4a73ee; box-shadow: 0 0 0 3px rgba(74,115,238,.12);
   .responsibility-review-card-head { grid-template-columns: 72px minmax(200px,1fr); }
   .responsibility-review-action { grid-column: 2; justify-self: start; }
   .responsibility-review-contract-grid { grid-template-columns: 1fr; }
+  .resolution-history-row { grid-template-columns: 78px minmax(190px,1fr) minmax(160px,.7fr); }
+  .resolution-history-time { display: none; }
+  .resolution-history-contracts { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .layout-grid { grid-template-columns: 320px minmax(0,1fr); }
   .run-row.v2 { grid-template-columns: 10px minmax(220px,1fr) 130px 70px; }
   .run-row.v2 .attribution { display: none; }

@@ -265,6 +265,27 @@ export interface ResponsibilityResolutionResult {
   currentDrift: ResponsibilityMapDrift | null;
 }
 
+export interface ResponsibilityResolutionAuditEntry {
+  id: number;
+  projectId: number;
+  projectName: string;
+  repositoryId: number;
+  repository: string;
+  workflowName: string;
+  reviewKey: string;
+  driftType: string;
+  action: string;
+  result: 'resolved' | 'deferred' | 'blocked' | 'stale_rejected' | 'still_open' | 'failed' | string;
+  actor: string;
+  createdAt: string;
+  requestedFingerprint: string;
+  currentFingerprint: string;
+  repositoryContract: string;
+  beforeWatchtowerContract: string | null;
+  afterWatchtowerContract: string | null;
+  stale: boolean;
+}
+
 export interface ResponsibilityMapSourceStatus {
   projectId: number;
   repositoryId: number;

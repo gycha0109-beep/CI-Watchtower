@@ -6,6 +6,7 @@ import type {
   MonitoredRepository,
   Project,
   ResponsibilityMapDrift,
+  ResponsibilityResolutionAuditEntry,
   ResponsibilityResolutionPreview,
   RunAttributionDetail,
   Settings,
@@ -16,6 +17,7 @@ import type {
 type TrackFormState = Omit<TrackInput, 'longCiMinutes'> & { longCiMinutes: number | '' };
 type ViewFilter = 'all' | 'project' | 'unassigned' | number;
 type ScopeFilter = 'all' | number;
+type ResolutionHistoryFilter = 'all' | 'resolved' | 'deferred' | 'blocked' | 'stale_rejected' | 'failed';
 
 const emptyTrack = (projectId = 0): TrackFormState => ({
   projectId,
@@ -94,8 +96,34 @@ function resolutionActionLabel(action: string) {
     case 'reclassify_to_project_wide': return 'Dynamic → Project-wide 재분류';
     case 'reclassify_to_dynamic': return 'Project-wide → Dynamic 재분류';
     case 'remove_stale_rule': return 'Stale responsibility 규칙 제거';
+    case 'defer': return '검토 보류';
+    case 'blocked': return 'WatchTower 내부 변경 차단';
     default: return 'WatchTower 내부 해결 불가';
   }
+}
+
+function resolutionResultLabel(result: string) {
+  switch (result) {
+    case 'resolved': return 'RESOLVED';
+    case 'deferred': return 'DEFERRED';
+    case 'blocked': return 'BLOCKED';
+    case 'stale_rejected': return 'STALE';
+    case 'still_open': return 'OPEN';
+    case 'failed': return 'FAILED';
+    default: return result.toUpperCase();
+  }
+}
+
+function formatAuditTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('ko-KR', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }
 
 function repositoryState(repo: MonitoredRepository) {
@@ -169,12 +197,21 @@ function App() {
   const [auditLoadingId, setAuditLoadingId] = useState<number | null>(null);
   const [resolutionPreview, setResolutionPreview] = useState<ResponsibilityResolutionPreview | null>(null);
   const [resolutionLoadingKey, setResolutionLoadingKey] = useState<string | null>(null);
+  const [resolutionHistory, setResolutionHistory] = useState<ResponsibilityResolutionAuditEntry[]>([]);
+  const [resolutionHistoryFilter, setResolutionHistoryFilter] = useState<ResolutionHistoryFilter>('all');
+  const [resolutionHistoryReviewKey, setResolutionHistoryReviewKey] = useState<string | null>(null);
+  const [expandedResolutionAuditId, setExpandedResolutionAuditId] = useState<number | null>(null);
 
   const refresh = useCallback(async (poll = false) => {
     try {
       setBusy(true);
       setError(null);
-      setDashboard(await (poll ? api.pollNow() : api.getDashboard()));
+      const [nextDashboard, nextHistory] = await Promise.all([
+        poll ? api.pollNow() : api.getDashboard(),
+        api.getResponsibilityResolutionHistory(),
+      ]);
+      setDashboard(nextDashboard);
+      setResolutionHistory(nextHistory);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -325,6 +362,36 @@ function App() {
     ),
     [dashboard, selectedProject, selectedRepository],
   );
+  const resolutionHistoryInScope = useMemo(
+    () => resolutionHistory.filter(item =>
+      (selectedProject === 'all' || item.projectId === selectedProject) &&
+      (selectedRepository === 'all' || item.repositoryId === selectedRepository)
+    ),
+    [resolutionHistory, selectedProject, selectedRepository],
+  );
+  const resolutionHistoryByReviewKey = useMemo(() => {
+    const grouped = new Map<string, ResponsibilityResolutionAuditEntry[]>();
+    for (const item of resolutionHistoryInScope) {
+      const current = grouped.get(item.reviewKey) ?? [];
+      current.push(item);
+      grouped.set(item.reviewKey, current);
+    }
+    return grouped;
+  }, [resolutionHistoryInScope]);
+  const visibleResolutionHistory = useMemo(
+    () => resolutionHistoryInScope.filter(item =>
+      (resolutionHistoryFilter === 'all' || item.result === resolutionHistoryFilter) &&
+      (resolutionHistoryReviewKey == null || item.reviewKey === resolutionHistoryReviewKey)
+    ),
+    [resolutionHistoryFilter, resolutionHistoryInScope, resolutionHistoryReviewKey],
+  );
+  const resolutionHistoryCounts = useMemo(() => ({
+    resolved: resolutionHistoryInScope.filter(item => item.result === 'resolved').length,
+    deferred: resolutionHistoryInScope.filter(item => item.result === 'deferred').length,
+    blocked: resolutionHistoryInScope.filter(item => item.result === 'blocked').length,
+    stale_rejected: resolutionHistoryInScope.filter(item => item.result === 'stale_rejected').length,
+    failed: resolutionHistoryInScope.filter(item => item.result === 'failed').length,
+  }), [resolutionHistoryInScope]);
   const responsibilityMapSourceWarnings = responsibilityMapSourcesInScope.filter(item =>
     item.status === 'error' || (item.status === 'not_found' && item.contractCount > 0)
   );
@@ -802,6 +869,24 @@ function App() {
                     <span>충돌 이유</span>
                     <p>{item.reason}</p>
                   </div>
+                  {(resolutionHistoryByReviewKey.get(item.reviewKey)?.length ?? 0) > 0 && (
+                    <button
+                      type="button"
+                      className="responsibility-review-history-link"
+                      onClick={() => {
+                        setResolutionHistoryReviewKey(item.reviewKey);
+                        setResolutionHistoryFilter('all');
+                        setExpandedResolutionAuditId(resolutionHistoryByReviewKey.get(item.reviewKey)?.[0]?.id ?? null);
+                      }}
+                    >
+                      Previous reviews: {resolutionHistoryByReviewKey.get(item.reviewKey)?.length ?? 0}
+                      <small>
+                        Last {resolutionResultLabel(resolutionHistoryByReviewKey.get(item.reviewKey)?.[0]?.result ?? '')}
+                        {' · '}
+                        {formatAuditTime(resolutionHistoryByReviewKey.get(item.reviewKey)?.[0]?.createdAt ?? '')}
+                      </small>
+                    </button>
+                  )}
                   <div className="responsibility-review-foot">
                     <span>{responsibilityActionLabel(item.recommendedAction)}</span>
                     <span className="responsibility-review-buttons">
@@ -872,6 +957,115 @@ function App() {
               ))}
             </div>
           )}
+
+          <div className="resolution-history">
+            <div className="resolution-history-head">
+              <div>
+                <b>Resolution History</b>
+                <span>
+                  Resolved {resolutionHistoryCounts.resolved}
+                  {' · '}Deferred {resolutionHistoryCounts.deferred}
+                  {' · '}Blocked {resolutionHistoryCounts.blocked}
+                  {' · '}Stale {resolutionHistoryCounts.stale_rejected}
+                  {' · '}Failed {resolutionHistoryCounts.failed}
+                </span>
+              </div>
+              {resolutionHistoryReviewKey && (
+                <button
+                  type="button"
+                  className="ghost tiny"
+                  onClick={() => {
+                    setResolutionHistoryReviewKey(null);
+                    setExpandedResolutionAuditId(null);
+                  }}
+                >
+                  Workflow filter 해제
+                </button>
+              )}
+            </div>
+            <div className="resolution-history-filters">
+              {([
+                ['all', 'All'],
+                ['resolved', 'Resolved'],
+                ['deferred', 'Deferred'],
+                ['blocked', 'Blocked'],
+                ['stale_rejected', 'Stale'],
+                ['failed', 'Failed'],
+              ] as Array<[ResolutionHistoryFilter, string]>).map(([value, label]) => (
+                <button
+                  type="button"
+                  key={value}
+                  className={resolutionHistoryFilter === value ? 'selected' : ''}
+                  onClick={() => setResolutionHistoryFilter(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {visibleResolutionHistory.length === 0 ? (
+              <div className="resolution-history-empty">현재 범위에 기록된 Responsibility resolution event가 없습니다.</div>
+            ) : (
+              <div className="resolution-history-list">
+                {visibleResolutionHistory.map(entry => {
+                  const expanded = expandedResolutionAuditId === entry.id;
+                  return (
+                    <article className={`resolution-history-item ${entry.result}`} key={entry.id}>
+                      <button
+                        type="button"
+                        className="resolution-history-row"
+                        onClick={() => setExpandedResolutionAuditId(expanded ? null : entry.id)}
+                      >
+                        <span className={`resolution-history-result ${entry.result}`}>
+                          {resolutionResultLabel(entry.result)}
+                        </span>
+                        <span className="resolution-history-main">
+                          <b>{entry.workflowName}</b>
+                          <small>{entry.repository}</small>
+                        </span>
+                        <span className="resolution-history-transition">
+                          {entry.beforeWatchtowerContract ?? '미선언'}
+                          <b>→</b>
+                          {entry.afterWatchtowerContract ?? (entry.result === 'resolved' ? '미선언' : '변경 없음')}
+                        </span>
+                        <span className="resolution-history-time">{formatAuditTime(entry.createdAt)}</span>
+                      </button>
+                      {expanded && (
+                        <div className="resolution-history-detail">
+                          <div className="resolution-history-contracts">
+                            <div><span>Repository authority</span><b>{entry.repositoryContract}</b></div>
+                            <div><span>WatchTower before</span><b>{entry.beforeWatchtowerContract ?? '미선언'}</b></div>
+                            <div><span>Approved action</span><b>{resolutionActionLabel(entry.action)}</b></div>
+                            <div><span>WatchTower after</span><b>{entry.afterWatchtowerContract ?? '미선언'}</b></div>
+                          </div>
+                          <div className="resolution-history-fingerprint">
+                            <span>Fingerprint</span>
+                            <code>requested {entry.requestedFingerprint}</code>
+                            <code>current&nbsp;&nbsp; {entry.currentFingerprint}</code>
+                            <b>{entry.stale ? 'MISMATCH · mutation rejected' : 'MATCH'}</b>
+                          </div>
+                          <div className="resolution-history-invariants">
+                            <span>Safety verification</span>
+                            <small>✓ Repository-scoped resolution boundary</small>
+                            <small>✓ Canonical Tracks unchanged</small>
+                            <small>✓ Manual assignments preserved by resolution path</small>
+                            <small>✓ Producer YAML unchanged</small>
+                            <small>✓ Repository responsibility map unchanged</small>
+                            {entry.result === 'resolved' && <small>✓ Post-mutation reviewed drift cleared</small>}
+                          </div>
+                          <div className="resolution-history-meta">
+                            <span>Audit #{entry.id}</span>
+                            <span>{entry.actor}</span>
+                            <span>{entry.projectName}</span>
+                            <span>{formatAuditTime(entry.createdAt)}</span>
+                          </div>
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
         {historicalProducerDriftRuns.length > 0 && (
           <div className="producer-drift historical-drift">
