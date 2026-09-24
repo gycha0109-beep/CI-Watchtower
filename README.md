@@ -228,6 +228,18 @@ Review Inbox를 단순 상태 목록이 아니라 실제 운영 우선순위 큐
 - fingerprint가 바뀌면 새로운 review 상태로 취급하므로 과거 drift의 aging이 새 계약 상태에 잘못 이어지지 않습니다.
 - 기존 fail-closed 경계, repository scope, canonical Track, producer YAML, responsibility map, manual assignment 불변 조건은 유지합니다.
 
+### Responsibility Review SLA / Escalation (v0.3.26)
+
+Aging/Priority 위에 review SLA와 escalation 계층을 추가합니다.
+
+- SLA는 같은 review key + fingerprint의 최초 관측 시각을 기준으로 계산합니다. fingerprint가 바뀌면 새 SLA가 시작됩니다.
+- P0=24h, P1=96h, P2=72h review target을 사용하고 P3/DEFERRED, BLOCKED는 SLA exempt로 둡니다.
+- P0는 12시간 이하, P1/P2는 24시간 이하가 남으면 DUE_SOON, target을 넘으면 BREACHED입니다.
+- P0/P1은 breach 전 WARNING, breach 후 CRITICAL escalation으로 분리합니다. P2는 SLA 상태만 계산하고 escalation queue에는 올리지 않습니다.
+- Dashboard의 SLA Escalation 영역은 P0/P1만 별도로 모아 Review Inbox 전체를 훑지 않아도 임박/초과 항목을 볼 수 있게 합니다.
+- Inbox 정렬은 CRITICAL → WARNING → 일반을 먼저 적용한 뒤 기존 Priority/Aging/실패 시도 순서를 유지합니다.
+- SLA는 자동 mutation, 자동 Track 생성, producer YAML 수정, repository map 수정, run assignment 변경을 수행하지 않습니다. 기존 fail-closed 경계를 그대로 유지합니다.
+
 ## Producer Contract Health
 
 Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.
