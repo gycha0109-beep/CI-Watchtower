@@ -8337,7 +8337,7 @@ mod tests {
             resolved_dynamic_history.after_watchtower_contract.as_deref(),
             Some("dynamic")
         );
-        assert_eq!(resolved_dynamic_history.repository_contract, "dynamic");
+        assert_eq!(resolved_dynamic_history.repository_contract, "dynamic-by-run");
 
         let resolved_project_history = history
             .iter()
