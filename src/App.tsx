@@ -299,6 +299,9 @@ function App() {
     item.status === 'error' || (item.status === 'not_found' && item.contractCount > 0)
   );
   const responsibilityMapSourcePending = responsibilityMapSourcesInScope.filter(item => item.status === 'pending');
+  const responsibilityMapNotConfigured = responsibilityMapSourcesInScope.filter(
+    item => item.status === 'not_found' && item.contractCount === 0,
+  );
   const responsibilityMapSynced = responsibilityMapSourcesInScope.filter(item => item.status === 'synced');
   const contractCompliantRuns = currentProducerRuns.filter(item => item.contractCompliant).length;
   const contractDriftRuns = currentProducerDriftRuns.length;
@@ -663,6 +666,10 @@ function App() {
             </div>
           ) : responsibilityMapSourcePending.length > 0 && responsibilityMapSynced.length === 0 ? (
             <div className="producer-drift-source-pending">아직 responsibility map source를 poll하지 않았습니다.</div>
+          ) : responsibilityMapNotConfigured.length > 0 && responsibilityMapSynced.length === 0 ? (
+            <div className="producer-drift-source-pending">
+              이 범위에는 repository responsibility map이 구성되어 있지 않아 map drift 판정을 수행하지 않습니다.
+            </div>
           ) : responsibilityMapDriftsInScope.length === 0 ? (
             <div className="producer-drift-empty">현재 동기화된 repository responsibility map과 WatchTower 책임 선언이 일치합니다.</div>
           ) : (

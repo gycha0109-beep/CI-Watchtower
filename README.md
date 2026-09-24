@@ -161,7 +161,7 @@ Repository에 `docs/ci/workflow-responsibility-map.json`이 있으면 polling �
 Drift 0건이 곧 source 정상이라는 잘못된 결론으로 이어지지 않도록 repository별 map source 상태를 별도로 추적합니다.
 
 - `synced`: 현재 poll에서 map을 정상 읽었고 snapshot을 갱신했습니다.
-- `not_found`: repository에 map이 없습니다. 이전 snapshot이 있다면 stale-source 경고로 취급합니다.
+- `not_found`: repository에 map이 없습니다. 이전 snapshot이 있다면 stale-source 경고로 취급하고, snapshot 자체가 없으면 `not configured` 상태로 표시하여 clean drift로 오인하지 않습니다.
 - `error`: GitHub/API/parse 조회 실패입니다. 마지막 정상 snapshot과 `last_success_at`은 보존합니다.
 - `pending`: v0.3.19 이후 아직 source poll을 수행하지 않은 상태입니다.
 - source 실패는 Actions run polling이나 attribution을 중단시키지 않지만, UI는 stale/unavailable source가 있을 때 drift 0건을 clean으로 표시하지 않습니다.
