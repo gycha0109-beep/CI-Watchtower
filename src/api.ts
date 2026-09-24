@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   Dashboard,
+  DynamicWorkflowRuleInput,
   ProjectInput,
   ProjectWorkflowRuleInput,
   RepositoryInput,
@@ -20,6 +21,10 @@ export const api = {
     invoke<number>('save_project_workflow_rule', { input }),
   deleteProjectWorkflowRule: (id: number) =>
     invoke<void>('delete_project_workflow_rule', { id }),
+  saveDynamicWorkflowRule: (input: DynamicWorkflowRuleInput) =>
+    invoke<number>('save_dynamic_workflow_rule', { input }),
+  deleteDynamicWorkflowRule: (id: number) =>
+    invoke<void>('delete_dynamic_workflow_rule', { id }),
   saveTrack: (input: TrackInput) => invoke<number>('save_track', { input }),
   deleteTrack: (id: number) => invoke<void>('delete_track', { id }),
   saveRepository: (input: RepositoryInput) => invoke<number>('save_repository', { input }),
