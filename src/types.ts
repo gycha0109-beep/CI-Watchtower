@@ -225,6 +225,44 @@ export interface ResponsibilityMapDrift {
   sourcePath: string;
   reason: string;
   recommendedAction: string;
+  reviewKey: string;
+  fingerprint: string;
+  reviewStatus: 'open' | 'deferred' | 'blocked' | string;
+}
+
+export interface ResponsibilityResolutionPreviewInput {
+  reviewKey: string;
+}
+
+export interface ResolveResponsibilityDriftInput {
+  reviewKey: string;
+  fingerprint: string;
+  action: string;
+}
+
+export interface DeferResponsibilityDriftInput {
+  reviewKey: string;
+  fingerprint: string;
+}
+
+export interface ResponsibilityResolutionPreview {
+  reviewKey: string;
+  fingerprint: string;
+  workflowName: string;
+  repository: string;
+  repositoryContract: string;
+  watchtowerContract: string | null;
+  action: string;
+  changes: string[];
+  invariants: string[];
+  executable: boolean;
+  blockedReason: string | null;
+}
+
+export interface ResponsibilityResolutionResult {
+  status: 'resolved' | 'deferred' | 'blocked' | 'stale_rejected' | 'still_open' | string;
+  auditId: number;
+  currentDrift: ResponsibilityMapDrift | null;
 }
 
 export interface ResponsibilityMapSourceStatus {
