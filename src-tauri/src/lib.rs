@@ -5120,9 +5120,9 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let face_research_track_id: i64 = conn
+        let track_id: i64 = conn
             .query_row(
-                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='face-research'",
+                "SELECT id FROM watch_tracks WHERE project_id=? AND active=1 ORDER BY id LIMIT 1",
                 params![project_id],
                 |row| row.get(0),
             )
@@ -5176,7 +5176,7 @@ mod tests {
              ) VALUES(?,?,?,?,?,0,?)",
             params![
                 9_220_001_i64,
-                face_research_track_id,
+                track_id,
                 98_i64,
                 "pr_marker",
                 "PR #1407",
