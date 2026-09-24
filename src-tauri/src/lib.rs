@@ -1723,6 +1723,24 @@ fn latest_workflow_path(
     Ok(value.flatten().unwrap_or_default())
 }
 
+fn latest_workflow_run_title(
+    conn: &Connection,
+    repository_id: i64,
+    workflow_path: &str,
+    workflow_name: &str,
+) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT display_title FROM workflow_runs
+             WHERE repository_id=?
+               AND (workflow_path=? OR workflow_name=?)
+             ORDER BY updated_at DESC LIMIT 1",
+            params![repository_id, workflow_path, workflow_name],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapDrift>> {
     let project_rules = list_project_workflow_rules(conn)?;
     let dynamic_rules = list_dynamic_workflow_rules(conn)?;
@@ -1777,7 +1795,15 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
             *repository_id,
             &contract.workflow_name,
         );
-        let actual_track_key = extract_marker(&contract.workflow_name);
+        let latest_run_title = latest_workflow_run_title(
+            conn,
+            *repository_id,
+            &contract.workflow_path,
+            &contract.workflow_name,
+        )?;
+        let actual_track_key = latest_run_title
+            .as_deref()
+            .and_then(extract_marker);
         let actual_binding = if project_declared && dynamic_declared {
             Some("project-wide + dynamic".to_string())
         } else if project_declared {
@@ -1827,7 +1853,11 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                             .unwrap_or(false)
                         })
                         .unwrap_or(false);
-                    if !track_exists || actual_track_key.as_deref() != expected {
+                    if !track_exists {
+                        Some("track_binding_mismatch")
+                    } else if latest_run_title.is_some()
+                        && actual_track_key.as_deref() != expected
+                    {
                         Some("track_binding_mismatch")
                     } else {
                         None
@@ -6667,19 +6697,42 @@ mod tests {
         )
         .unwrap();
 
-        for (run_id, workflow_id, workflow_name) in [
-            (9_800_001_i64, 9801_i64, "Stale Dynamic"),
-            (9_800_002_i64, 9802_i64, "Stale Project"),
+        for (run_id, workflow_id, workflow_name, workflow_path, display_title) in [
+            (
+                9_800_001_i64,
+                9801_i64,
+                "Stale Dynamic",
+                ".github/workflows/stale-dynamic.yml",
+                "Stale Dynamic",
+            ),
+            (
+                9_800_002_i64,
+                9802_i64,
+                "Stale Project",
+                ".github/workflows/stale-project.yml",
+                "Stale Project",
+            ),
+            (
+                9_800_003_i64,
+                9803_i64,
+                "Static Clean",
+                ".github/workflows/static-clean.yml",
+                "[WT:mobile] Static Clean",
+            ),
+            (
+                9_800_004_i64,
+                9804_i64,
+                "Wrong Static",
+                ".github/workflows/wrong-static.yml",
+                "[WT:trust] Wrong Static",
+            ),
         ] {
             let run = GithubRun {
                 id: run_id,
                 workflow_id,
                 name: workflow_name.into(),
-                path: Some(format!(
-                    ".github/workflows/{}.yml",
-                    workflow_name.to_lowercase().replace(' ', "-")
-                )),
-                display_title: Some(workflow_name.into()),
+                path: Some(workflow_path.into()),
+                display_title: Some(display_title.into()),
                 event: "push".into(),
                 head_branch: Some("main".into()),
                 head_sha: format!("sha-{run_id}"),
@@ -6730,7 +6783,7 @@ mod tests {
             },
             RepositoryResponsibilityContract {
                 workflow_path: ".github/workflows/static-clean.yml".into(),
-                workflow_name: "[WT:mobile] Static Clean".into(),
+                workflow_name: "Static Clean".into(),
                 binding_kind: "static".into(),
                 track_key: Some("mobile".into()),
                 source_binding: "static:mobile".into(),
@@ -6754,7 +6807,7 @@ mod tests {
             },
             RepositoryResponsibilityContract {
                 workflow_path: ".github/workflows/wrong-static.yml".into(),
-                workflow_name: "[WT:trust] Wrong Static".into(),
+                workflow_name: "Wrong Static".into(),
                 binding_kind: "static".into(),
                 track_key: Some("mobile".into()),
                 source_binding: "static:mobile".into(),
@@ -6787,7 +6840,7 @@ mod tests {
 
         assert!(!drifts.iter().any(|item| item.workflow_name == "BEJEWELY Current Main Health"));
         assert!(!drifts.iter().any(|item| item.workflow_name == "BEJEWELY Security Boundary"));
-        assert!(!drifts.iter().any(|item| item.workflow_name == "[WT:mobile] Static Clean"));
+        assert!(!drifts.iter().any(|item| item.workflow_name == "Static Clean"));
 
         let missing_names: HashSet<&str> = drifts
             .iter()
@@ -6802,7 +6855,7 @@ mod tests {
                 && item.drift_type == "responsibility_kind_mismatch"
         }));
         assert!(drifts.iter().any(|item| {
-            item.workflow_name == "[WT:trust] Wrong Static"
+            item.workflow_name == "Wrong Static"
                 && item.drift_type == "track_binding_mismatch"
                 && item.expected_track_key.as_deref() == Some("mobile")
                 && item.actual_track_key.as_deref() == Some("trust")
