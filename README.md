@@ -137,8 +137,8 @@ run-name: "[WT:${{ inputs.watchtower_track }}] ${{ github.workflow }}"
 - Dynamic 규칙은 Track을 강제하지 않습니다. 각 Run은 계속 명시 신호로 fail-closed 귀속됩니다.
 - Saju `MESH6J Manual Browser Capture Surface CI`는 repository-scoped Dynamic Workflow입니다.
 - MyeongHa `Production Records Current-Subject Smoke`도 repository-scoped Dynamic Workflow입니다. 운영용 Production smoke로 시작했지만 Records/frontend-integration 변경에도 같은 producer가 실행되므로 특정 Track에 고정하지 않습니다. 비표준 `Watchtower-Track: UI` 같은 신호는 alias로 숨기지 않고 계속 fail-closed drift로 남깁니다.
-- Dynamic Workflow 규칙은 앱의 **Dynamic Workflow 규칙** 관리 영역에서 프로젝트/저장소 범위로 추가·삭제할 수 있습니다. 내장된 MESH6J 계약은 `protected` 기본 규칙으로 표시되어 실수로 삭제되지 않습니다.
-- Visualy는 K_beauty의 `docs/ci/workflow-responsibility-map.json` producer class를 기준으로 동기화합니다. `current-main-health`와 `pie-prospective`만 Project-wide이며, Admin / Product Offer / Product Data Pipeline / Security Boundary / Recommendation Admission / Supply Chain Security / AI Provider Runtime은 canonical Track을 새로 만들지 않고 repository-scoped Dynamic Workflow로 유지합니다.
+- Dynamic Workflow 규칙은 앱의 **Dynamic Workflow 규칙** 관리 영역에서 프로젝트/저장소 범위로 추가·삭제할 수 있습니다. repository responsibility map에서 동기화한 기본 Dynamic 계약은 `protected` 규칙으로 표시되어 실수로 삭제되지 않습니다.
+- Visualy는 K_beauty의 `docs/ci/workflow-responsibility-map.json` producer class를 기준으로 동기화합니다. `current-main-health`와 `pie-prospective`만 Project-wide이며, Admin / Product Offer / Product Data Pipeline / Security Boundary / Recommendation Admission / Supply Chain Security / AI Provider Runtime / Database Integration은 canonical Track을 새로 만들지 않고 repository-scoped Dynamic Workflow로 유지합니다.
 
 ## Producer Contract Health
 
