@@ -116,6 +116,13 @@ struct ResponsibilityMapDrift {
     review_key: String,
     fingerprint: String,
     review_status: String,
+    review_priority: String,
+    review_age_bucket: String,
+    review_age_hours: i64,
+    review_event_count: i64,
+    failed_attempt_count: i64,
+    last_reviewed_at: Option<String>,
+    first_seen_at: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -728,6 +735,21 @@ fn init_db(path: &Path) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_responsibility_resolution_audit_review
           ON responsibility_resolution_audit(review_key, id DESC);
+
+        CREATE TABLE IF NOT EXISTS responsibility_review_state (
+          review_key TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          repository_id INTEGER NOT NULL REFERENCES monitored_repositories(id) ON DELETE CASCADE,
+          workflow_name TEXT NOT NULL,
+          drift_type TEXT NOT NULL,
+          first_seen_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          PRIMARY KEY(review_key, fingerprint)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_responsibility_review_state_scope
+          ON responsibility_review_state(project_id, repository_id, last_seen_at DESC);
 
         CREATE TABLE IF NOT EXISTS track_aliases (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
