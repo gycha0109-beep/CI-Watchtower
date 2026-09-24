@@ -137,8 +137,8 @@ jobs:
                           sla_remaining_hours: Some(72),
                           escalation_level: "none".into(),
                           escalation_reason: None,"""
-          if lib.count(old_init) != 3:
-              raise SystemExit(f"drift initializers: expected 3, got {lib.count(old_init)}")
+          if lib.count(old_init) != 1:
+              raise SystemExit(f"production drift initializer: expected 1, got {lib.count(old_init)}")
           lib = lib.replace(old_init, new_init)
           lib = replace_once(lib, """    drifts.sort_by(|a, b| {
               responsibility_review_priority_rank(&a.review_priority)
@@ -156,6 +156,9 @@ jobs:
 
           tests_path = Path("src-tauri/src/tests.rs")
           tests = tests_path.read_text()
+          if tests.count(old_init) != 2:
+              raise SystemExit(f"test drift initializers: expected 2, got {tests.count(old_init)}")
+          tests = tests.replace(old_init, new_init)
           if "responsibility_review_sla_escalates_p0_and_p1_without_escalating_p2" not in tests:
               tests += """
 
