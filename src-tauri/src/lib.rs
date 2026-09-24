@@ -5040,6 +5040,57 @@ mod tests {
     }
 
     #[test]
+    fn myeongha_records_production_smoke_is_dynamic_without_forcing_track_assignment() {
+        let path = legacy_v02_db_path("myeongha-records-dynamic");
+        seed_legacy_v02_database(&path);
+        init_db(&path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let repository_id: i64 = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/MyeongHa'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let project_id: i64 = conn
+            .query_row(
+                "SELECT project_id FROM monitored_repositories WHERE id=?",
+                params![repository_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let dynamic_rule: (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*),MAX(protected) FROM dynamic_workflow_rules
+                 WHERE project_id=? AND repository_id=?
+                   AND workflow_name='Production Records Current-Subject Smoke'
+                   AND active=1",
+                params![project_id, repository_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(dynamic_rule, (1, 1));
+
+        let project_rule_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM project_workflow_rules
+                 WHERE project_id=? AND workflow_name='Production Records Current-Subject Smoke'
+                   AND active=1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(project_rule_count, 0);
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
     fn visualy_repository_responsibility_map_uses_dynamic_rules_and_retires_stale_project_wide_security() {
         let path = legacy_v02_db_path("visualy-responsibility-map");
         init_db(&path).unwrap();
