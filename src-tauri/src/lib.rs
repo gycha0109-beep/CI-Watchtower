@@ -165,6 +165,29 @@ struct ResponsibilityResolutionResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ResponsibilityResolutionAuditEntry {
+    id: i64,
+    project_id: i64,
+    project_name: String,
+    repository_id: i64,
+    repository: String,
+    workflow_name: String,
+    review_key: String,
+    drift_type: String,
+    action: String,
+    result: String,
+    actor: String,
+    created_at: String,
+    requested_fingerprint: String,
+    current_fingerprint: String,
+    repository_contract: String,
+    before_watchtower_contract: Option<String>,
+    after_watchtower_contract: Option<String>,
+    stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ResponsibilityMapSourceStatus {
     project_id: i64,
     repository_id: i64,
@@ -694,6 +717,10 @@ fn init_db(path: &Path) -> Result<()> {
           before_watchtower_binding TEXT,
           after_repository_binding TEXT,
           after_watchtower_binding TEXT,
+          requested_fingerprint TEXT,
+          current_fingerprint TEXT,
+          expected_repository_binding TEXT,
+          resulting_watchtower_binding TEXT,
           result TEXT NOT NULL CHECK(result IN ('resolved','deferred','blocked','stale_rejected','still_open','failed')),
           actor TEXT NOT NULL,
           created_at TEXT NOT NULL
@@ -779,6 +806,10 @@ fn init_db(path: &Path) -> Result<()> {
     ensure_column(&conn, "monitored_repositories", "project_id", "INTEGER")?;
     ensure_column(&conn, "workflow_runs", "last_resolution_attempt_at", "TEXT")?;
     ensure_column(&conn, "dynamic_workflow_rules", "protected", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(&conn, "responsibility_resolution_audit", "requested_fingerprint", "TEXT")?;
+    ensure_column(&conn, "responsibility_resolution_audit", "current_fingerprint", "TEXT")?;
+    ensure_column(&conn, "responsibility_resolution_audit", "expected_repository_binding", "TEXT")?;
+    ensure_column(&conn, "responsibility_resolution_audit", "resulting_watchtower_binding", "TEXT")?;
     conn.execute(
         "INSERT OR IGNORE INTO app_settings(id, queue_congestion_threshold, active_poll_seconds, idle_poll_seconds, auto_archive_completed, queue_congested) VALUES(1,?,?,?,?,0)",
         params![DEFAULT_QUEUE_THRESHOLD, DEFAULT_ACTIVE_POLL_SECONDS, DEFAULT_IDLE_POLL_SECONDS, 0],
