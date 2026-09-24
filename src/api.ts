@@ -24,6 +24,8 @@ export const api = {
     invoke<ResponsibilityResolutionResult>('resolve_responsibility_drift', { input }),
   deferResponsibilityDrift: (input: DeferResponsibilityDriftInput) =>
     invoke<ResponsibilityResolutionResult>('defer_responsibility_drift', { input }),
+  reopenResponsibilityDrift: (input: DeferResponsibilityDriftInput) =>
+    invoke<ResponsibilityResolutionResult>('reopen_responsibility_drift', { input }),
   getResponsibilityResolutionHistory: () =>
     invoke<ResponsibilityResolutionAuditEntry[]>('get_responsibility_resolution_history'),
   getRunAttribution: (runId: number) =>
