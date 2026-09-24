@@ -70,6 +70,21 @@ function responsibilityDriftLabel(type: string) {
   }
 }
 
+function responsibilityActionLabel(action: string) {
+  switch (action) {
+    case 'review_add_project_wide_rule': return 'Project-wide 선언 검토';
+    case 'review_add_dynamic_rule': return 'Dynamic 선언 검토';
+    case 'review_reclassify_project_wide': return 'Project-wide 재분류 검토';
+    case 'review_reclassify_dynamic': return 'Dynamic 재분류 검토';
+    case 'review_remove_conflicting_responsibility_rule': return '충돌 규칙 제거 검토';
+    case 'review_track_registry_or_map': return 'Track / Map 계약 검토';
+    case 'review_producer_run_name': return 'Producer run-name 수정 검토';
+    case 'review_repository_map_binding': return 'Repository map 계약 검토';
+    case 'review_remove_or_confirm_stale_rule': return 'Stale 규칙 유지 / 제거 검토';
+    default: return action;
+  }
+}
+
 function repositoryState(repo: MonitoredRepository) {
   if (!repo.enabled) return 'OFF';
   if (repo.lastError) return 'ERROR';
@@ -673,25 +688,45 @@ function App() {
           ) : responsibilityMapDriftsInScope.length === 0 ? (
             <div className="producer-drift-empty">현재 동기화된 repository responsibility map과 WatchTower 책임 선언이 일치합니다.</div>
           ) : (
-            <div className="producer-drift-list">
+            <div className="responsibility-review-inbox">
               {responsibilityMapDriftsInScope.map(item => (
-                <div
-                  className="producer-drift-row responsibility-map-row"
+                <article
+                  className="responsibility-review-card"
                   key={item.repositoryId + ':' + item.workflowPath + ':' + item.driftType}
                 >
-                  <span className="producer-bucket">{responsibilityDriftLabel(item.driftType)}</span>
-                  <span className="producer-drift-main">
-                    <b>{item.workflowName}</b>
-                    <small>{item.workflowPath}</small>
-                  </span>
-                  <span className="producer-drift-repo">{item.repository}</span>
-                  <span className="producer-drift-source">{item.repositoryBinding} → {item.watchtowerBinding ?? 'missing'}</span>
-                  <span className="mono producer-drift-branch">
-                    {item.expectedTrackKey || item.actualTrackKey
-                      ? (item.expectedTrackKey ?? '—') + ' / ' + (item.actualTrackKey ?? '—')
-                      : '—'}
-                  </span>
-                </div>
+                  <div className="responsibility-review-card-head">
+                    <span className="producer-bucket">{responsibilityDriftLabel(item.driftType)}</span>
+                    <span className="producer-drift-main">
+                      <b>{item.workflowName}</b>
+                      <small>{item.repository}</small>
+                    </span>
+                    <span className="responsibility-review-action">{responsibilityActionLabel(item.recommendedAction)}</span>
+                  </div>
+                  <div className="responsibility-review-contract-grid">
+                    <div>
+                      <span>Repository contract</span>
+                      <b>{item.repositoryBinding}</b>
+                      <small>{item.sourcePath} · {item.workflowPath}</small>
+                    </div>
+                    <div>
+                      <span>WatchTower declaration</span>
+                      <b>{item.watchtowerBinding ?? '미선언'}</b>
+                      <small>
+                        {item.expectedTrackKey || item.actualTrackKey
+                          ? 'expected ' + (item.expectedTrackKey ?? '—') + ' · observed ' + (item.actualTrackKey ?? '—')
+                          : 'Track binding 없음'}
+                      </small>
+                    </div>
+                  </div>
+                  <div className="responsibility-review-reason">
+                    <span>충돌 이유</span>
+                    <p>{item.reason}</p>
+                  </div>
+                  <div className="responsibility-review-foot">
+                    <span>{responsibilityActionLabel(item.recommendedAction)}</span>
+                    <small>검토 전용 · 자동 변경 없음</small>
+                  </div>
+                </article>
               ))}
             </div>
           )}
