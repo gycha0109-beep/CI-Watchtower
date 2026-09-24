@@ -4543,6 +4543,17 @@ fn resolve_responsibility_drift(
 }
 
 #[tauri::command]
+fn get_responsibility_resolution_history(
+    state: State<'_, AppState>,
+) -> std::result::Result<Vec<ResponsibilityResolutionAuditEntry>, String> {
+    let result = (|| -> Result<Vec<ResponsibilityResolutionAuditEntry>> {
+        let conn = db(&state)?;
+        responsibility_resolution_history(&conn, 200)
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_run_attribution(
     run_id: i64,
     state: State<'_, AppState>,
@@ -5237,6 +5248,7 @@ pub fn run() {
             get_responsibility_resolution_preview,
             resolve_responsibility_drift,
             defer_responsibility_drift,
+            get_responsibility_resolution_history,
             get_run_attribution,
             poll_now,
             save_project,
