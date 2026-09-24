@@ -907,6 +907,7 @@ fn seed_bejewely_project_scope(conn: &Connection) -> Result<()> {
         "Recommendation Admission - G3A PF Authority Read",
         "BEJEWELY Supply Chain Security",
         "BEJEWELY AI Provider Runtime",
+        "BEJEWELY Database Integration Authority",
     ] {
         tx.execute(
             "INSERT OR IGNORE INTO dynamic_workflow_rules(
@@ -1348,7 +1349,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.15")
+        .user_agent("ci-watchtower/0.3.16")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -5147,7 +5148,7 @@ mod tests {
                 .unwrap();
             rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
-        assert_eq!(dynamic_names.len(), 11);
+        assert_eq!(dynamic_names.len(), 12);
         assert!(dynamic_names.iter().all(|(_, protected)| *protected == 1));
         for expected in [
             "Admin - Access Foundation",
@@ -5161,6 +5162,7 @@ mod tests {
             "Recommendation Admission - G3A PF Authority Read",
             "BEJEWELY Supply Chain Security",
             "BEJEWELY AI Provider Runtime",
+            "BEJEWELY Database Integration Authority",
         ] {
             assert!(dynamic_names.iter().any(|(name, _)| name == expected));
         }
@@ -5236,7 +5238,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(mesh_count, 11);
+        assert_eq!(mesh_count, 12);
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
