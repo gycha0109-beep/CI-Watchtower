@@ -1,0 +1,380 @@
+name: Implement Responsibility Review SLA
+
+on:
+  push:
+    branches:
+      - feat/responsibility-review-sla-escalation
+    paths:
+      - .github/workflows/implement-responsibility-review-sla.yml
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/responsibility-review-sla-escalation
+          fetch-depth: 0
+      - name: Apply SLA and escalation implementation
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected 1 anchor, got {count}")
+              return text.replace(old, new, 1)
+
+          lib_path = Path("src-tauri/src/lib.rs")
+          lib = lib_path.read_text()
+          lib = replace_once(lib, """    last_reviewed_at: Option<String>,
+              first_seen_at: String,
+          }""", """    last_reviewed_at: Option<String>,
+              first_seen_at: String,
+              sla_status: String,
+              sla_target_hours: Option<i64>,
+              sla_remaining_hours: Option<i64>,
+              escalation_level: String,
+              escalation_reason: Option<String>,
+          }""", "drift struct")
+          lib = replace_once(lib, """fn responsibility_review_age_bucket(age_hours: i64) -> String {
+              if age_hours >= 72 {
+                  "overdue".into()
+              } else if age_hours >= 24 {
+                  "aging".into()
+              } else {
+                  "fresh".into()
+              }
+          }
+
+          fn populate_responsibility_review_operations(""", """fn responsibility_review_age_bucket(age_hours: i64) -> String {
+              if age_hours >= 72 {
+                  "overdue".into()
+              } else if age_hours >= 24 {
+                  "aging".into()
+              } else {
+                  "fresh".into()
+              }
+          }
+
+          fn responsibility_review_sla(
+              priority: &str,
+              age_hours: i64,
+          ) -> (String, Option<i64>, Option<i64>, String, Option<String>) {
+              let target_hours = match priority {
+                  "p0" => Some(24),
+                  "p1" => Some(96),
+                  "p2" => Some(72),
+                  "p3" | "blocked" => None,
+                  _ => None,
+              };
+              let Some(target_hours) = target_hours else {
+                  return ("exempt".into(), None, None, "none".into(), None);
+              };
+              let remaining = target_hours - age_hours;
+              if remaining <= 0 {
+                  let reason = match priority {
+                      "p0" => format!("P0 attention drift exceeded the 24h review SLA by {}h.", -remaining),
+                      "p1" => format!("P1 aging drift exceeded the 96h review SLA by {}h.", -remaining),
+                      _ => format!("Review SLA exceeded by {}h.", -remaining),
+                  };
+                  return (
+                      "breached".into(),
+                      Some(target_hours),
+                      Some(remaining),
+                      if matches!(priority, "p0" | "p1") { "critical".into() } else { "none".into() },
+                      Some(reason),
+                  );
+              }
+              let due_soon = match priority {
+                  "p0" => remaining <= 12,
+                  "p1" | "p2" => remaining <= 24,
+                  _ => false,
+              };
+              let status = if due_soon { "due_soon" } else { "within_sla" };
+              let escalation_level = if matches!(priority, "p0" | "p1") { "warning" } else { "none" };
+              let reason = match priority {
+                  "p0" => Some(format!("P0 attention drift has {}h remaining before the 24h review SLA.", remaining)),
+                  "p1" => Some(format!("P1 aging drift has {}h remaining before the 96h review SLA.", remaining)),
+                  _ => None,
+              };
+              (status.into(), Some(target_hours), Some(remaining), escalation_level.into(), reason)
+          }
+
+          fn responsibility_escalation_rank(level: &str) -> i64 {
+              match level {
+                  "critical" => 0,
+                  "warning" => 1,
+                  _ => 2,
+              }
+          }
+
+          fn populate_responsibility_review_operations(""", "sla helpers")
+          lib = replace_once(lib, """    drift.last_reviewed_at = last_reviewed_at;
+              drift.review_priority = responsibility_review_priority(&drift.review_status, age_hours);
+              Ok(())
+          }""", """    drift.last_reviewed_at = last_reviewed_at;
+              drift.review_priority = responsibility_review_priority(&drift.review_status, age_hours);
+              let (sla_status, sla_target_hours, sla_remaining_hours, escalation_level, escalation_reason) =
+                  responsibility_review_sla(&drift.review_priority, age_hours);
+              drift.sla_status = sla_status;
+              drift.sla_target_hours = sla_target_hours;
+              drift.sla_remaining_hours = sla_remaining_hours;
+              drift.escalation_level = escalation_level;
+              drift.escalation_reason = escalation_reason;
+              Ok(())
+          }""", "populate sla")
+          old_init = """                last_reviewed_at: None,
+                          first_seen_at: String::new(),"""
+          new_init = """                last_reviewed_at: None,
+                          first_seen_at: String::new(),
+                          sla_status: "within_sla".into(),
+                          sla_target_hours: Some(72),
+                          sla_remaining_hours: Some(72),
+                          escalation_level: "none".into(),
+                          escalation_reason: None,"""
+          if lib.count(old_init) != 3:
+              raise SystemExit(f"drift initializers: expected 3, got {lib.count(old_init)}")
+          lib = lib.replace(old_init, new_init)
+          lib = replace_once(lib, """    drifts.sort_by(|a, b| {
+              responsibility_review_priority_rank(&a.review_priority)
+                  .cmp(&responsibility_review_priority_rank(&b.review_priority))
+                  .then_with(|| b.review_age_hours.cmp(&a.review_age_hours))""", """    drifts.sort_by(|a, b| {
+              responsibility_escalation_rank(&a.escalation_level)
+                  .cmp(&responsibility_escalation_rank(&b.escalation_level))
+                  .then_with(|| {
+                      responsibility_review_priority_rank(&a.review_priority)
+                          .cmp(&responsibility_review_priority_rank(&b.review_priority))
+                  })
+                  .then_with(|| b.review_age_hours.cmp(&a.review_age_hours))""", "drift sort")
+          lib = lib.replace('ci-watchtower/0.3.25', 'ci-watchtower/0.3.26')
+          lib_path.write_text(lib)
+
+          tests_path = Path("src-tauri/src/tests.rs")
+          tests = tests_path.read_text()
+          if "responsibility_review_sla_escalates_p0_and_p1_without_escalating_p2" not in tests:
+              tests += """
+
+          #[test]
+          fn responsibility_review_sla_escalates_p0_and_p1_without_escalating_p2() {
+              let p0_fresh = responsibility_review_sla("p0", 0);
+              assert_eq!(p0_fresh.0, "within_sla");
+              assert_eq!(p0_fresh.1, Some(24));
+              assert_eq!(p0_fresh.2, Some(24));
+              assert_eq!(p0_fresh.3, "warning");
+              let p0_due = responsibility_review_sla("p0", 12);
+              assert_eq!(p0_due.0, "due_soon");
+              assert_eq!(p0_due.2, Some(12));
+              let p0_breached = responsibility_review_sla("p0", 24);
+              assert_eq!(p0_breached.0, "breached");
+              assert_eq!(p0_breached.3, "critical");
+              let p1_due = responsibility_review_sla("p1", 72);
+              assert_eq!(p1_due.0, "due_soon");
+              assert_eq!(p1_due.1, Some(96));
+              assert_eq!(p1_due.2, Some(24));
+              assert_eq!(p1_due.3, "warning");
+              let p1_breached = responsibility_review_sla("p1", 100);
+              assert_eq!(p1_breached.0, "breached");
+              assert_eq!(p1_breached.2, Some(-4));
+              assert_eq!(p1_breached.3, "critical");
+              let p2_due = responsibility_review_sla("p2", 48);
+              assert_eq!(p2_due.0, "due_soon");
+              assert_eq!(p2_due.3, "none");
+              let deferred = responsibility_review_sla("p3", 500);
+              assert_eq!(deferred.0, "exempt");
+              assert_eq!(deferred.1, None);
+              assert!(responsibility_escalation_rank("critical") < responsibility_escalation_rank("warning"));
+              assert!(responsibility_escalation_rank("warning") < responsibility_escalation_rank("none"));
+          }
+          """
+          tests_path.write_text(tests)
+
+          types_path = Path("src/types.ts")
+          types = types_path.read_text()
+          types = replace_once(types, """  lastReviewedAt: string | null;
+            firstSeenAt: string;
+          }""", """  lastReviewedAt: string | null;
+            firstSeenAt: string;
+            slaStatus: 'within_sla' | 'due_soon' | 'breached' | 'exempt' | string;
+            slaTargetHours: number | null;
+            slaRemainingHours: number | null;
+            escalationLevel: 'critical' | 'warning' | 'none' | string;
+            escalationReason: string | null;
+          }""", "frontend type")
+          types_path.write_text(types)
+
+          app_path = Path("src/App.tsx")
+          app = app_path.read_text()
+          app = replace_once(app, """function responsibilityPriorityLabel(priority: string) {
+            return priority === 'blocked' ? 'BLOCKED' : priority.toUpperCase();
+          }
+
+          function responsibilityAgeLabel(hours: number) {""", """function responsibilityPriorityLabel(priority: string) {
+            return priority === 'blocked' ? 'BLOCKED' : priority.toUpperCase();
+          }
+
+          function responsibilityEscalationRank(level: string) {
+            switch (level) {
+              case 'critical': return 0;
+              case 'warning': return 1;
+              default: return 2;
+            }
+          }
+
+          function responsibilitySlaLabel(status: string, remaining: number | null) {
+            if (status === 'exempt' || remaining == null) return 'SLA EXEMPT';
+            if (status === 'breached') return 'SLA +' + Math.abs(remaining) + 'h';
+            return 'SLA ' + remaining + 'h';
+          }
+
+          function responsibilityAgeLabel(hours: number) {""", "frontend helpers")
+          app = replace_once(app, """      .sort((a, b) =>
+                  responsibilityPriorityRank(a.reviewPriority) - responsibilityPriorityRank(b.reviewPriority) ||
+                  b.reviewAgeHours - a.reviewAgeHours ||""", """      .sort((a, b) =>
+                  responsibilityEscalationRank(a.escalationLevel) - responsibilityEscalationRank(b.escalationLevel) ||
+                  responsibilityPriorityRank(a.reviewPriority) - responsibilityPriorityRank(b.reviewPriority) ||
+                  b.reviewAgeHours - a.reviewAgeHours ||""", "frontend sort")
+          app = replace_once(app, """  const responsibilityReviewPriorityCounts = useMemo(() => ({
+              p0: responsibilityMapDriftsInScope.filter(item => item.reviewPriority === 'p0').length,
+              p1: responsibilityMapDriftsInScope.filter(item => item.reviewPriority === 'p1').length,
+              overdue: responsibilityMapDriftsInScope.filter(item => item.reviewAgeBucket === 'overdue').length,
+            }), [responsibilityMapDriftsInScope]);""", """  const responsibilityReviewPriorityCounts = useMemo(() => ({
+              p0: responsibilityMapDriftsInScope.filter(item => item.reviewPriority === 'p0').length,
+              p1: responsibilityMapDriftsInScope.filter(item => item.reviewPriority === 'p1').length,
+              overdue: responsibilityMapDriftsInScope.filter(item => item.reviewAgeBucket === 'overdue').length,
+            }), [responsibilityMapDriftsInScope]);
+            const responsibilityEscalations = useMemo(
+              () => responsibilityMapDriftsInScope.filter(item => item.escalationLevel !== 'none'),
+              [responsibilityMapDriftsInScope],
+            );
+            const responsibilityEscalationCounts = useMemo(() => ({
+              critical: responsibilityEscalations.filter(item => item.escalationLevel === 'critical').length,
+              warning: responsibilityEscalations.filter(item => item.escalationLevel === 'warning').length,
+              breached: responsibilityEscalations.filter(item => item.slaStatus === 'breached').length,
+            }), [responsibilityEscalations]);""", "escalation counts")
+          app = replace_once(app, """                {' · '}overdue {responsibilityReviewPriorityCounts.overdue}
+                          {' · '}source synced {responsibilityMapSynced.length}""", """                {' · '}overdue {responsibilityReviewPriorityCounts.overdue}
+                          {' · '}critical {responsibilityEscalationCounts.critical}
+                          {' · '}warning {responsibilityEscalationCounts.warning}
+                          {' · '}SLA breach {responsibilityEscalationCounts.breached}
+                          {' · '}source synced {responsibilityMapSynced.length}""", "header counts")
+          panel = """          {responsibilityEscalations.length > 0 && (
+                      <div className="responsibility-escalation-queue">
+                        <div className="responsibility-escalation-head">
+                          <div>
+                            <b>SLA Escalation</b>
+                            <span>P0/P1 review SLA가 임박했거나 초과된 항목만 별도로 표시합니다.</span>
+                          </div>
+                          <small>critical {responsibilityEscalationCounts.critical} · warning {responsibilityEscalationCounts.warning}</small>
+                        </div>
+                        <div className="responsibility-escalation-list">
+                          {responsibilityEscalations.map(item => (
+                            <div className={'responsibility-escalation-row ' + item.escalationLevel} key={'escalation:' + item.reviewKey}>
+                              <span className={'responsibility-escalation-level ' + item.escalationLevel}>{item.escalationLevel.toUpperCase()}</span>
+                              <span className="responsibility-escalation-main">
+                                <b>{item.workflowName}</b>
+                                <small>{item.repository} · {responsibilityPriorityLabel(item.reviewPriority)}</small>
+                              </span>
+                              <span className={'responsibility-sla-badge ' + item.slaStatus}>
+                                {responsibilitySlaLabel(item.slaStatus, item.slaRemainingHours)}
+                              </span>
+                              <small>{item.escalationReason ?? 'Review SLA escalation'}</small>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+          """
+          anchor = """          {responsibilityMapSourceWarnings.length > 0 ? ("""
+          if anchor not in app:
+              raise SystemExit("escalation panel anchor missing")
+          app = app.replace(anchor, panel + anchor, 1)
+          app = replace_once(app, """                      <span className={`responsibility-review-state ${item.reviewStatus}`}>{item.reviewStatus.toUpperCase()}</span>
+                                <span className="responsibility-review-action">{responsibilityActionLabel(item.recommendedAction)}</span>""", """                      <span className={`responsibility-review-state ${item.reviewStatus}`}>{item.reviewStatus.toUpperCase()}</span>
+                                {item.escalationLevel !== 'none' && (
+                                  <span className={`responsibility-escalation-level ${item.escalationLevel}`}>{item.escalationLevel.toUpperCase()}</span>
+                                )}
+                                <span className={`responsibility-sla-badge ${item.slaStatus}`}>
+                                  {responsibilitySlaLabel(item.slaStatus, item.slaRemainingHours)}
+                                </span>
+                                <span className="responsibility-review-action">{responsibilityActionLabel(item.recommendedAction)}</span>""", "card badges")
+          app = replace_once(app, """                    <span>Last reviewed <b>{item.lastReviewedAt ? formatAuditTime(item.lastReviewedAt) : '없음'}</b></span>
+                              </div>""", """                    <span>Last reviewed <b>{item.lastReviewedAt ? formatAuditTime(item.lastReviewedAt) : '없음'}</b></span>
+                                <span>SLA target <b>{item.slaTargetHours == null ? 'exempt' : item.slaTargetHours + 'h'}</b></span>
+                                <span>SLA state <b>{item.slaStatus.toUpperCase()}</b></span>
+                              </div>""", "card sla ops")
+          app_path.write_text(app)
+
+          css_path = Path("src/styles.css")
+          css = css_path.read_text()
+          css = replace_once(css, """.responsibility-review-state.blocked { border-color: #5b2b38; color: #ff8796; }
+          .responsibility-review-buttons""", """.responsibility-review-state.blocked { border-color: #5b2b38; color: #ff8796; }
+          .responsibility-sla-badge, .responsibility-escalation-level { width: fit-content; border: 1px solid #33415d; border-radius: 999px; padding: 3px 6px; font-size: 8px; font-weight: 900; letter-spacing: .06em; }
+          .responsibility-sla-badge.within_sla { border-color: #31524a; color: #78d9aa; }
+          .responsibility-sla-badge.due_soon { border-color: #624b25; color: #f2c66b; }
+          .responsibility-sla-badge.breached { border-color: #6a2d3c; color: #ff8796; }
+          .responsibility-sla-badge.exempt { border-color: #3f4657; color: #8d99ae; }
+          .responsibility-escalation-level.warning { border-color: #624b25; color: #f2c66b; }
+          .responsibility-escalation-level.critical { border-color: #6a2d3c; color: #ff8796; }
+          .responsibility-escalation-queue { display: grid; gap: 8px; border: 1px solid #4a3340; border-radius: 10px; background: rgba(255,83,105,.035); padding: 10px; margin-bottom: 10px; }
+          .responsibility-escalation-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+          .responsibility-escalation-head > div { display: grid; gap: 3px; }
+          .responsibility-escalation-head b { color: #f1d7dd; font-size: 11px; }
+          .responsibility-escalation-head span, .responsibility-escalation-head small { color: #8d7680; font-size: 9px; }
+          .responsibility-escalation-list { display: grid; gap: 5px; }
+          .responsibility-escalation-row { display: grid; grid-template-columns: 72px minmax(190px,1fr) 88px minmax(220px,1.2fr); gap: 9px; align-items: center; border: 1px solid #302534; border-radius: 8px; background: #090e1b; padding: 8px 9px; }
+          .responsibility-escalation-row.critical { border-left: 2px solid #ff8796; }
+          .responsibility-escalation-row.warning { border-left: 2px solid #f2c66b; }
+          .responsibility-escalation-main { min-width: 0; display: grid; gap: 2px; }
+          .responsibility-escalation-main b { color: #dce5f6; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+          .responsibility-escalation-main small, .responsibility-escalation-row > small { color: #71809c; font-size: 9px; }
+          .responsibility-review-buttons""", "sla styles")
+          css_path.write_text(css)
+
+          readme_path = Path("README.md")
+          readme = readme_path.read_text()
+          section = """### Responsibility Review SLA / Escalation (v0.3.26)
+
+          Aging/Priority 위에 review SLA와 escalation 계층을 추가합니다.
+
+          - SLA는 같은 review key + fingerprint의 최초 관측 시각을 기준으로 계산합니다. fingerprint가 바뀌면 새 SLA가 시작됩니다.
+          - P0=24h, P1=96h, P2=72h review target을 사용하고 P3/DEFERRED, BLOCKED는 SLA exempt로 둡니다.
+          - P0는 12시간 이하, P1/P2는 24시간 이하가 남으면 DUE_SOON, target을 넘으면 BREACHED입니다.
+          - P0/P1은 breach 전 WARNING, breach 후 CRITICAL escalation으로 분리합니다. P2는 SLA 상태만 계산하고 escalation queue에는 올리지 않습니다.
+          - Dashboard의 SLA Escalation 영역은 P0/P1만 별도로 모아 Review Inbox 전체를 훑지 않아도 임박/초과 항목을 볼 수 있게 합니다.
+          - Inbox 정렬은 CRITICAL → WARNING → 일반을 먼저 적용한 뒤 기존 Priority/Aging/실패 시도 순서를 유지합니다.
+          - SLA는 자동 mutation, 자동 Track 생성, producer YAML 수정, repository map 수정, run assignment 변경을 수행하지 않습니다. 기존 fail-closed 경계를 그대로 유지합니다.
+
+          """
+          marker = "## Producer Contract Health"
+          if "### Responsibility Review SLA / Escalation (v0.3.26)" not in readme:
+              if marker not in readme:
+                  raise SystemExit("README marker missing")
+              readme = readme.replace(marker, section + marker, 1)
+          readme_path.write_text(readme)
+
+          for path, old, new in [
+              (Path("package.json"), '"version": "0.3.25"', '"version": "0.3.26"'),
+              (Path("src-tauri/Cargo.toml"), 'version = "0.3.25"', 'version = "0.3.26"'),
+              (Path("src-tauri/tauri.conf.json"), '"version": "0.3.25"', '"version": "0.3.26"'),
+          ]:
+              value = path.read_text()
+              if old not in value:
+                  raise SystemExit(f"{path}: version anchor missing")
+              path.write_text(value.replace(old, new, 1))
+
+          Path(".github/workflows/implement-responsibility-review-sla.yml").unlink()
+      - name: Format Rust
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml
+      - name: Commit implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "feat: add responsibility review SLA escalation"
+          git push origin HEAD:feat/responsibility-review-sla-escalation
