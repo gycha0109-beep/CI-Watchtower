@@ -189,6 +189,19 @@ Review Inbox에서 사용자가 명시적으로 승인한 WatchTower 내부 변�
 - `responsibility_resolution_audit`에 before/after binding, action, fingerprint, result를 기록합니다.
 - Resolution은 canonical Track을 생성하지 않고 producer YAML / repository responsibility map을 수정하지 않으며 manual run assignment를 보존합니다.
 
+### Resolution History / Audit Trail (v0.3.23)
+
+Manual Resolution의 판단과 결과를 immutable event history로 추적합니다.
+
+- 성공한 Resolution도 `after_watchtower_binding`이 비어 있지 않도록 mutation 직후 실제 WatchTower responsibility binding을 snapshot합니다.
+- `requested_fingerprint`와 `current_fingerprint`를 분리해 Preview 이후 상태가 바뀐 `stale_rejected` 사건을 명확히 설명합니다.
+- `expected_repository_binding`과 `resulting_watchtower_binding`을 보존해 Repository authority → 승인 action → 실제 WatchTower 결과를 복원할 수 있습니다.
+- `Deferred → Resolved`는 기존 audit row를 갱신하지 않고 별도 event를 추가합니다.
+- Dashboard의 Resolution History는 현재 Project / Repository scope를 따르며 Resolved, Deferred, Blocked, Stale, Failed 필터를 제공합니다.
+- Review Inbox의 같은 `review_key`에 과거 이력이 있으면 이전 검토 횟수와 최신 결과를 연결해서 보여줍니다.
+- 상세 Audit에서는 before/after contract, action, requested/current fingerprint, actor, audit id와 resolution safety invariant를 확인할 수 있습니다.
+- transaction 실행 실패는 rollback 후 `failed` audit event를 남기며 canonical Track, producer YAML, repository responsibility map, manual assignment는 Resolution 경로에서 변경하지 않습니다.
+
 ## Producer Contract Health
 
 Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.
