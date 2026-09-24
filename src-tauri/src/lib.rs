@@ -4177,6 +4177,116 @@ mod tests {
     }
 
     #[test]
+    fn dependabot_dynamic_workflows_do_not_pollute_attribution_surfaces() {
+        let path = legacy_v02_db_path("dependabot-dynamic-noise");
+        init_db(&path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let repository_id: i64 = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        for (
+            run_id,
+            workflow_id,
+            workflow_name,
+            workflow_path,
+            event,
+            created_at,
+        ) in [
+            (
+                9_400_001_i64,
+                940_i64,
+                "Undeclared Repository Workflow",
+                ".github/workflows/undeclared.yml",
+                "pull_request",
+                "2026-09-24T04:00:00Z",
+            ),
+            (
+                9_400_002_i64,
+                941_i64,
+                "npm_and_yarn in /. - Update #1589675854",
+                "dynamic/dependabot/dependabot-updates",
+                "dynamic",
+                "2026-09-24T04:01:00Z",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO workflow_runs(
+                   run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
+                   head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
+                   created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored,last_resolution_attempt_at
+                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![
+                    run_id,
+                    repository_id,
+                    workflow_id,
+                    workflow_name,
+                    workflow_path,
+                    workflow_name,
+                    event,
+                    "main",
+                    format!("sha-{run_id}"),
+                    run_id,
+                    1_i64,
+                    "completed",
+                    "success",
+                    format!("https://example/{run_id}"),
+                    created_at,
+                    Option::<String>::None,
+                    created_at,
+                    created_at,
+                    "unassigned",
+                    0_i64,
+                    Option::<String>::None,
+                ],
+            )
+            .unwrap();
+        }
+
+        let inbox = unassigned_runs_for_repository(&conn, repository_id, 50).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].id, 9_400_001_i64);
+
+        let contract_runs = producer_contract_runs(&conn, 50).unwrap();
+        let repo_contract_runs: Vec<_> = contract_runs
+            .iter()
+            .filter(|item| item.run.repository_id == repository_id)
+            .collect();
+        assert_eq!(repo_contract_runs.len(), 1);
+        assert_eq!(repo_contract_runs[0].run.id, 9_400_001_i64);
+        assert!(repo_contract_runs[0].is_current_producer_run);
+
+        let stats = producer_contract_stats(&conn, 50).unwrap();
+        let repo_stats = stats
+            .iter()
+            .find(|item| item.repository_id == repository_id)
+            .unwrap();
+        assert_eq!(repo_stats.sampled_runs, 1);
+        assert_eq!(repo_stats.unresolved_runs, 1);
+
+        let scope = repository_scope_stats(&conn).unwrap();
+        let repo_scope = scope
+            .iter()
+            .find(|item| item.repository_id == repository_id)
+            .unwrap();
+        assert_eq!(repo_scope.unassigned_count, 1);
+
+        let unresolved = load_stored_unresolved_runs(&conn, repository_id, 50).unwrap();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].id, 9_400_001_i64);
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
     fn alias_audit_evidence_does_not_double_inference_score() {
         let tracks = vec![track(1, "ops")];
         let aliases = HashMap::from([("privacy-recovery".into(), "ops".into())]);
