@@ -271,8 +271,20 @@ struct RunAttributionDetail {
     last_resolution_attempt_at: Option<String>,
     project_rule_id: Option<i64>,
     project_rule_repository_id: Option<i64>,
+    responsibility: WorkflowResponsibilityContext,
     evidence: Vec<RunAttributionEvidence>,
     reconciliation_history: Vec<ReconciliationAuditEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowResponsibilityContext {
+    watchtower_kind: String,
+    watchtower_declaration: String,
+    repository_binding: Option<String>,
+    repository_source_path: Option<String>,
+    repository_source_status: Option<String>,
+    repository_source_last_success_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -450,6 +462,18 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str)
         )?;
     }
     Ok(())
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sqlite_master
+           WHERE type='table' AND name=?
+         )",
+        params![table],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )
+    .map_err(Into::into)
 }
 
 fn init_db(path: &Path) -> Result<()> {
@@ -1441,7 +1465,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.21")
+        .user_agent("ci-watchtower/0.3.22")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -2192,10 +2216,25 @@ fn load_run_attribution_detail(conn: &Connection, run_id: i64) -> Result<RunAttr
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    let project_rule: Option<(i64, Option<i64>)> = if resolution_status == "project" {
-        conn.query_row(
+    let project_rule: Option<(i64, Option<i64>)> = conn
+        .query_row(
             "SELECT id,repository_id
              FROM project_workflow_rules
+             WHERE project_id=?
+               AND workflow_name=?
+               AND active=1
+               AND (repository_id IS NULL OR repository_id=?)
+             ORDER BY CASE WHEN repository_id=? THEN 0 ELSE 1 END,id
+             LIMIT 1",
+            params![project_id, workflow_name, repository_id, repository_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+
+    let dynamic_rule: Option<(i64, Option<i64>)> = if table_exists(conn, "dynamic_workflow_rules")? {
+        conn.query_row(
+            "SELECT id,repository_id
+             FROM dynamic_workflow_rules
              WHERE project_id=?
                AND workflow_name=?
                AND active=1
@@ -2210,9 +2249,97 @@ fn load_run_attribution_detail(conn: &Connection, run_id: i64) -> Result<RunAttr
         None
     };
 
+    let repository_contract: Option<(String, String)> =
+        if table_exists(conn, "repository_responsibility_contracts")? {
+            conn.query_row(
+                "SELECT source_binding,source_path
+                 FROM repository_responsibility_contracts
+                 WHERE repository_id=? AND workflow_name=?
+                 ORDER BY last_seen_at DESC
+                 LIMIT 1",
+                params![repository_id, workflow_name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+        } else {
+            None
+        };
+
+    let repository_source: Option<(String, Option<String>)> =
+        if table_exists(conn, "repository_responsibility_sources")? {
+            conn.query_row(
+                "SELECT status,last_success_at
+                 FROM repository_responsibility_sources
+                 WHERE repository_id=?",
+                params![repository_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+        } else {
+            None
+        };
+
+    let run_name_track = evidence
+        .iter()
+        .find(|item| item.signal_type == "run_name")
+        .map(|item| item.track_key.clone());
+
+    let (watchtower_kind, watchtower_declaration) = match (&project_rule, &dynamic_rule) {
+        (Some((project_rule_id, project_scope)), Some((dynamic_rule_id, dynamic_scope))) => (
+            "conflict".to_string(),
+            format!(
+                "Project-wide rule #{} ({}) + Dynamic rule #{} ({})",
+                project_rule_id,
+                if project_scope.is_some() { "Repository scope" } else { "Project scope" },
+                dynamic_rule_id,
+                if dynamic_scope.is_some() { "Repository scope" } else { "Project scope" }
+            ),
+        ),
+        (Some((rule_id, scope)), None) => (
+            "project-wide".to_string(),
+            format!(
+                "Project-wide rule #{} ({})",
+                rule_id,
+                if scope.is_some() { "Repository scope" } else { "Project scope" }
+            ),
+        ),
+        (None, Some((rule_id, scope))) => (
+            "dynamic".to_string(),
+            format!(
+                "Dynamic rule #{} ({}) · per-Run attribution remains evidence-driven",
+                rule_id,
+                if scope.is_some() { "Repository scope" } else { "Project scope" }
+            ),
+        ),
+        (None, None) => match run_name_track {
+            Some(track_key) => (
+                "track-owned".to_string(),
+                format!("run-name explicitly declares [WT:{}]", track_key),
+            ),
+            None => (
+                "undeclared".to_string(),
+                "No active Project-wide/Dynamic rule or run-name Track declaration.".into(),
+            ),
+        },
+    };
+
     let (project_rule_id, project_rule_repository_id) = project_rule
         .map(|(id, repository_id)| (Some(id), repository_id))
         .unwrap_or((None, None));
+    let (repository_binding, repository_source_path) = repository_contract
+        .map(|(binding, source_path)| (Some(binding), Some(source_path)))
+        .unwrap_or((None, None));
+    let (repository_source_status, repository_source_last_success_at) = repository_source
+        .map(|(status, last_success_at)| (Some(status), last_success_at))
+        .unwrap_or((None, None));
+    let responsibility = WorkflowResponsibilityContext {
+        watchtower_kind,
+        watchtower_declaration,
+        repository_binding,
+        repository_source_path,
+        repository_source_status,
+        repository_source_last_success_at,
+    };
 
     let (source, reason, confidence) = if resolution_status == "project" {
         (
@@ -2284,6 +2411,7 @@ fn load_run_attribution_detail(conn: &Connection, run_id: i64) -> Result<RunAttr
         last_resolution_attempt_at,
         project_rule_id,
         project_rule_repository_id,
+        responsibility,
         evidence,
         reconciliation_history,
     })
@@ -6841,6 +6969,12 @@ mod tests {
         assert_eq!(detail.source.as_deref(), Some("manual"));
         assert_eq!(detail.confidence, Some(100));
         assert_eq!(detail.manual, Some(true));
+        assert_eq!(detail.responsibility.watchtower_kind, "track-owned");
+        assert!(detail
+            .responsibility
+            .watchtower_declaration
+            .contains("[WT:ops]"));
+        assert_eq!(detail.responsibility.repository_binding, None);
         assert_eq!(detail.evidence.len(), 2);
         assert_eq!(detail.evidence[0].signal_type, "run_name");
         assert_eq!(detail.evidence[0].score, 100);
@@ -7300,7 +7434,125 @@ mod tests {
         assert_eq!(detail.confidence, Some(100));
         assert_eq!(detail.project_rule_id, Some(8));
         assert_eq!(detail.project_rule_repository_id, Some(100));
+        assert_eq!(detail.responsibility.watchtower_kind, "project-wide");
+        assert!(detail
+            .responsibility
+            .watchtower_declaration
+            .contains("Project-wide rule #8"));
         assert!(detail.evidence.is_empty());
+    }
+
+    #[test]
+    fn attribution_detail_exposes_dynamic_and_repository_contract_context() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE monitored_repositories(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               repo TEXT NOT NULL
+             );
+             CREATE TABLE watch_tracks(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               name TEXT NOT NULL,
+               track_key TEXT NOT NULL
+             );
+             CREATE TABLE workflow_runs(
+               run_id INTEGER PRIMARY KEY,
+               repository_id INTEGER NOT NULL,
+               workflow_name TEXT NOT NULL,
+               resolution_status TEXT NOT NULL,
+               last_resolution_attempt_at TEXT
+             );
+             CREATE TABLE run_assignments(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               manual INTEGER NOT NULL,
+               assigned_at TEXT NOT NULL
+             );
+             CREATE TABLE run_evidence(
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               run_id INTEGER NOT NULL,
+               track_key TEXT NOT NULL,
+               signal_type TEXT NOT NULL,
+               score INTEGER NOT NULL,
+               value TEXT NOT NULL,
+               created_at TEXT NOT NULL
+             );
+             CREATE TABLE project_workflow_rules(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               repository_id INTEGER,
+               workflow_name TEXT NOT NULL,
+               active INTEGER NOT NULL
+             );
+             CREATE TABLE dynamic_workflow_rules(
+               id INTEGER PRIMARY KEY,
+               project_id INTEGER NOT NULL,
+               repository_id INTEGER,
+               workflow_name TEXT NOT NULL,
+               active INTEGER NOT NULL,
+               protected INTEGER NOT NULL
+             );
+             CREATE TABLE repository_responsibility_contracts(
+               repository_id INTEGER NOT NULL,
+               workflow_path TEXT NOT NULL,
+               workflow_name TEXT NOT NULL,
+               binding_kind TEXT NOT NULL,
+               track_key TEXT,
+               source_binding TEXT NOT NULL,
+               source_path TEXT NOT NULL,
+               last_seen_at TEXT NOT NULL
+             );
+             CREATE TABLE repository_responsibility_sources(
+               repository_id INTEGER PRIMARY KEY,
+               source_path TEXT NOT NULL,
+               status TEXT NOT NULL,
+               last_attempt_at TEXT NOT NULL,
+               last_success_at TEXT,
+               last_error TEXT
+             );
+             INSERT INTO monitored_repositories VALUES(100,1,'example/repo');
+             INSERT INTO workflow_runs VALUES(2000,100,'Shared Gate','unassigned','2026-09-24T08:00:00Z');
+             INSERT INTO dynamic_workflow_rules VALUES(12,1,100,'Shared Gate',1,1);
+             INSERT INTO repository_responsibility_contracts VALUES(
+               100,'.github/workflows/shared-gate.yml','Shared Gate','dynamic',NULL,
+               'dynamic-by-run','docs/ci/workflow-responsibility-map.json','2026-09-24T08:00:00Z'
+             );
+             INSERT INTO repository_responsibility_sources VALUES(
+               100,'docs/ci/workflow-responsibility-map.json','synced',
+               '2026-09-24T08:00:00Z','2026-09-24T08:00:00Z',NULL
+             );"
+        ).unwrap();
+
+        let detail = load_run_attribution_detail(&conn, 2000).unwrap();
+        assert_eq!(detail.responsibility.watchtower_kind, "dynamic");
+        assert!(detail
+            .responsibility
+            .watchtower_declaration
+            .contains("Dynamic rule #12"));
+        assert_eq!(
+            detail.responsibility.repository_binding.as_deref(),
+            Some("dynamic-by-run")
+        );
+        assert_eq!(
+            detail.responsibility.repository_source_path.as_deref(),
+            Some(RESPONSIBILITY_MAP_PATH)
+        );
+        assert_eq!(
+            detail.responsibility.repository_source_status.as_deref(),
+            Some("synced")
+        );
+        assert_eq!(
+            detail
+                .responsibility
+                .repository_source_last_success_at
+                .as_deref(),
+            Some("2026-09-24T08:00:00Z")
+        );
     }
 
     #[test]
