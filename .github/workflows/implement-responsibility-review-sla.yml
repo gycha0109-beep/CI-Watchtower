@@ -309,11 +309,16 @@ jobs:
                                   {responsibilitySlaLabel(item.slaStatus, item.slaRemainingHours)}
                                 </span>
                                 <span className="responsibility-review-action">{responsibilityActionLabel(item.recommendedAction)}</span>""", "card badges")
-          app = replace_once(app, """                    <span>Last reviewed <b>{item.lastReviewedAt ? formatAuditTime(item.lastReviewedAt) : '없음'}</b></span>
-                              </div>""", """                    <span>Last reviewed <b>{item.lastReviewedAt ? formatAuditTime(item.lastReviewedAt) : '없음'}</b></span>
-                                <span>SLA target <b>{item.slaTargetHours == null ? 'exempt' : item.slaTargetHours + 'h'}</b></span>
-                                <span>SLA state <b>{item.slaStatus.toUpperCase()}</b></span>
-                              </div>""", "card sla ops")
+          ops_anchor = "                    <span>Last reviewed <b>{item.lastReviewedAt ? formatAuditTime(item.lastReviewedAt) : '없음'}</b></span>"
+          if app.count(ops_anchor) != 1:
+              raise SystemExit(f"card sla ops: expected 1 anchor, got {app.count(ops_anchor)}")
+          app = app.replace(
+              ops_anchor,
+              ops_anchor
+              + "\\n                    <span>SLA target <b>{item.slaTargetHours == null ? 'exempt' : item.slaTargetHours + 'h'}</b></span>"
+              + "\\n                    <span>SLA state <b>{item.slaStatus.toUpperCase()}</b></span>",
+              1,
+          )
           app_path.write_text(app)
 
           css_path = Path("src/styles.css")
