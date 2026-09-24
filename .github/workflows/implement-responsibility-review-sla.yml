@@ -129,24 +129,18 @@ jobs:
               drift.escalation_reason = escalation_reason;
               Ok(())
           }""", "populate sla")
-          init_pattern = re.compile(
-              r'(?P<indent>^[ \\t]+)last_reviewed_at: None,\\n(?P=indent)first_seen_at: String::new\\(\\),',
-              re.MULTILINE,
+          init_anchor = "first_seen_at: String::new(),"
+          if lib.count(init_anchor) != 3:
+              raise SystemExit(f"drift initializers: expected 3, got {lib.count(init_anchor)}")
+          lib = lib.replace(
+              init_anchor,
+              'first_seen_at: String::new(),\\n'
+              '                sla_status: "within_sla".into(),\\n'
+              '                sla_target_hours: Some(72),\\n'
+              '                sla_remaining_hours: Some(72),\\n'
+              '                escalation_level: "none".into(),\\n'
+              '                escalation_reason: None,',
           )
-          def add_sla_defaults(match):
-              indent = match.group('indent')
-              return (
-                  f"{indent}last_reviewed_at: None,\\n"
-                  f"{indent}first_seen_at: String::new(),\\n"
-                  f'{indent}sla_status: "within_sla".into(),\\n'
-                  f"{indent}sla_target_hours: Some(72),\\n"
-                  f"{indent}sla_remaining_hours: Some(72),\\n"
-                  f'{indent}escalation_level: "none".into(),\\n'
-                  f"{indent}escalation_reason: None,"
-              )
-          lib, init_count = init_pattern.subn(add_sla_defaults, lib)
-          if init_count != 3:
-              raise SystemExit(f"drift initializers: expected 3, got {init_count}")
           sort_anchor = "        responsibility_review_priority_rank(&a.review_priority)"
           if lib.count(sort_anchor) != 1:
               raise SystemExit(f"drift sort anchor: expected 1, got {lib.count(sort_anchor)}")
