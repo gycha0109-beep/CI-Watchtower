@@ -5259,16 +5259,28 @@ mod tests {
             )
             .unwrap();
 
-        let dynamic_rule_count: i64 = conn
+        let dynamic_rule: (i64, i64) = conn
             .query_row(
-                "SELECT COUNT(*) FROM dynamic_workflow_rules
+                "SELECT COUNT(*),MAX(protected) FROM dynamic_workflow_rules
                  WHERE project_id=? AND repository_id=?
                    AND workflow_name='MESH6J Manual Browser Capture Surface CI' AND active=1",
                 params![project_id, repository_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(dynamic_rule_count, 1);
+        assert_eq!(dynamic_rule, (1, 1));
+
+        let listed_rules = list_dynamic_workflow_rules(&conn).unwrap();
+        let mesh_rule = listed_rules
+            .iter()
+            .find(|rule| {
+                rule.project_id == project_id
+                    && rule.repository_id == Some(repository_id)
+                    && rule.workflow_name == "MESH6J Manual Browser Capture Surface CI"
+            })
+            .unwrap();
+        assert!(mesh_rule.active);
+        assert!(mesh_rule.protected);
 
         conn.execute(
             "INSERT INTO workflow_runs(
