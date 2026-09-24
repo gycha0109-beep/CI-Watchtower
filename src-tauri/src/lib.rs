@@ -2439,6 +2439,13 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                     review_key: String::new(),
                     fingerprint: String::new(),
                     review_status: "open".into(),
+                    review_priority: "p2".into(),
+                    review_age_bucket: "fresh".into(),
+                    review_age_hours: 0,
+                    review_event_count: 0,
+                    failed_attempt_count: 0,
+                    last_reviewed_at: None,
+                    first_seen_at: String::new(),
                 });
             }
         }
@@ -2467,6 +2474,13 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                     review_key: String::new(),
                     fingerprint: String::new(),
                     review_status: "open".into(),
+                    review_priority: "p2".into(),
+                    review_age_bucket: "fresh".into(),
+                    review_age_hours: 0,
+                    review_event_count: 0,
+                    failed_attempt_count: 0,
+                    last_reviewed_at: None,
+                    first_seen_at: String::new(),
                 });
             }
         }
