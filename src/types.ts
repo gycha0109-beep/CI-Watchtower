@@ -228,6 +228,13 @@ export interface ResponsibilityMapDrift {
   reviewKey: string;
   fingerprint: string;
   reviewStatus: 'open' | 'deferred' | 'attention' | 'blocked' | string;
+  reviewPriority: 'p0' | 'p1' | 'p2' | 'p3' | 'blocked' | string;
+  reviewAgeBucket: 'fresh' | 'aging' | 'overdue' | string;
+  reviewAgeHours: number;
+  reviewEventCount: number;
+  failedAttemptCount: number;
+  lastReviewedAt: string | null;
+  firstSeenAt: string;
 }
 
 export interface ResponsibilityResolutionPreviewInput {

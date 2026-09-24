@@ -91,11 +91,22 @@ h2 { font-size: 16px; margin: 0 0 15px; }
 .responsibility-review-contract-grid small { color: #71809c; font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .responsibility-review-reason { display: grid; gap: 4px; border-left: 2px solid #4d4229; padding-left: 10px; }
 .responsibility-review-reason p { margin: 0; color: #aeb9d0; font-size: 11px; line-height: 1.5; }
+.responsibility-review-ops { display: flex; flex-wrap: wrap; gap: 6px 12px; border-top: 1px dashed #1d2941; padding-top: 8px; color: #667593; font-size: 9px; }
+.responsibility-review-ops b { color: #9eacc5; font-weight: 800; }
 .responsibility-review-foot { display: flex; justify-content: space-between; gap: 12px; align-items: center; border-top: 1px solid #1a2438; padding-top: 8px; }
 .responsibility-review-foot > span:first-child { color: #d7bd73; font-size: 10px; font-weight: 800; }
 .responsibility-review-foot small { color: #667593; font-size: 9px; }
-.responsibility-review-head-actions { display: grid; gap: 5px; justify-items: end; }
-.responsibility-review-state { width: fit-content; border: 1px solid #33415d; border-radius: 999px; color: #8fa2c6; padding: 3px 6px; font-size: 8px; font-weight: 900; letter-spacing: .07em; }
+.responsibility-review-head-actions { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; align-items: center; }
+.responsibility-review-priority, .responsibility-review-age, .responsibility-review-state { width: fit-content; border: 1px solid #33415d; border-radius: 999px; color: #8fa2c6; padding: 3px 6px; font-size: 8px; font-weight: 900; letter-spacing: .07em; }
+.responsibility-review-priority.p0 { border-color: #6a2d3c; color: #ff8796; }
+.responsibility-review-priority.p1 { border-color: #624b25; color: #f2c66b; }
+.responsibility-review-priority.p2 { border-color: #36517f; color: #8fb8ff; }
+.responsibility-review-priority.p3 { border-color: #3f4657; color: #9ca8bd; }
+.responsibility-review-priority.blocked { border-color: #5b2b38; color: #ff8796; }
+.responsibility-review-age.fresh { border-color: #31524a; color: #78d9aa; }
+.responsibility-review-age.aging { border-color: #4d4229; color: #e4c66d; }
+.responsibility-review-age.overdue { border-color: #5b2b38; color: #ff8796; }
+.responsibility-review-state { color: #8fa2c6; }
 .responsibility-review-state.deferred { border-color: #4d4229; color: #e4c66d; }
 .responsibility-review-state.attention { border-color: #51426d; color: #c6a8ef; }
 .responsibility-review-state.blocked { border-color: #5b2b38; color: #ff8796; }
