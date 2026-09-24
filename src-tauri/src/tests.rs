@@ -1,19 +1,20 @@
-    use super::*;
 
-    fn legacy_v02_db_path(label: &str) -> std::path::PathBuf {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "ci-watchtower-{label}-{}-{nonce}.sqlite3",
-            std::process::id()
-        ))
-    }
+use super::*;
 
-    fn seed_legacy_v02_database(path: &Path) {
-        let conn = Connection::open(path).unwrap();
-        conn.execute_batch(
+fn legacy_v02_db_path(label: &str) -> std::path::PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "ci-watchtower-{label}-{}-{nonce}.sqlite3",
+        std::process::id()
+    ))
+}
+
+fn seed_legacy_v02_database(path: &Path) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
             r#"
             PRAGMA foreign_keys=ON;
 
@@ -203,182 +204,185 @@
             "#,
         )
         .unwrap();
-    }
+}
 
-    fn track(id: i64, key: &str) -> Track {
-        Track {
-            id,
-            project_id: 1,
-            name: key.into(),
-            track_key: key.into(),
-            long_ci_minutes: 8,
-            active: true,
-            created_at: String::new(),
-            updated_at: String::new(),
-        }
+fn track(id: i64, key: &str) -> Track {
+    Track {
+        id,
+        project_id: 1,
+        name: key.into(),
+        track_key: key.into(),
+        long_ci_minutes: 8,
+        active: true,
+        created_at: String::new(),
+        updated_at: String::new(),
     }
+}
 
-    #[test]
-    fn extracts_run_name_marker() {
-        assert_eq!(
-            extract_marker("[WT:frontend-integration] Reader Grounding"),
-            Some("frontend-integration".into())
-        );
+#[test]
+fn extracts_run_name_marker() {
+    assert_eq!(
+        extract_marker("[WT:frontend-integration] Reader Grounding"),
+        Some("frontend-integration".into())
+    );
+}
+
+#[test]
+fn normalizes_legacy_bejewely_taxonomy_key() {
+    assert_eq!(
+        extract_marker("[WT:taxonomy&AI] Product Query Quality"),
+        Some("taxonomy-ai".into())
+    );
+    assert_eq!(
+        extract_track_trailer("feat: x\n\nWatchtower-Track: taxonomy&AI"),
+        Some("taxonomy-ai".into())
+    );
+    assert!(branch_has_key(
+        "feat/taxonomy&AI/provider-quality",
+        "taxonomy-ai"
+    ));
+}
+
+#[test]
+fn extracts_pr_or_commit_trailer() {
+    assert_eq!(
+        extract_track_trailer("feat: x\n\nWatchtower-Track: ops"),
+        Some("ops".into())
+    );
+}
+
+#[test]
+fn branch_key_requires_segment_match() {
+    assert!(branch_has_key(
+        "feat/frontend-integration/reader-scene",
+        "frontend-integration"
+    ));
+    assert!(!branch_has_key("feat/frontend/foo", "frontend-integration"));
+}
+
+#[test]
+fn track_key_validation_is_bounded() {
+    assert!(validate_track_key("frontend-integration").is_ok());
+    assert!(validate_track_key("Frontend").is_err());
+    assert!(validate_track_key("-ops").is_err());
+    assert!(validate_track_key("ops/one").is_err());
+}
+
+#[test]
+fn legacy_known_tracks_keep_stable_keys() {
+    assert_eq!(legacy_track_key("프론트 연동 4", 1), "frontend-integration");
+    assert_eq!(legacy_track_key("운영 32", 2), "ops");
+    assert_eq!(legacy_track_key("관상 연구 및 검증 2", 3), "face-research");
+}
+
+fn evidence(key: &str, signal_type: &str, score: i64) -> Evidence {
+    Evidence {
+        track_key: key.into(),
+        signal_type: signal_type.into(),
+        score,
+        value: signal_type.into(),
     }
+}
 
-    #[test]
-    fn normalizes_legacy_bejewely_taxonomy_key() {
-        assert_eq!(
-            extract_marker("[WT:taxonomy&AI] Product Query Quality"),
-            Some("taxonomy-ai".into())
-        );
-        assert_eq!(
-            extract_track_trailer("feat: x\n\nWatchtower-Track: taxonomy&AI"),
-            Some("taxonomy-ai".into())
-        );
-        assert!(branch_has_key("feat/taxonomy&AI/provider-quality", "taxonomy-ai"));
-    }
+#[test]
+fn unknown_run_name_marker_fails_closed_over_known_branch() {
+    let tracks = vec![track(1, "ops")];
+    let resolution = resolve_evidence(
+        &tracks,
+        &HashMap::new(),
+        vec![
+            evidence("unknown-track", "run_name", 100),
+            evidence("ops", "branch", 90),
+        ],
+    );
+    assert_eq!(resolution.status, "unassigned");
+    assert_eq!(resolution.track_id, None);
+    assert_eq!(resolution.confidence, Some(100));
+}
 
-    #[test]
-    fn extracts_pr_or_commit_trailer() {
-        assert_eq!(
-            extract_track_trailer("feat: x\n\nWatchtower-Track: ops"),
-            Some("ops".into())
-        );
-    }
+#[test]
+fn run_name_precedes_pr_marker() {
+    let tracks = vec![track(1, "ops"), track(2, "saju")];
+    let resolution = resolve_evidence(
+        &tracks,
+        &HashMap::new(),
+        vec![
+            evidence("ops", "run_name", 100),
+            evidence("saju", "pr_marker", 98),
+        ],
+    );
+    assert_eq!(resolution.status, "assigned");
+    assert_eq!(resolution.track_id, Some(1));
+    assert_eq!(resolution.source.as_deref(), Some("run_name"));
+}
 
-    #[test]
-    fn branch_key_requires_segment_match() {
-        assert!(branch_has_key(
-            "feat/frontend-integration/reader-scene",
-            "frontend-integration"
-        ));
-        assert!(!branch_has_key("feat/frontend/foo", "frontend-integration"));
-    }
+#[test]
+fn pr_marker_precedes_commit_marker() {
+    let tracks = vec![track(1, "ops"), track(2, "saju")];
+    let resolution = resolve_evidence(
+        &tracks,
+        &HashMap::new(),
+        vec![
+            evidence("ops", "pr_marker", 98),
+            evidence("saju", "commit_marker", 96),
+        ],
+    );
+    assert_eq!(resolution.status, "assigned");
+    assert_eq!(resolution.track_id, Some(1));
+    assert_eq!(resolution.source.as_deref(), Some("pr_marker"));
+}
 
-    #[test]
-    fn track_key_validation_is_bounded() {
-        assert!(validate_track_key("frontend-integration").is_ok());
-        assert!(validate_track_key("Frontend").is_err());
-        assert!(validate_track_key("-ops").is_err());
-        assert!(validate_track_key("ops/one").is_err());
-    }
+#[test]
+fn commit_marker_precedes_branch() {
+    let tracks = vec![track(1, "ops"), track(2, "saju")];
+    let resolution = resolve_evidence(
+        &tracks,
+        &HashMap::new(),
+        vec![
+            evidence("ops", "commit_marker", 96),
+            evidence("saju", "branch", 90),
+        ],
+    );
+    assert_eq!(resolution.status, "assigned");
+    assert_eq!(resolution.track_id, Some(1));
+    assert_eq!(resolution.source.as_deref(), Some("commit_marker"));
+}
 
-    #[test]
-    fn legacy_known_tracks_keep_stable_keys() {
-        assert_eq!(legacy_track_key("프론트 연동 4", 1), "frontend-integration");
-        assert_eq!(legacy_track_key("운영 32", 2), "ops");
-        assert_eq!(legacy_track_key("관상 연구 및 검증 2", 3), "face-research");
-    }
+#[test]
+fn same_priority_pr_markers_conflict() {
+    let tracks = vec![track(1, "ops"), track(2, "saju")];
+    let resolution = resolve_evidence(
+        &tracks,
+        &HashMap::new(),
+        vec![
+            evidence("ops", "pr_marker", 98),
+            evidence("saju", "pr_marker", 98),
+        ],
+    );
+    assert_eq!(resolution.status, "conflict");
+    assert_eq!(resolution.track_id, None);
+    assert_eq!(resolution.source.as_deref(), Some("explicit_conflict"));
+}
 
-    fn evidence(key: &str, signal_type: &str, score: i64) -> Evidence {
-        Evidence {
-            track_key: key.into(),
-            signal_type: signal_type.into(),
-            score,
-            value: signal_type.into(),
-        }
-    }
+#[test]
+fn historical_alias_is_canonicalized_before_precedence() {
+    let tracks = vec![track(1, "ops")];
+    let aliases = HashMap::from([("privacy-recovery".into(), "ops".into())]);
+    let resolution = resolve_evidence(
+        &tracks,
+        &aliases,
+        vec![evidence("privacy-recovery", "run_name", 100)],
+    );
+    assert_eq!(resolution.status, "assigned");
+    assert_eq!(resolution.track_id, Some(1));
+    assert_eq!(resolution.confidence, Some(100));
+}
 
-    #[test]
-    fn unknown_run_name_marker_fails_closed_over_known_branch() {
-        let tracks = vec![track(1, "ops")];
-        let resolution = resolve_evidence(
-            &tracks,
-            &HashMap::new(),
-            vec![
-                evidence("unknown-track", "run_name", 100),
-                evidence("ops", "branch", 90),
-            ],
-        );
-        assert_eq!(resolution.status, "unassigned");
-        assert_eq!(resolution.track_id, None);
-        assert_eq!(resolution.confidence, Some(100));
-    }
-
-    #[test]
-    fn run_name_precedes_pr_marker() {
-        let tracks = vec![track(1, "ops"), track(2, "saju")];
-        let resolution = resolve_evidence(
-            &tracks,
-            &HashMap::new(),
-            vec![
-                evidence("ops", "run_name", 100),
-                evidence("saju", "pr_marker", 98),
-            ],
-        );
-        assert_eq!(resolution.status, "assigned");
-        assert_eq!(resolution.track_id, Some(1));
-        assert_eq!(resolution.source.as_deref(), Some("run_name"));
-    }
-
-    #[test]
-    fn pr_marker_precedes_commit_marker() {
-        let tracks = vec![track(1, "ops"), track(2, "saju")];
-        let resolution = resolve_evidence(
-            &tracks,
-            &HashMap::new(),
-            vec![
-                evidence("ops", "pr_marker", 98),
-                evidence("saju", "commit_marker", 96),
-            ],
-        );
-        assert_eq!(resolution.status, "assigned");
-        assert_eq!(resolution.track_id, Some(1));
-        assert_eq!(resolution.source.as_deref(), Some("pr_marker"));
-    }
-
-    #[test]
-    fn commit_marker_precedes_branch() {
-        let tracks = vec![track(1, "ops"), track(2, "saju")];
-        let resolution = resolve_evidence(
-            &tracks,
-            &HashMap::new(),
-            vec![
-                evidence("ops", "commit_marker", 96),
-                evidence("saju", "branch", 90),
-            ],
-        );
-        assert_eq!(resolution.status, "assigned");
-        assert_eq!(resolution.track_id, Some(1));
-        assert_eq!(resolution.source.as_deref(), Some("commit_marker"));
-    }
-
-    #[test]
-    fn same_priority_pr_markers_conflict() {
-        let tracks = vec![track(1, "ops"), track(2, "saju")];
-        let resolution = resolve_evidence(
-            &tracks,
-            &HashMap::new(),
-            vec![
-                evidence("ops", "pr_marker", 98),
-                evidence("saju", "pr_marker", 98),
-            ],
-        );
-        assert_eq!(resolution.status, "conflict");
-        assert_eq!(resolution.track_id, None);
-        assert_eq!(resolution.source.as_deref(), Some("explicit_conflict"));
-    }
-
-    #[test]
-    fn historical_alias_is_canonicalized_before_precedence() {
-        let tracks = vec![track(1, "ops")];
-        let aliases = HashMap::from([("privacy-recovery".into(), "ops".into())]);
-        let resolution = resolve_evidence(
-            &tracks,
-            &aliases,
-            vec![evidence("privacy-recovery", "run_name", 100)],
-        );
-        assert_eq!(resolution.status, "assigned");
-        assert_eq!(resolution.track_id, Some(1));
-        assert_eq!(resolution.confidence, Some(100));
-    }
-
-    #[test]
-    fn repository_scope_stats_keep_project_and_repository_counts_exact() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE monitored_repositories(
+#[test]
+fn repository_scope_stats_keep_project_and_repository_counts_exact() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE monitored_repositories(
                id INTEGER PRIMARY KEY,
                project_id INTEGER NOT NULL
              );
@@ -404,63 +408,63 @@
                      (202,20,NULL,'project',0),
                      (301,30,NULL,'project',0),
                      (302,30,NULL,'unassigned',0);
-             INSERT INTO run_assignments(run_id,track_id) VALUES(102,999);"
-        ).unwrap();
+             INSERT INTO run_assignments(run_id,track_id) VALUES(102,999);",
+    )
+    .unwrap();
 
-        let stats = repository_scope_stats(&conn).unwrap();
-        let by_repo: HashMap<i64, (i64, i64, i64)> = stats
-            .into_iter()
-            .map(|item| (
+    let stats = repository_scope_stats(&conn).unwrap();
+    let by_repo: HashMap<i64, (i64, i64, i64)> = stats
+        .into_iter()
+        .map(|item| {
+            (
                 item.repository_id,
-                (item.project_id, item.unassigned_count, item.project_run_count),
-            ))
-            .collect();
-
-        assert_eq!(by_repo.get(&10), Some(&(1, 1, 1)));
-        assert_eq!(by_repo.get(&20), Some(&(1, 1, 1)));
-        assert_eq!(by_repo.get(&30), Some(&(2, 1, 1)));
-    }
-
-    #[test]
-    fn dependabot_dynamic_workflows_do_not_pollute_attribution_surfaces() {
-        let path = legacy_v02_db_path("dependabot-dynamic-noise");
-        init_db(&path).unwrap();
-
-        let conn = Connection::open(&path).unwrap();
-        let repository_id: i64 = conn
-            .query_row(
-                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
-                [],
-                |row| row.get(0),
+                (
+                    item.project_id,
+                    item.unassigned_count,
+                    item.project_run_count,
+                ),
             )
-            .unwrap();
+        })
+        .collect();
 
-        for (
-            run_id,
-            workflow_id,
-            workflow_name,
-            workflow_path,
-            event,
-            created_at,
-        ) in [
-            (
-                9_400_001_i64,
-                940_i64,
-                "Undeclared Repository Workflow",
-                ".github/workflows/undeclared.yml",
-                "pull_request",
-                "2026-09-24T04:00:00Z",
-            ),
-            (
-                9_400_002_i64,
-                941_i64,
-                "npm_and_yarn in /. - Update #1589675854",
-                "dynamic/dependabot/dependabot-updates",
-                "dynamic",
-                "2026-09-24T04:01:00Z",
-            ),
-        ] {
-            conn.execute(
+    assert_eq!(by_repo.get(&10), Some(&(1, 1, 1)));
+    assert_eq!(by_repo.get(&20), Some(&(1, 1, 1)));
+    assert_eq!(by_repo.get(&30), Some(&(2, 1, 1)));
+}
+
+#[test]
+fn dependabot_dynamic_workflows_do_not_pollute_attribution_surfaces() {
+    let path = legacy_v02_db_path("dependabot-dynamic-noise");
+    init_db(&path).unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    let repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    for (run_id, workflow_id, workflow_name, workflow_path, event, created_at) in [
+        (
+            9_400_001_i64,
+            940_i64,
+            "Undeclared Repository Workflow",
+            ".github/workflows/undeclared.yml",
+            "pull_request",
+            "2026-09-24T04:00:00Z",
+        ),
+        (
+            9_400_002_i64,
+            941_i64,
+            "npm_and_yarn in /. - Update #1589675854",
+            "dynamic/dependabot/dependabot-updates",
+            "dynamic",
+            "2026-09-24T04:01:00Z",
+        ),
+    ] {
+        conn.execute(
                 "INSERT INTO workflow_runs(
                    run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
                    head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
@@ -491,89 +495,89 @@
                 ],
             )
             .unwrap();
-        }
-
-        let inbox = unassigned_runs_for_repository(&conn, repository_id, 50).unwrap();
-        assert_eq!(inbox.len(), 1);
-        assert_eq!(inbox[0].id, 9_400_001_i64);
-
-        let contract_runs = producer_contract_runs(&conn, 50).unwrap();
-        let repo_contract_runs: Vec<_> = contract_runs
-            .iter()
-            .filter(|item| item.run.repository_id == repository_id)
-            .collect();
-        assert_eq!(repo_contract_runs.len(), 1);
-        assert_eq!(repo_contract_runs[0].run.id, 9_400_001_i64);
-        assert!(repo_contract_runs[0].is_current_producer_run);
-
-        let stats = producer_contract_stats(&conn, 50).unwrap();
-        let repo_stats = stats
-            .iter()
-            .find(|item| item.repository_id == repository_id)
-            .unwrap();
-        assert_eq!(repo_stats.sampled_runs, 1);
-        assert_eq!(repo_stats.unresolved_runs, 1);
-
-        let scope = repository_scope_stats(&conn).unwrap();
-        let repo_scope = scope
-            .iter()
-            .find(|item| item.repository_id == repository_id)
-            .unwrap();
-        assert_eq!(repo_scope.unassigned_count, 1);
-
-        let unresolved = load_stored_unresolved_runs(&conn, repository_id, 50).unwrap();
-        assert_eq!(unresolved.len(), 1);
-        assert_eq!(unresolved[0].id, 9_400_001_i64);
-
-        drop(conn);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
-    #[test]
-    fn alias_audit_evidence_does_not_double_inference_score() {
-        let tracks = vec![track(1, "ops")];
-        let aliases = HashMap::from([("privacy-recovery".into(), "ops".into())]);
-        let resolution = resolve_evidence(
-            &tracks,
-            &aliases,
-            vec![evidence("privacy-recovery", "workflow_name", 40)],
-        );
+    let inbox = unassigned_runs_for_repository(&conn, repository_id, 50).unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0].id, 9_400_001_i64);
 
-        assert_eq!(resolution.status, "unassigned");
-        assert_eq!(resolution.track_id, None);
-        assert_eq!(resolution.confidence, Some(40));
-        assert!(resolution
-            .evidence
-            .iter()
-            .any(|item| item.signal_type == "workflow_name_alias"));
-    }
+    let contract_runs = producer_contract_runs(&conn, 50).unwrap();
+    let repo_contract_runs: Vec<_> = contract_runs
+        .iter()
+        .filter(|item| item.run.repository_id == repository_id)
+        .collect();
+    assert_eq!(repo_contract_runs.len(), 1);
+    assert_eq!(repo_contract_runs[0].run.id, 9_400_001_i64);
+    assert!(repo_contract_runs[0].is_current_producer_run);
 
-    #[test]
-    fn independent_alias_signals_can_still_reach_inference_threshold() {
-        let tracks = vec![track(1, "ops")];
-        let aliases = HashMap::from([("privacy-recovery".into(), "ops".into())]);
-        let resolution = resolve_evidence(
-            &tracks,
-            &aliases,
-            vec![
-                evidence("privacy-recovery", "workflow_name", 40),
-                evidence("privacy-recovery", "workflow_path", 35),
-            ],
-        );
+    let stats = producer_contract_stats(&conn, 50).unwrap();
+    let repo_stats = stats
+        .iter()
+        .find(|item| item.repository_id == repository_id)
+        .unwrap();
+    assert_eq!(repo_stats.sampled_runs, 1);
+    assert_eq!(repo_stats.unresolved_runs, 1);
 
-        assert_eq!(resolution.status, "assigned");
-        assert_eq!(resolution.track_id, Some(1));
-        assert_eq!(resolution.confidence, Some(75));
-        assert_eq!(resolution.source.as_deref(), Some("inference"));
-    }
+    let scope = repository_scope_stats(&conn).unwrap();
+    let repo_scope = scope
+        .iter()
+        .find(|item| item.repository_id == repository_id)
+        .unwrap();
+    assert_eq!(repo_scope.unassigned_count, 1);
 
-    #[test]
-    fn persist_resolution_records_attempt_time_for_unassigned_run() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE workflow_runs(
+    let unresolved = load_stored_unresolved_runs(&conn, repository_id, 50).unwrap();
+    assert_eq!(unresolved.len(), 1);
+    assert_eq!(unresolved[0].id, 9_400_001_i64);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
+fn alias_audit_evidence_does_not_double_inference_score() {
+    let tracks = vec![track(1, "ops")];
+    let aliases = HashMap::from([("privacy-recovery".into(), "ops".into())]);
+    let resolution = resolve_evidence(
+        &tracks,
+        &aliases,
+        vec![evidence("privacy-recovery", "workflow_name", 40)],
+    );
+
+    assert_eq!(resolution.status, "unassigned");
+    assert_eq!(resolution.track_id, None);
+    assert_eq!(resolution.confidence, Some(40));
+    assert!(resolution
+        .evidence
+        .iter()
+        .any(|item| item.signal_type == "workflow_name_alias"));
+}
+
+#[test]
+fn independent_alias_signals_can_still_reach_inference_threshold() {
+    let tracks = vec![track(1, "ops")];
+    let aliases = HashMap::from([("privacy-recovery".into(), "ops".into())]);
+    let resolution = resolve_evidence(
+        &tracks,
+        &aliases,
+        vec![
+            evidence("privacy-recovery", "workflow_name", 40),
+            evidence("privacy-recovery", "workflow_path", 35),
+        ],
+    );
+
+    assert_eq!(resolution.status, "assigned");
+    assert_eq!(resolution.track_id, Some(1));
+    assert_eq!(resolution.confidence, Some(75));
+    assert_eq!(resolution.source.as_deref(), Some("inference"));
+}
+
+#[test]
+fn persist_resolution_records_attempt_time_for_unassigned_run() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE workflow_runs(
                run_id INTEGER PRIMARY KEY,
                resolution_status TEXT NOT NULL,
                last_resolution_attempt_at TEXT
@@ -597,34 +601,37 @@
                created_at TEXT NOT NULL
              );
              INSERT INTO workflow_runs(run_id,resolution_status,last_resolution_attempt_at)
-               VALUES(500,'unassigned',NULL);"
-        ).unwrap();
+               VALUES(500,'unassigned',NULL);",
+    )
+    .unwrap();
 
-        let resolution = Resolution {
-            status: "unassigned".into(),
-            track_id: None,
-            confidence: Some(40),
-            source: None,
-            reason: Some("insufficient".into()),
-            evidence: vec![evidence("ops", "workflow_name", 40)],
-        };
-        persist_resolution(&conn, 500, &resolution, "2026-09-24T01:00:00Z").unwrap();
+    let resolution = Resolution {
+        status: "unassigned".into(),
+        track_id: None,
+        confidence: Some(40),
+        source: None,
+        reason: Some("insufficient".into()),
+        evidence: vec![evidence("ops", "workflow_name", 40)],
+    };
+    persist_resolution(&conn, 500, &resolution, "2026-09-24T01:00:00Z").unwrap();
 
-        let row: (String, Option<String>) = conn.query_row(
+    let row: (String, Option<String>) = conn
+        .query_row(
             "SELECT resolution_status,last_resolution_attempt_at
              FROM workflow_runs WHERE run_id=500",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
-        assert_eq!(row.0, "unassigned");
-        assert_eq!(row.1.as_deref(), Some("2026-09-24T01:00:00Z"));
-    }
+        )
+        .unwrap();
+    assert_eq!(row.0, "unassigned");
+    assert_eq!(row.1.as_deref(), Some("2026-09-24T01:00:00Z"));
+}
 
-    #[test]
-    fn historical_reconciliation_records_decision_transition() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE workflow_runs(
+#[test]
+fn historical_reconciliation_records_decision_transition() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE workflow_runs(
                run_id INTEGER PRIMARY KEY,
                repository_id INTEGER NOT NULL,
                resolution_status TEXT NOT NULL,
@@ -673,46 +680,58 @@
              INSERT INTO workflow_runs VALUES(500,100,'unassigned',NULL);
              INSERT INTO watch_tracks VALUES(7,'ops');
              INSERT INTO run_evidence(run_id,track_key,signal_type,score,value,created_at)
-               VALUES(500,'ops','workflow_name',50,'CI','2026-09-24T00:00:00Z');"
-        ).unwrap();
+               VALUES(500,'ops','workflow_name',50,'CI','2026-09-24T00:00:00Z');",
+    )
+    .unwrap();
 
-        let resolution = Resolution {
-            status: "assigned".into(),
-            track_id: Some(7),
-            confidence: Some(100),
-            source: Some("run_name".into()),
-            reason: Some("run_name → ops".into()),
-            evidence: vec![evidence("ops", "run_name", 100)],
-        };
-        persist_resolution_with_trigger(
-            &conn,
-            500,
-            &resolution,
-            "2026-09-24T02:00:00Z",
-            Some("historical_reconcile"),
-        ).unwrap();
+    let resolution = Resolution {
+        status: "assigned".into(),
+        track_id: Some(7),
+        confidence: Some(100),
+        source: Some("run_name".into()),
+        reason: Some("run_name → ops".into()),
+        evidence: vec![evidence("ops", "run_name", 100)],
+    };
+    persist_resolution_with_trigger(
+        &conn,
+        500,
+        &resolution,
+        "2026-09-24T02:00:00Z",
+        Some("historical_reconcile"),
+    )
+    .unwrap();
 
-        let row: (String, String, Option<String>, Option<String>, String) = conn.query_row(
+    let row: (String, String, Option<String>, Option<String>, String) = conn
+        .query_row(
             "SELECT trigger,from_status,to_track_key,to_source,evidence_json
              FROM resolution_reconciliation_audit
              WHERE run_id=500",
             [],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
-        ).unwrap();
-        assert_eq!(row.0, "historical_reconcile");
-        assert_eq!(row.1, "unassigned");
-        assert_eq!(row.2.as_deref(), Some("ops"));
-        assert_eq!(row.3.as_deref(), Some("run_name"));
-        let evidence: Vec<Evidence> = serde_json::from_str(&row.4).unwrap();
-        assert_eq!(evidence.len(), 1);
-        assert_eq!(evidence[0].score, 100);
-    }
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row.0, "historical_reconcile");
+    assert_eq!(row.1, "unassigned");
+    assert_eq!(row.2.as_deref(), Some("ops"));
+    assert_eq!(row.3.as_deref(), Some("run_name"));
+    let evidence: Vec<Evidence> = serde_json::from_str(&row.4).unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].score, 100);
+}
 
-    #[test]
-    fn historical_reconciliation_does_not_log_unchanged_decision() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE workflow_runs(
+#[test]
+fn historical_reconciliation_does_not_log_unchanged_decision() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE workflow_runs(
                run_id INTEGER PRIMARY KEY,
                repository_id INTEGER NOT NULL,
                resolution_status TEXT NOT NULL,
@@ -758,38 +777,42 @@
                evidence_json TEXT NOT NULL,
                reconciled_at TEXT NOT NULL
              );
-             INSERT INTO workflow_runs VALUES(501,100,'unassigned',NULL);"
-        ).unwrap();
+             INSERT INTO workflow_runs VALUES(501,100,'unassigned',NULL);",
+    )
+    .unwrap();
 
-        let resolution = Resolution {
-            status: "unassigned".into(),
-            track_id: None,
-            confidence: Some(40),
-            source: None,
-            reason: Some("확정 가능한 Track Key 근거가 없습니다.".into()),
-            evidence: vec![evidence("ops", "workflow_name", 40)],
-        };
-        persist_resolution_with_trigger(
-            &conn,
-            501,
-            &resolution,
-            "2026-09-24T02:00:00Z",
-            Some("historical_reconcile"),
-        ).unwrap();
+    let resolution = Resolution {
+        status: "unassigned".into(),
+        track_id: None,
+        confidence: Some(40),
+        source: None,
+        reason: Some("확정 가능한 Track Key 근거가 없습니다.".into()),
+        evidence: vec![evidence("ops", "workflow_name", 40)],
+    };
+    persist_resolution_with_trigger(
+        &conn,
+        501,
+        &resolution,
+        "2026-09-24T02:00:00Z",
+        Some("historical_reconcile"),
+    )
+    .unwrap();
 
-        let count: i64 = conn.query_row(
+    let count: i64 = conn
+        .query_row(
             "SELECT COUNT(*) FROM resolution_reconciliation_audit WHERE run_id=501",
             [],
             |row| row.get(0),
-        ).unwrap();
-        assert_eq!(count, 0);
-    }
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+}
 
-    #[test]
-    fn historical_reconciliation_rotates_unresolved_runs_without_manual_starvation() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE workflow_runs(
+#[test]
+fn historical_reconciliation_rotates_unresolved_runs_without_manual_starvation() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE workflow_runs(
                run_id INTEGER PRIMARY KEY,
                repository_id INTEGER NOT NULL,
                workflow_id INTEGER NOT NULL,
@@ -814,31 +837,33 @@
              CREATE TABLE run_assignments(
                run_id INTEGER PRIMARY KEY,
                manual INTEGER NOT NULL
-             );"
-        ).unwrap();
+             );",
+    )
+    .unwrap();
 
-        for id in 1_i64..=15 {
-            conn.execute(
-                "INSERT INTO workflow_runs(
+    for id in 1_i64..=15 {
+        conn.execute(
+            "INSERT INTO workflow_runs(
                    run_id,repository_id,workflow_id,workflow_name,workflow_path,
                    display_title,event,head_branch,head_sha,run_number,run_attempt,
                    status,conclusion,html_url,created_at,run_started_at,updated_at,
                    ignored,resolution_status,last_resolution_attempt_at
                  ) VALUES(?,100,1,'CI',NULL,'CI','push',NULL,?, ?,1,
                           'completed','success',?, ?,NULL,?,0,'unassigned',NULL)",
-                params![
-                    id,
-                    format!("sha-{id}"),
-                    id,
-                    format!("https://example.invalid/{id}"),
-                    format!("2026-09-{:02}T00:00:00Z", id),
-                    format!("2026-09-{:02}T00:05:00Z", id)
-                ],
-            ).unwrap();
-        }
+            params![
+                id,
+                format!("sha-{id}"),
+                id,
+                format!("https://example.invalid/{id}"),
+                format!("2026-09-{:02}T00:00:00Z", id),
+                format!("2026-09-{:02}T00:05:00Z", id)
+            ],
+        )
+        .unwrap();
+    }
 
-        conn.execute_batch(
-            "INSERT INTO workflow_runs(
+    conn.execute_batch(
+        "INSERT INTO workflow_runs(
                run_id,repository_id,workflow_id,workflow_name,workflow_path,
                display_title,event,head_branch,head_sha,run_number,run_attempt,
                status,conclusion,html_url,created_at,run_started_at,updated_at,
@@ -847,33 +872,35 @@
                       'completed','success','https://example.invalid/99',
                       '2026-09-30T00:00:00Z',NULL,'2026-09-30T00:05:00Z',
                       0,'unassigned',NULL);
-             INSERT INTO run_assignments(run_id,manual) VALUES(99,1);"
-        ).unwrap();
+             INSERT INTO run_assignments(run_id,manual) VALUES(99,1);",
+    )
+    .unwrap();
 
-        let first = load_stored_unresolved_runs(&conn, 100, 12).unwrap();
-        assert_eq!(first.len(), 12);
-        assert!(!first.iter().any(|run| run.id == 99));
+    let first = load_stored_unresolved_runs(&conn, 100, 12).unwrap();
+    assert_eq!(first.len(), 12);
+    assert!(!first.iter().any(|run| run.id == 99));
 
-        for run in &first {
-            conn.execute(
-                "UPDATE workflow_runs
+    for run in &first {
+        conn.execute(
+            "UPDATE workflow_runs
                  SET last_resolution_attempt_at='2026-09-24T01:00:00Z'
                  WHERE run_id=?",
-                params![run.id],
-            ).unwrap();
-        }
-
-        let second = load_stored_unresolved_runs(&conn, 100, 12).unwrap();
-        let first_three: Vec<i64> = second.iter().take(3).map(|run| run.id).collect();
-        assert_eq!(first_three, vec![3, 2, 1]);
-        assert!(!second.iter().any(|run| run.id == 99));
+            params![run.id],
+        )
+        .unwrap();
     }
 
-    #[test]
-    fn project_move_archives_manual_assignment_before_invalidating_it() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE monitored_repositories(
+    let second = load_stored_unresolved_runs(&conn, 100, 12).unwrap();
+    let first_three: Vec<i64> = second.iter().take(3).map(|run| run.id).collect();
+    assert_eq!(first_three, vec![3, 2, 1]);
+    assert!(!second.iter().any(|run| run.id == 99));
+}
+
+#[test]
+fn project_move_archives_manual_assignment_before_invalidating_it() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE monitored_repositories(
                id INTEGER PRIMARY KEY,
                project_id INTEGER,
                repo TEXT NOT NULL
@@ -929,56 +956,60 @@
                VALUES(500,100,'assigned',0);
              INSERT INTO run_assignments(
                run_id,track_id,confidence,source,reason,manual,assigned_at
-             ) VALUES(500,10,100,'manual','사용자 수동 귀속',1,'2026-09-23T00:00:00Z');"
-        ).unwrap();
+             ) VALUES(500,10,100,'manual','사용자 수동 귀속',1,'2026-09-23T00:00:00Z');",
+    )
+    .unwrap();
 
-        invalidate_cross_project_assignments(
-            &conn,
-            100,
-            Some(1),
-            2,
-            "visualy-project-scope-v1",
-        ).unwrap();
+    invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
+        .unwrap();
 
-        let remaining: i64 = conn.query_row(
+    let remaining: i64 = conn
+        .query_row(
             "SELECT COUNT(*) FROM run_assignments WHERE run_id=500",
             [],
             |row| row.get(0),
-        ).unwrap();
-        assert_eq!(remaining, 0);
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
 
-        let archived: (i64, String, String, i64, i64) = conn.query_row(
+    let archived: (i64, String, String, i64, i64) = conn
+        .query_row(
             "SELECT manual,track_key,reason,from_repository_project_id,to_repository_project_id
              FROM assignment_migration_audit
              WHERE migration_key='visualy-project-scope-v1' AND run_id=500",
             [],
-            |row| Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            )),
-        ).unwrap();
-        assert_eq!(archived.0, 1);
-        assert_eq!(archived.1, "old-track");
-        assert_eq!(archived.2, "사용자 수동 귀속");
-        assert_eq!(archived.3, 1);
-        assert_eq!(archived.4, 2);
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(archived.0, 1);
+    assert_eq!(archived.1, "old-track");
+    assert_eq!(archived.2, "사용자 수동 귀속");
+    assert_eq!(archived.3, 1);
+    assert_eq!(archived.4, 2);
 
-        let status: String = conn.query_row(
+    let status: String = conn
+        .query_row(
             "SELECT resolution_status FROM workflow_runs WHERE run_id=500",
             [],
             |row| row.get(0),
-        ).unwrap();
-        assert_eq!(status, "unassigned");
-    }
+        )
+        .unwrap();
+    assert_eq!(status, "unassigned");
+}
 
-    #[test]
-    fn project_move_audit_is_idempotent_and_keeps_same_project_manual_assignment() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE monitored_repositories(
+#[test]
+fn project_move_audit_is_idempotent_and_keeps_same_project_manual_assignment() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE monitored_repositories(
                id INTEGER PRIMARY KEY,
                project_id INTEGER,
                repo TEXT NOT NULL
@@ -1036,91 +1067,88 @@
              INSERT INTO run_assignments(
                run_id,track_id,confidence,source,reason,manual,assigned_at
              ) VALUES(500,10,90,'branch','old automatic',0,'2026-09-23T00:00:00Z'),
-                     (600,20,100,'manual','valid visualy manual',1,'2026-09-23T00:00:00Z');"
-        ).unwrap();
+                     (600,20,100,'manual','valid visualy manual',1,'2026-09-23T00:00:00Z');",
+    )
+    .unwrap();
 
-        invalidate_cross_project_assignments(
-            &conn,
-            100,
-            Some(1),
-            2,
-            "visualy-project-scope-v1",
-        ).unwrap();
-        invalidate_cross_project_assignments(
-            &conn,
-            100,
-            Some(1),
-            2,
-            "visualy-project-scope-v1",
-        ).unwrap();
+    invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
+        .unwrap();
+    invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
+        .unwrap();
 
-        let audit_count: i64 = conn.query_row(
+    let audit_count: i64 = conn
+        .query_row(
             "SELECT COUNT(*) FROM assignment_migration_audit",
             [],
             |row| row.get(0),
-        ).unwrap();
-        assert_eq!(audit_count, 1);
+        )
+        .unwrap();
+    assert_eq!(audit_count, 1);
 
-        let valid_manual_count: i64 = conn.query_row(
+    let valid_manual_count: i64 = conn
+        .query_row(
             "SELECT COUNT(*) FROM run_assignments
              WHERE run_id=600 AND track_id=20 AND manual=1",
             [],
             |row| row.get(0),
-        ).unwrap();
-        assert_eq!(valid_manual_count, 1);
+        )
+        .unwrap();
+    assert_eq!(valid_manual_count, 1);
 
-        let invalid_auto_count: i64 = conn.query_row(
+    let invalid_auto_count: i64 = conn
+        .query_row(
             "SELECT COUNT(*) FROM run_assignments WHERE run_id=500",
             [],
             |row| row.get(0),
-        ).unwrap();
-        assert_eq!(invalid_auto_count, 0);
-    }
+        )
+        .unwrap();
+    assert_eq!(invalid_auto_count, 0);
+}
 
-    #[test]
-    fn myeongha_repository_scoped_project_wide_rules_preserve_manual_and_repo_isolation() {
-        let path = legacy_v02_db_path("myeongha-repository-project-wide");
-        seed_legacy_v02_database(&path);
-        init_db(&path).unwrap();
+#[test]
+fn myeongha_repository_scoped_project_wide_rules_preserve_manual_and_repo_isolation() {
+    let path = legacy_v02_db_path("myeongha-repository-project-wide");
+    seed_legacy_v02_database(&path);
+    init_db(&path).unwrap();
 
-        let conn = Connection::open(&path).unwrap();
-        let myeongha_repository_id: i64 = conn
-            .query_row(
-                "SELECT id FROM monitored_repositories
+    let conn = Connection::open(&path).unwrap();
+    let myeongha_repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories
                  WHERE repo='gycha0109-beep/MyeongHa'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let saju_repository_id: i64 = conn
-            .query_row(
-                "SELECT id FROM monitored_repositories
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let saju_repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories
                  WHERE repo='gycha0109-beep/Saju'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let project_id: i64 = conn
-            .query_row(
-                "SELECT project_id FROM monitored_repositories WHERE id=?",
-                params![myeongha_repository_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let ops_track_id: i64 = conn
-            .query_row(
-                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='ops'",
-                params![project_id],
-                |row| row.get(0),
-            )
-            .unwrap();
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let project_id: i64 = conn
+        .query_row(
+            "SELECT project_id FROM monitored_repositories WHERE id=?",
+            params![myeongha_repository_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let ops_track_id: i64 = conn
+        .query_row(
+            "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='ops'",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
 
-        for (run_id, repository_id, manual) in [
-            (9_100_001_i64, myeongha_repository_id, 0_i64),
-            (9_100_002_i64, myeongha_repository_id, 1_i64),
-            (9_100_003_i64, saju_repository_id, 0_i64),
-        ] {
-            conn.execute(
+    for (run_id, repository_id, manual) in [
+        (9_100_001_i64, myeongha_repository_id, 0_i64),
+        (9_100_002_i64, myeongha_repository_id, 1_i64),
+        (9_100_003_i64, saju_repository_id, 0_i64),
+    ] {
+        conn.execute(
                 "INSERT INTO workflow_runs(
                    run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
                    head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
@@ -1151,28 +1179,28 @@
                 ],
             )
             .unwrap();
-            conn.execute(
-                "INSERT INTO run_assignments(
+        conn.execute(
+            "INSERT INTO run_assignments(
                    run_id,track_id,confidence,source,reason,manual,assigned_at
                  ) VALUES(?,?,?,?,?,?,?)",
-                params![
-                    run_id,
-                    ops_track_id,
-                    if manual == 1 { 100_i64 } else { 90_i64 },
-                    if manual == 1 { "manual" } else { "branch" },
-                    "fixture",
-                    manual,
-                    "2026-09-24T01:02:00Z",
-                ],
-            )
-            .unwrap();
-        }
+            params![
+                run_id,
+                ops_track_id,
+                if manual == 1 { 100_i64 } else { 90_i64 },
+                if manual == 1 { "manual" } else { "branch" },
+                "fixture",
+                manual,
+                "2026-09-24T01:02:00Z",
+            ],
+        )
+        .unwrap();
+    }
 
-        for (run_id, repository_id) in [
-            (9_100_004_i64, myeongha_repository_id),
-            (9_100_005_i64, saju_repository_id),
-        ] {
-            conn.execute(
+    for (run_id, repository_id) in [
+        (9_100_004_i64, myeongha_repository_id),
+        (9_100_005_i64, saju_repository_id),
+    ] {
+        conn.execute(
                 "INSERT INTO workflow_runs(
                    run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
                    head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
@@ -1203,26 +1231,26 @@
                 ],
             )
             .unwrap();
-            conn.execute(
-                "INSERT INTO run_assignments(
+        conn.execute(
+            "INSERT INTO run_assignments(
                    run_id,track_id,confidence,source,reason,manual,assigned_at
                  ) VALUES(?,?,?,?,?,0,?)",
-                params![
-                    run_id,
-                    ops_track_id,
-                    90_i64,
-                    "branch",
-                    "fixture",
-                    "2026-09-24T01:02:00Z",
-                ],
-            )
-            .unwrap();
-        }
-        for (run_id, repository_id) in [
-            (9_100_006_i64, myeongha_repository_id),
-            (9_100_007_i64, saju_repository_id),
-        ] {
-            conn.execute(
+            params![
+                run_id,
+                ops_track_id,
+                90_i64,
+                "branch",
+                "fixture",
+                "2026-09-24T01:02:00Z",
+            ],
+        )
+        .unwrap();
+    }
+    for (run_id, repository_id) in [
+        (9_100_006_i64, myeongha_repository_id),
+        (9_100_007_i64, saju_repository_id),
+    ] {
+        conn.execute(
                 "INSERT INTO workflow_runs(
                    run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
                    head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
@@ -1253,29 +1281,29 @@
                 ],
             )
             .unwrap();
-            conn.execute(
-                "INSERT INTO run_assignments(
+        conn.execute(
+            "INSERT INTO run_assignments(
                    run_id,track_id,confidence,source,reason,manual,assigned_at
                  ) VALUES(?,?,?,?,?,0,?)",
-                params![
-                    run_id,
-                    ops_track_id,
-                    90_i64,
-                    "branch",
-                    "fixture",
-                    "2026-09-24T01:02:00Z",
-                ],
-            )
-            .unwrap();
-        }
-        drop(conn);
+            params![
+                run_id,
+                ops_track_id,
+                90_i64,
+                "branch",
+                "fixture",
+                "2026-09-24T01:02:00Z",
+            ],
+        )
+        .unwrap();
+    }
+    drop(conn);
 
-        migrate_project_scope(&Connection::open(&path).unwrap()).unwrap();
+    migrate_project_scope(&Connection::open(&path).unwrap()).unwrap();
 
-        let conn = Connection::open(&path).unwrap();
-        let scoped_rules: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM project_workflow_rules
+    let conn = Connection::open(&path).unwrap();
+    let scoped_rules: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM project_workflow_rules
                  WHERE project_id=? AND repository_id=?
                    AND workflow_name IN (
                      'DB Content Reading Suite',
@@ -1286,255 +1314,256 @@
                      'Web Auth Browser Regression'
                    )
                    AND active=1",
-                params![project_id, myeongha_repository_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(scoped_rules, 6);
+            params![project_id, myeongha_repository_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(scoped_rules, 6);
 
-        let automatic_status: String = conn
-            .query_row(
-                "SELECT resolution_status FROM workflow_runs WHERE run_id=9100001",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let automatic_assignment_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9100001",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(automatic_status, "project");
-        assert_eq!(automatic_assignment_count, 0);
+    let automatic_status: String = conn
+        .query_row(
+            "SELECT resolution_status FROM workflow_runs WHERE run_id=9100001",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let automatic_assignment_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM run_assignments WHERE run_id=9100001",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(automatic_status, "project");
+    assert_eq!(automatic_assignment_count, 0);
 
-        let manual_row: (String, i64) = conn
-            .query_row(
-                "SELECT wr.resolution_status,ra.manual
+    let manual_row: (String, i64) = conn
+        .query_row(
+            "SELECT wr.resolution_status,ra.manual
                  FROM workflow_runs wr
                  JOIN run_assignments ra ON ra.run_id=wr.run_id
                  WHERE wr.run_id=9100002",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(manual_row, ("assigned".into(), 1));
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(manual_row, ("assigned".into(), 1));
 
-        let saju_row: (String, i64) = conn
-            .query_row(
-                "SELECT wr.resolution_status,COUNT(ra.run_id)
+    let saju_row: (String, i64) = conn
+        .query_row(
+            "SELECT wr.resolution_status,COUNT(ra.run_id)
                  FROM workflow_runs wr
                  LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
                  WHERE wr.run_id=9100003
                  GROUP BY wr.run_id,wr.resolution_status",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(saju_row, ("assigned".into(), 1));
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(saju_row, ("assigned".into(), 1));
 
-        let web_browser_status: String = conn
-            .query_row(
-                "SELECT resolution_status FROM workflow_runs WHERE run_id=9100004",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let web_browser_assignment_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9100004",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(web_browser_status, "project");
-        assert_eq!(web_browser_assignment_count, 0);
+    let web_browser_status: String = conn
+        .query_row(
+            "SELECT resolution_status FROM workflow_runs WHERE run_id=9100004",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let web_browser_assignment_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM run_assignments WHERE run_id=9100004",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(web_browser_status, "project");
+    assert_eq!(web_browser_assignment_count, 0);
 
-        let saju_web_browser_row: (String, i64) = conn
-            .query_row(
-                "SELECT wr.resolution_status,COUNT(ra.run_id)
+    let saju_web_browser_row: (String, i64) = conn
+        .query_row(
+            "SELECT wr.resolution_status,COUNT(ra.run_id)
                  FROM workflow_runs wr
                  LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
                  WHERE wr.run_id=9100005
                  GROUP BY wr.run_id,wr.resolution_status",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(saju_web_browser_row, ("assigned".into(), 1));
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(saju_web_browser_row, ("assigned".into(), 1));
 
-        let web_auth_status: String = conn
-            .query_row(
-                "SELECT resolution_status FROM workflow_runs WHERE run_id=9100006",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let web_auth_assignment_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9100006",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(web_auth_status, "project");
-        assert_eq!(web_auth_assignment_count, 0);
+    let web_auth_status: String = conn
+        .query_row(
+            "SELECT resolution_status FROM workflow_runs WHERE run_id=9100006",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let web_auth_assignment_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM run_assignments WHERE run_id=9100006",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(web_auth_status, "project");
+    assert_eq!(web_auth_assignment_count, 0);
 
-        let saju_web_auth_row: (String, i64) = conn
-            .query_row(
-                "SELECT wr.resolution_status,COUNT(ra.run_id)
+    let saju_web_auth_row: (String, i64) = conn
+        .query_row(
+            "SELECT wr.resolution_status,COUNT(ra.run_id)
                  FROM workflow_runs wr
                  LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
                  WHERE wr.run_id=9100007
                  GROUP BY wr.run_id,wr.resolution_status",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(saju_web_auth_row, ("assigned".into(), 1));
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(saju_web_auth_row, ("assigned".into(), 1));
 
-        drop(conn);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
-    }
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
 
-    #[test]
-    fn myeongha_records_production_smoke_is_dynamic_without_forcing_track_assignment() {
-        let path = legacy_v02_db_path("myeongha-records-dynamic");
-        seed_legacy_v02_database(&path);
-        init_db(&path).unwrap();
+#[test]
+fn myeongha_records_production_smoke_is_dynamic_without_forcing_track_assignment() {
+    let path = legacy_v02_db_path("myeongha-records-dynamic");
+    seed_legacy_v02_database(&path);
+    init_db(&path).unwrap();
 
-        let conn = Connection::open(&path).unwrap();
-        let repository_id: i64 = conn
-            .query_row(
-                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/MyeongHa'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let project_id: i64 = conn
-            .query_row(
-                "SELECT project_id FROM monitored_repositories WHERE id=?",
-                params![repository_id],
-                |row| row.get(0),
-            )
-            .unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/MyeongHa'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let project_id: i64 = conn
+        .query_row(
+            "SELECT project_id FROM monitored_repositories WHERE id=?",
+            params![repository_id],
+            |row| row.get(0),
+        )
+        .unwrap();
 
-        let dynamic_rule: (i64, i64) = conn
-            .query_row(
-                "SELECT COUNT(*),MAX(protected) FROM dynamic_workflow_rules
+    let dynamic_rule: (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*),MAX(protected) FROM dynamic_workflow_rules
                  WHERE project_id=? AND repository_id=?
                    AND workflow_name='Production Records Current-Subject Smoke'
                    AND active=1",
-                params![project_id, repository_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(dynamic_rule, (1, 1));
-
-        let project_rule_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM project_workflow_rules
-                 WHERE project_id=? AND workflow_name='Production Records Current-Subject Smoke'
-                   AND active=1",
-                params![project_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(project_rule_count, 0);
-
-        drop(conn);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
-    }
-
-    #[test]
-    fn visualy_repository_responsibility_map_uses_dynamic_rules_and_retires_stale_project_wide_security() {
-        let path = legacy_v02_db_path("visualy-responsibility-map");
-        init_db(&path).unwrap();
-
-        let conn = Connection::open(&path).unwrap();
-        let repository_id: i64 = conn
-            .query_row(
-                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let project_id: i64 = conn
-            .query_row(
-                "SELECT project_id FROM monitored_repositories WHERE id=?",
-                params![repository_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        let project_wide_names: Vec<String> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT workflow_name FROM project_workflow_rules
-                     WHERE project_id=? AND active=1
-                     ORDER BY workflow_name",
-                )
-                .unwrap();
-            let rows = stmt
-                .query_map(params![project_id], |row| row.get(0))
-                .unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        assert_eq!(
-            project_wide_names,
-            vec![
-                "BEJEWELY Current Main Health".to_string(),
-                "PIE Prospective Shadow".to_string(),
-            ]
-        );
-
-        let dynamic_names: Vec<(String, i64)> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT workflow_name,protected FROM dynamic_workflow_rules
-                     WHERE project_id=? AND repository_id=? AND active=1
-                     ORDER BY workflow_name",
-                )
-                .unwrap();
-            let rows = stmt
-                .query_map(params![project_id, repository_id], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })
-                .unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        assert_eq!(dynamic_names.len(), 12);
-        assert!(dynamic_names.iter().all(|(_, protected)| *protected == 1));
-        for expected in [
-            "Admin - Access Foundation",
-            "Admin - Product Current Main Integration",
-            "Product Offer Runtime - DATA-OFFER17 Controlled RPC Diagnostic",
-            "Product Data Pipeline - Hwahae Provenance Non-Main PR Guard",
-            "Product Data Pipeline - Identity Key Repair Confirm",
-            "Product Data Pipeline - Product Offers",
-            "Product Data Pipeline - Source Bindings",
-            "BEJEWELY Security Boundary",
-            "Recommendation Admission - G3A PF Authority Read",
-            "BEJEWELY Supply Chain Security",
-            "BEJEWELY AI Provider Runtime",
-            "BEJEWELY Database Integration Authority",
-        ] {
-            assert!(dynamic_names.iter().any(|(name, _)| name == expected));
-        }
-
-        conn.execute(
-            "INSERT INTO project_workflow_rules(
-               project_id,repository_id,workflow_name,active,created_at
-             ) VALUES(?,NULL,'BEJEWELY Security Boundary',1,'2026-09-24T00:00:00Z')",
-            params![project_id],
+            params![project_id, repository_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-        conn.execute(
+    assert_eq!(dynamic_rule, (1, 1));
+
+    let project_rule_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM project_workflow_rules
+                 WHERE project_id=? AND workflow_name='Production Records Current-Subject Smoke'
+                   AND active=1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(project_rule_count, 0);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
+fn visualy_repository_responsibility_map_uses_dynamic_rules_and_retires_stale_project_wide_security(
+) {
+    let path = legacy_v02_db_path("visualy-responsibility-map");
+    init_db(&path).unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    let repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let project_id: i64 = conn
+        .query_row(
+            "SELECT project_id FROM monitored_repositories WHERE id=?",
+            params![repository_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let project_wide_names: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT workflow_name FROM project_workflow_rules
+                     WHERE project_id=? AND active=1
+                     ORDER BY workflow_name",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map(params![project_id], |row| row.get(0))
+            .unwrap();
+        rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    assert_eq!(
+        project_wide_names,
+        vec![
+            "BEJEWELY Current Main Health".to_string(),
+            "PIE Prospective Shadow".to_string(),
+        ]
+    );
+
+    let dynamic_names: Vec<(String, i64)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT workflow_name,protected FROM dynamic_workflow_rules
+                     WHERE project_id=? AND repository_id=? AND active=1
+                     ORDER BY workflow_name",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map(params![project_id, repository_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    assert_eq!(dynamic_names.len(), 12);
+    assert!(dynamic_names.iter().all(|(_, protected)| *protected == 1));
+    for expected in [
+        "Admin - Access Foundation",
+        "Admin - Product Current Main Integration",
+        "Product Offer Runtime - DATA-OFFER17 Controlled RPC Diagnostic",
+        "Product Data Pipeline - Hwahae Provenance Non-Main PR Guard",
+        "Product Data Pipeline - Identity Key Repair Confirm",
+        "Product Data Pipeline - Product Offers",
+        "Product Data Pipeline - Source Bindings",
+        "BEJEWELY Security Boundary",
+        "Recommendation Admission - G3A PF Authority Read",
+        "BEJEWELY Supply Chain Security",
+        "BEJEWELY AI Provider Runtime",
+        "BEJEWELY Database Integration Authority",
+    ] {
+        assert!(dynamic_names.iter().any(|(name, _)| name == expected));
+    }
+
+    conn.execute(
+        "INSERT INTO project_workflow_rules(
+               project_id,repository_id,workflow_name,active,created_at
+             ) VALUES(?,NULL,'BEJEWELY Security Boundary',1,'2026-09-24T00:00:00Z')",
+        params![project_id],
+    )
+    .unwrap();
+    conn.execute(
             "INSERT INTO workflow_runs(
                run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
                head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
@@ -1565,12 +1594,12 @@
             ],
         )
         .unwrap();
-        drop(conn);
+    drop(conn);
 
-        seed_bejewely_project_scope(&Connection::open(&path).unwrap()).unwrap();
+    seed_bejewely_project_scope(&Connection::open(&path).unwrap()).unwrap();
 
-        let conn = Connection::open(&path).unwrap();
-        let stale_rule_count: i64 = conn
+    let conn = Connection::open(&path).unwrap();
+    let stale_rule_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM project_workflow_rules
                  WHERE project_id=?
@@ -1579,86 +1608,86 @@
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(stale_rule_count, 0);
+    assert_eq!(stale_rule_count, 0);
 
-        let corrected_status: String = conn
-            .query_row(
-                "SELECT resolution_status FROM workflow_runs WHERE run_id=9200001",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(corrected_status, "unassigned");
+    let corrected_status: String = conn
+        .query_row(
+            "SELECT resolution_status FROM workflow_runs WHERE run_id=9200001",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(corrected_status, "unassigned");
 
-        let mesh_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dynamic_workflow_rules
+    let mesh_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dynamic_workflow_rules
                  WHERE project_id=? AND repository_id=? AND active=1",
-                params![project_id, repository_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(mesh_count, 12);
+            params![project_id, repository_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(mesh_count, 12);
 
-        drop(conn);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
-    }
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
 
-    #[test]
-    fn dynamic_workflow_rule_declares_responsibility_without_forcing_track_ownership() {
-        let path = legacy_v02_db_path("dynamic-workflow-responsibility");
-        seed_legacy_v02_database(&path);
-        init_db(&path).unwrap();
+#[test]
+fn dynamic_workflow_rule_declares_responsibility_without_forcing_track_ownership() {
+    let path = legacy_v02_db_path("dynamic-workflow-responsibility");
+    seed_legacy_v02_database(&path);
+    init_db(&path).unwrap();
 
-        let conn = Connection::open(&path).unwrap();
-        let repository_id: i64 = conn
-            .query_row(
-                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/Saju'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let project_id: i64 = conn
-            .query_row(
-                "SELECT project_id FROM monitored_repositories WHERE id=?",
-                params![repository_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let track_id: i64 = conn
-            .query_row(
-                "SELECT id FROM watch_tracks WHERE project_id=? AND active=1 ORDER BY id LIMIT 1",
-                params![project_id],
-                |row| row.get(0),
-            )
-            .unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/Saju'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let project_id: i64 = conn
+        .query_row(
+            "SELECT project_id FROM monitored_repositories WHERE id=?",
+            params![repository_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let track_id: i64 = conn
+        .query_row(
+            "SELECT id FROM watch_tracks WHERE project_id=? AND active=1 ORDER BY id LIMIT 1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
 
-        let dynamic_rule: (i64, i64) = conn
-            .query_row(
-                "SELECT COUNT(*),MAX(protected) FROM dynamic_workflow_rules
+    let dynamic_rule: (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*),MAX(protected) FROM dynamic_workflow_rules
                  WHERE project_id=? AND repository_id=?
                    AND workflow_name='MESH6J Manual Browser Capture Surface CI' AND active=1",
-                params![project_id, repository_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(dynamic_rule, (1, 1));
+            params![project_id, repository_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(dynamic_rule, (1, 1));
 
-        let listed_rules = list_dynamic_workflow_rules(&conn).unwrap();
-        let mesh_rule = listed_rules
-            .iter()
-            .find(|rule| {
-                rule.project_id == project_id
-                    && rule.repository_id == Some(repository_id)
-                    && rule.workflow_name == "MESH6J Manual Browser Capture Surface CI"
-            })
-            .unwrap();
-        assert!(mesh_rule.active);
-        assert!(mesh_rule.protected);
+    let listed_rules = list_dynamic_workflow_rules(&conn).unwrap();
+    let mesh_rule = listed_rules
+        .iter()
+        .find(|rule| {
+            rule.project_id == project_id
+                && rule.repository_id == Some(repository_id)
+                && rule.workflow_name == "MESH6J Manual Browser Capture Surface CI"
+        })
+        .unwrap();
+    assert!(mesh_rule.active);
+    assert!(mesh_rule.protected);
 
-        conn.execute(
+    conn.execute(
             "INSERT INTO workflow_runs(
                run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
                head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
@@ -1689,95 +1718,95 @@
             ],
         )
         .unwrap();
-        conn.execute(
-            "INSERT INTO run_assignments(
+    conn.execute(
+        "INSERT INTO run_assignments(
                run_id,track_id,confidence,source,reason,manual,assigned_at
              ) VALUES(?,?,?,?,?,0,?)",
-            params![
-                9_220_001_i64,
-                track_id,
-                98_i64,
-                "pr_marker",
-                "PR #1407",
-                "2026-09-24T03:02:00Z",
-            ],
-        )
+        params![
+            9_220_001_i64,
+            track_id,
+            98_i64,
+            "pr_marker",
+            "PR #1407",
+            "2026-09-24T03:02:00Z",
+        ],
+    )
+    .unwrap();
+
+    let rows = producer_contract_runs(&conn, 50).unwrap();
+    let mesh = rows
+        .iter()
+        .find(|item| item.run.id == 9_220_001_i64)
         .unwrap();
+    assert!(mesh.contract_compliant);
+    assert!(mesh.responsibility_declared);
+    assert_eq!(mesh.bucket, "pr_marker");
+    assert_eq!(mesh.run.resolution_status, "assigned");
 
-        let rows = producer_contract_runs(&conn, 50).unwrap();
-        let mesh = rows
-            .iter()
-            .find(|item| item.run.id == 9_220_001_i64)
-            .unwrap();
-        assert!(mesh.contract_compliant);
-        assert!(mesh.responsibility_declared);
-        assert_eq!(mesh.bucket, "pr_marker");
-        assert_eq!(mesh.run.resolution_status, "assigned");
-
-        conn.execute(
-            "UPDATE workflow_runs
+    conn.execute(
+        "UPDATE workflow_runs
              SET workflow_name='New Shared Gate',workflow_id=923
              WHERE run_id=9220001",
+        [],
+    )
+    .unwrap();
+    let rows = producer_contract_runs(&conn, 50).unwrap();
+    let undeclared = rows
+        .iter()
+        .find(|item| item.run.id == 9_220_001_i64)
+        .unwrap();
+    assert!(undeclared.contract_compliant);
+    assert!(!undeclared.responsibility_declared);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
+fn producer_contract_stats_classify_recent_runs_without_overlapping_buckets() {
+    let path = legacy_v02_db_path("producer-contract");
+    init_db(&path).unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
+    let repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
             [],
+            |row| row.get(0),
         )
         .unwrap();
-        let rows = producer_contract_runs(&conn, 50).unwrap();
-        let undeclared = rows
-            .iter()
-            .find(|item| item.run.id == 9_220_001_i64)
-            .unwrap();
-        assert!(undeclared.contract_compliant);
-        assert!(!undeclared.responsibility_declared);
-
-        drop(conn);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
-    }
-
-    #[test]
-    fn producer_contract_stats_classify_recent_runs_without_overlapping_buckets() {
-        let path = legacy_v02_db_path("producer-contract");
-        init_db(&path).unwrap();
-
-        let conn = Connection::open(&path).unwrap();
-        conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
-        let repository_id: i64 = conn
-            .query_row(
-                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let project_id: i64 = conn
-            .query_row(
-                "SELECT project_id FROM monitored_repositories WHERE id=?",
-                params![repository_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let track_id: i64 = conn
-            .query_row(
-                "SELECT id FROM watch_tracks
+    let project_id: i64 = conn
+        .query_row(
+            "SELECT project_id FROM monitored_repositories WHERE id=?",
+            params![repository_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let track_id: i64 = conn
+        .query_row(
+            "SELECT id FROM watch_tracks
                  WHERE project_id=? AND track_key='ops'",
-                params![project_id],
-                |row| row.get(0),
-            )
-            .unwrap();
+            params![project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
 
-        for (offset, status) in [
-            (1_i64, "project"),
-            (2, "assigned"),
-            (3, "assigned"),
-            (4, "assigned"),
-            (5, "assigned"),
-            (6, "assigned"),
-            (7, "assigned"),
-            (8, "unassigned"),
-            (9, "assigned"),
-        ] {
-            let run_id = 9_100_000 + offset;
-            conn.execute(
+    for (offset, status) in [
+        (1_i64, "project"),
+        (2, "assigned"),
+        (3, "assigned"),
+        (4, "assigned"),
+        (5, "assigned"),
+        (6, "assigned"),
+        (7, "assigned"),
+        (8, "unassigned"),
+        (9, "assigned"),
+    ] {
+        let run_id = 9_100_000 + offset;
+        conn.execute(
                 "INSERT INTO workflow_runs(
                    run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
                    head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
@@ -1808,145 +1837,150 @@
                 ],
             )
             .unwrap();
-        }
-
-        for (offset, source, manual) in [
-            (2_i64, "run_name", 0_i64),
-            (3, "pr_marker", 0),
-            (4, "branch", 0),
-            (5, "inference", 0),
-            (6, "manual", 1),
-            (7, "track_alias", 0),
-            (9, "commit_marker", 0),
-        ] {
-            conn.execute(
-                "INSERT INTO run_assignments(
-                   run_id,track_id,confidence,source,reason,manual,assigned_at
-                 ) VALUES(?,?,?,?,?,?,?)",
-                params![
-                    9_100_000 + offset,
-                    track_id,
-                    100_i64,
-                    source,
-                    "fixture",
-                    manual,
-                    "2026-09-24T00:10:00Z",
-                ],
-            )
-            .unwrap();
-        }
-
-        let stats = producer_contract_stats(&conn, 50).unwrap();
-        let row = stats
-            .iter()
-            .find(|item| item.repository_id == repository_id)
-            .unwrap();
-        assert_eq!(row.sampled_runs, 8);
-        assert_eq!(row.project_wide_runs, 1);
-        assert_eq!(row.explicit_runs, 3);
-        assert_eq!(row.run_name_runs, 1);
-        assert_eq!(row.pr_marker_runs, 1);
-        assert_eq!(row.commit_marker_runs, 0);
-        assert_eq!(row.branch_runs, 1);
-        assert_eq!(row.heuristic_runs, 1);
-        assert_eq!(row.manual_runs, 1);
-        assert_eq!(row.compatibility_runs, 1);
-        assert_eq!(row.unresolved_runs, 1);
-        assert_eq!(row.other_runs, 0);
-        assert_eq!(
-            row.project_wide_runs
-                + row.explicit_runs
-                + row.heuristic_runs
-                + row.manual_runs
-                + row.compatibility_runs
-                + row.unresolved_runs
-                + row.other_runs,
-            row.sampled_runs
-        );
-
-        let contract_runs = producer_contract_runs(&conn, 50).unwrap();
-        let repository_runs: Vec<&ProducerContractRun> = contract_runs
-            .iter()
-            .filter(|item| item.run.repository_id == repository_id)
-            .collect();
-        assert_eq!(repository_runs.len(), 8);
-        assert_eq!(
-            repository_runs.iter().filter(|item| item.contract_compliant).count(),
-            4
-        );
-        assert!(repository_runs.iter().all(|item| item.is_current_producer_run));
-        let drift_buckets: Vec<&str> = repository_runs
-            .iter()
-            .filter(|item| !item.contract_compliant)
-            .map(|item| item.bucket.as_str())
-            .collect();
-        assert!(drift_buckets.contains(&"inference"));
-        assert!(drift_buckets.contains(&"manual"));
-        assert!(drift_buckets.contains(&"track_alias"));
-        assert!(drift_buckets.contains(&"unassigned"));
-        assert!(!repository_runs.iter().any(|item| item.run.id == 9_100_009));
-
-        drop(conn);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
-    #[test]
-    fn producer_contract_runs_separate_current_from_historical_drift_by_workflow_identity() {
-        let path = legacy_v02_db_path("producer-contract-current");
-        init_db(&path).unwrap();
+    for (offset, source, manual) in [
+        (2_i64, "run_name", 0_i64),
+        (3, "pr_marker", 0),
+        (4, "branch", 0),
+        (5, "inference", 0),
+        (6, "manual", 1),
+        (7, "track_alias", 0),
+        (9, "commit_marker", 0),
+    ] {
+        conn.execute(
+            "INSERT INTO run_assignments(
+                   run_id,track_id,confidence,source,reason,manual,assigned_at
+                 ) VALUES(?,?,?,?,?,?,?)",
+            params![
+                9_100_000 + offset,
+                track_id,
+                100_i64,
+                source,
+                "fixture",
+                manual,
+                "2026-09-24T00:10:00Z",
+            ],
+        )
+        .unwrap();
+    }
 
-        let conn = Connection::open(&path).unwrap();
-        conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
+    let stats = producer_contract_stats(&conn, 50).unwrap();
+    let row = stats
+        .iter()
+        .find(|item| item.repository_id == repository_id)
+        .unwrap();
+    assert_eq!(row.sampled_runs, 8);
+    assert_eq!(row.project_wide_runs, 1);
+    assert_eq!(row.explicit_runs, 3);
+    assert_eq!(row.run_name_runs, 1);
+    assert_eq!(row.pr_marker_runs, 1);
+    assert_eq!(row.commit_marker_runs, 0);
+    assert_eq!(row.branch_runs, 1);
+    assert_eq!(row.heuristic_runs, 1);
+    assert_eq!(row.manual_runs, 1);
+    assert_eq!(row.compatibility_runs, 1);
+    assert_eq!(row.unresolved_runs, 1);
+    assert_eq!(row.other_runs, 0);
+    assert_eq!(
+        row.project_wide_runs
+            + row.explicit_runs
+            + row.heuristic_runs
+            + row.manual_runs
+            + row.compatibility_runs
+            + row.unresolved_runs
+            + row.other_runs,
+        row.sampled_runs
+    );
 
-        let repository_id: i64 = conn
-            .query_row(
-                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let project_id: i64 = conn
-            .query_row(
-                "SELECT project_id FROM monitored_repositories WHERE id=?",
-                params![repository_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let track_id: i64 = conn
-            .query_row(
-                "SELECT id FROM watch_tracks
+    let contract_runs = producer_contract_runs(&conn, 50).unwrap();
+    let repository_runs: Vec<&ProducerContractRun> = contract_runs
+        .iter()
+        .filter(|item| item.run.repository_id == repository_id)
+        .collect();
+    assert_eq!(repository_runs.len(), 8);
+    assert_eq!(
+        repository_runs
+            .iter()
+            .filter(|item| item.contract_compliant)
+            .count(),
+        4
+    );
+    assert!(repository_runs
+        .iter()
+        .all(|item| item.is_current_producer_run));
+    let drift_buckets: Vec<&str> = repository_runs
+        .iter()
+        .filter(|item| !item.contract_compliant)
+        .map(|item| item.bucket.as_str())
+        .collect();
+    assert!(drift_buckets.contains(&"inference"));
+    assert!(drift_buckets.contains(&"manual"));
+    assert!(drift_buckets.contains(&"track_alias"));
+    assert!(drift_buckets.contains(&"unassigned"));
+    assert!(!repository_runs.iter().any(|item| item.run.id == 9_100_009));
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
+fn producer_contract_runs_separate_current_from_historical_drift_by_workflow_identity() {
+    let path = legacy_v02_db_path("producer-contract-current");
+    init_db(&path).unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
+
+    let repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let project_id: i64 = conn
+        .query_row(
+            "SELECT project_id FROM monitored_repositories WHERE id=?",
+            params![repository_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let track_id: i64 = conn
+        .query_row(
+            "SELECT id FROM watch_tracks
                  WHERE project_id=? AND track_key='ops'",
-                params![project_id],
-                |row| row.get(0),
-            )
-            .unwrap();
+            params![project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
 
-        for (run_id, workflow_id, workflow_name, created_at, resolution_status) in [
-            (
-                9_300_001_i64,
-                8_301_i64,
-                "Recovered Producer",
-                "2026-09-24T00:01:00Z",
-                "unassigned",
-            ),
-            (
-                9_300_002_i64,
-                8_301_i64,
-                "Recovered Producer",
-                "2026-09-24T00:02:00Z",
-                "assigned",
-            ),
-            (
-                9_300_003_i64,
-                8_302_i64,
-                "Still Drifting Producer",
-                "2026-09-24T00:03:00Z",
-                "unassigned",
-            ),
-        ] {
-            conn.execute(
+    for (run_id, workflow_id, workflow_name, created_at, resolution_status) in [
+        (
+            9_300_001_i64,
+            8_301_i64,
+            "Recovered Producer",
+            "2026-09-24T00:01:00Z",
+            "unassigned",
+        ),
+        (
+            9_300_002_i64,
+            8_301_i64,
+            "Recovered Producer",
+            "2026-09-24T00:02:00Z",
+            "assigned",
+        ),
+        (
+            9_300_003_i64,
+            8_302_i64,
+            "Still Drifting Producer",
+            "2026-09-24T00:03:00Z",
+            "unassigned",
+        ),
+    ] {
+        conn.execute(
                 "INSERT INTO workflow_runs(
                    run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
                    head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
@@ -1977,273 +2011,284 @@
                 ],
             )
             .unwrap();
-        }
+    }
 
-        conn.execute(
-            "INSERT INTO run_assignments(
+    conn.execute(
+        "INSERT INTO run_assignments(
                run_id,track_id,confidence,source,reason,manual,assigned_at
              ) VALUES(?,?,?,?,?,?,?)",
-            params![
-                9_300_002_i64,
-                track_id,
-                100_i64,
-                "run_name",
-                "fixture",
-                0_i64,
-                "2026-09-24T00:02:30Z",
-            ],
+        params![
+            9_300_002_i64,
+            track_id,
+            100_i64,
+            "run_name",
+            "fixture",
+            0_i64,
+            "2026-09-24T00:02:30Z",
+        ],
+    )
+    .unwrap();
+
+    let contract_runs = producer_contract_runs(&conn, 50).unwrap();
+    let older = contract_runs
+        .iter()
+        .find(|item| item.run.id == 9_300_001)
+        .unwrap();
+    let recovered = contract_runs
+        .iter()
+        .find(|item| item.run.id == 9_300_002)
+        .unwrap();
+    let active_drift = contract_runs
+        .iter()
+        .find(|item| item.run.id == 9_300_003)
+        .unwrap();
+
+    assert!(!older.contract_compliant);
+    assert!(!older.is_current_producer_run);
+
+    assert!(recovered.contract_compliant);
+    assert!(recovered.is_current_producer_run);
+
+    assert!(!active_drift.contract_compliant);
+    assert!(active_drift.is_current_producer_run);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
+fn legacy_v02_database_migrates_end_to_end_without_silent_data_loss() {
+    let path = legacy_v02_db_path("v02-e2e");
+    seed_legacy_v02_database(&path);
+
+    init_db(&path).unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
+
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+
+    let foreign_key_violations: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(foreign_key_violations, 0);
+
+    let run_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM workflow_runs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(run_count, 5);
+
+    let myeongha_project_id: i64 = conn
+        .query_row(
+            "SELECT id FROM projects WHERE project_key='myeongha'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let visualy_project_id: i64 = conn
+        .query_row(
+            "SELECT id FROM projects WHERE project_key='visualy'",
+            [],
+            |row| row.get(0),
         )
         .unwrap();
 
-        let contract_runs = producer_contract_runs(&conn, 50).unwrap();
-        let older = contract_runs.iter().find(|item| item.run.id == 9_300_001).unwrap();
-        let recovered = contract_runs.iter().find(|item| item.run.id == 9_300_002).unwrap();
-        let active_drift = contract_runs.iter().find(|item| item.run.id == 9_300_003).unwrap();
-
-        assert!(!older.contract_compliant);
-        assert!(!older.is_current_producer_run);
-
-        assert!(recovered.contract_compliant);
-        assert!(recovered.is_current_producer_run);
-
-        assert!(!active_drift.contract_compliant);
-        assert!(active_drift.is_current_producer_run);
-
-        drop(conn);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
-    }
-
-    #[test]
-    fn legacy_v02_database_migrates_end_to_end_without_silent_data_loss() {
-        let path = legacy_v02_db_path("v02-e2e");
-        seed_legacy_v02_database(&path);
-
-        init_db(&path).unwrap();
-
-        let conn = Connection::open(&path).unwrap();
-        conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
-
-        let integrity: String = conn
-            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(integrity, "ok");
-
-        let foreign_key_violations: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_foreign_key_check",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(foreign_key_violations, 0);
-
-        let run_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM workflow_runs", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(run_count, 5);
-
-        let myeongha_project_id: i64 = conn
-            .query_row(
-                "SELECT id FROM projects WHERE project_key='myeongha'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let visualy_project_id: i64 = conn
-            .query_row(
-                "SELECT id FROM projects WHERE project_key='visualy'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        let myeongha_repo_project: i64 = conn
-            .query_row(
-                "SELECT project_id FROM monitored_repositories
+    let myeongha_repo_project: i64 = conn
+        .query_row(
+            "SELECT project_id FROM monitored_repositories
                  WHERE repo='gycha0109-beep/MyeongHa'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let visualy_repo_project: i64 = conn
-            .query_row(
-                "SELECT project_id FROM monitored_repositories
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let visualy_repo_project: i64 = conn
+        .query_row(
+            "SELECT project_id FROM monitored_repositories
                  WHERE repo='gycha0109-beep/K_beauty'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(myeongha_repo_project, myeongha_project_id);
-        assert_eq!(visualy_repo_project, visualy_project_id);
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(myeongha_repo_project, myeongha_project_id);
+    assert_eq!(visualy_repo_project, visualy_project_id);
 
-        let commerce_track: (String, i64) = conn
-            .query_row(
-                "SELECT track_key,project_id FROM watch_tracks
+    let commerce_track: (String, i64) = conn
+        .query_row(
+            "SELECT track_key,project_id FROM watch_tracks
                  WHERE name='결제'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(commerce_track.0, "product-commerce");
-        assert_eq!(commerce_track.1, myeongha_project_id);
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(commerce_track.0, "product-commerce");
+    assert_eq!(commerce_track.1, myeongha_project_id);
 
-        let alias_targets: Vec<(String, String)> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT ta.alias_key,wt.track_key
+    let alias_targets: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ta.alias_key,wt.track_key
                      FROM track_aliases ta
                      JOIN watch_tracks wt ON wt.id=ta.track_id
                      WHERE ta.project_id=?
                      ORDER BY ta.alias_key",
-                )
-                .unwrap();
-            let rows = stmt
-                .query_map(params![myeongha_project_id], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })
-                .unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        assert!(alias_targets.contains(&("privacy-recovery".into(), "ops".into())));
-        assert!(alias_targets.contains(&("commerce".into(), "product-commerce".into())));
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map(params![myeongha_project_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    assert!(alias_targets.contains(&("privacy-recovery".into(), "ops".into())));
+    assert!(alias_targets.contains(&("commerce".into(), "product-commerce".into())));
 
-        let privacy_assignment: (String, i64, String) = conn
-            .query_row(
-                "SELECT wt.track_key,ra.manual,ra.source
+    let privacy_assignment: (String, i64, String) = conn
+        .query_row(
+            "SELECT wt.track_key,ra.manual,ra.source
                  FROM run_assignments ra
                  JOIN watch_tracks wt ON wt.id=ra.track_id
                  WHERE ra.run_id=501",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(privacy_assignment, ("ops".into(), 0, "track_alias".into()));
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(privacy_assignment, ("ops".into(), 0, "track_alias".into()));
 
-        let commerce_assignment: (String, i64, String) = conn
-            .query_row(
-                "SELECT wt.track_key,ra.manual,ra.source
+    let commerce_assignment: (String, i64, String) = conn
+        .query_row(
+            "SELECT wt.track_key,ra.manual,ra.source
                  FROM run_assignments ra
                  JOIN watch_tracks wt ON wt.id=ra.track_id
                  WHERE ra.run_id=502",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            commerce_assignment,
-            ("product-commerce".into(), 0, "track_alias".into())
-        );
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        commerce_assignment,
+        ("product-commerce".into(), 0, "track_alias".into())
+    );
 
-        let invalid_manual_active: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM run_assignments WHERE run_id=500",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(invalid_manual_active, 0);
+    let invalid_manual_active: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM run_assignments WHERE run_id=500",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(invalid_manual_active, 0);
 
-        let manual_audit: (String, i64, String, i64, i64) = conn
-            .query_row(
-                "SELECT track_key,manual,reason,from_repository_project_id,to_repository_project_id
+    let manual_audit: (String, i64, String, i64, i64) = conn
+        .query_row(
+            "SELECT track_key,manual,reason,from_repository_project_id,to_repository_project_id
                  FROM assignment_migration_audit
                  WHERE migration_key='visualy-project-scope-v1' AND run_id=500",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(manual_audit.0, "ops");
-        assert_eq!(manual_audit.1, 1);
-        assert_eq!(manual_audit.2, "legacy user choice");
-        assert_eq!(manual_audit.3, myeongha_project_id);
-        assert_eq!(manual_audit.4, visualy_project_id);
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(manual_audit.0, "ops");
+    assert_eq!(manual_audit.1, 1);
+    assert_eq!(manual_audit.2, "legacy user choice");
+    assert_eq!(manual_audit.3, myeongha_project_id);
+    assert_eq!(manual_audit.4, visualy_project_id);
 
-        let moved_manual_status: String = conn
+    let moved_manual_status: String = conn
+        .query_row(
+            "SELECT resolution_status FROM workflow_runs WHERE run_id=500",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(moved_manual_status, "unassigned");
+
+    for run_id in [503_i64, 504_i64] {
+        let status: String = conn
             .query_row(
-                "SELECT resolution_status FROM workflow_runs WHERE run_id=500",
-                [],
+                "SELECT resolution_status FROM workflow_runs WHERE run_id=?",
+                params![run_id],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(moved_manual_status, "unassigned");
-
-        for run_id in [503_i64, 504_i64] {
-            let status: String = conn
-                .query_row(
-                    "SELECT resolution_status FROM workflow_runs WHERE run_id=?",
-                    params![run_id],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(status, "project");
-            let assignment_count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM run_assignments WHERE run_id=?",
-                    params![run_id],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(assignment_count, 0);
-        }
-
-        let fingerprint_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM track_fingerprints", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(fingerprint_count, 2);
-
-        let notification_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM notifications_v2", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(notification_count, 1);
-
-        drop(conn);
-
-        init_db(&path).unwrap();
-        let conn = Connection::open(&path).unwrap();
-
-        let run_count_after_second_init: i64 = conn
-            .query_row("SELECT COUNT(*) FROM workflow_runs", [], |row| row.get(0))
-            .unwrap();
-        let migration_audit_count: i64 = conn
+        assert_eq!(status, "project");
+        let assignment_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM assignment_migration_audit
-                 WHERE migration_key='visualy-project-scope-v1' AND run_id=500",
-                [],
+                "SELECT COUNT(*) FROM run_assignments WHERE run_id=?",
+                params![run_id],
                 |row| row.get(0),
             )
             .unwrap();
-        let alias_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM track_aliases
-                 WHERE project_id=? AND alias_key IN ('privacy-recovery','commerce')",
-                params![myeongha_project_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(run_count_after_second_init, 5);
-        assert_eq!(migration_audit_count, 1);
-        assert_eq!(alias_count, 2);
-
-        drop(conn);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+        assert_eq!(assignment_count, 0);
     }
 
-    #[test]
-    fn alias_migration_is_project_scoped_and_preserves_manual_assignment() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
+    let fingerprint_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM track_fingerprints", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(fingerprint_count, 2);
+
+    let notification_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM notifications_v2", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(notification_count, 1);
+
+    drop(conn);
+
+    init_db(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+
+    let run_count_after_second_init: i64 = conn
+        .query_row("SELECT COUNT(*) FROM workflow_runs", [], |row| row.get(0))
+        .unwrap();
+    let migration_audit_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM assignment_migration_audit
+                 WHERE migration_key='visualy-project-scope-v1' AND run_id=500",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let alias_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM track_aliases
+                 WHERE project_id=? AND alias_key IN ('privacy-recovery','commerce')",
+            params![myeongha_project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_count_after_second_init, 5);
+    assert_eq!(migration_audit_count, 1);
+    assert_eq!(alias_count, 2);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
+fn alias_migration_is_project_scoped_and_preserves_manual_assignment() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
             "CREATE TABLE projects(
                id INTEGER PRIMARY KEY,
                project_key TEXT NOT NULL UNIQUE
@@ -2278,45 +2323,50 @@
              INSERT INTO run_assignments(run_id,track_id,manual) VALUES(500,10,1);"
         ).unwrap();
 
-        migrate_track_alias_scope(&conn).unwrap();
+    migrate_track_alias_scope(&conn).unwrap();
 
-        let migrated_project_id: i64 = conn.query_row(
+    let migrated_project_id: i64 = conn
+        .query_row(
             "SELECT project_id FROM track_aliases WHERE alias_key='privacy-recovery'",
             [],
             |row| row.get(0),
-        ).unwrap();
-        assert_eq!(migrated_project_id, 1);
+        )
+        .unwrap();
+    assert_eq!(migrated_project_id, 1);
 
-        conn.execute(
-            "INSERT INTO track_aliases(project_id,alias_key,track_id,active,created_at)
+    conn.execute(
+        "INSERT INTO track_aliases(project_id,alias_key,track_id,active,created_at)
              VALUES(2,'privacy-recovery',20,1,'now')",
-            [],
-        ).unwrap();
+        [],
+    )
+    .unwrap();
 
-        let one = load_project_aliases(&conn, 1).unwrap();
-        let two = load_project_aliases(&conn, 2).unwrap();
-        assert_eq!(one.get("privacy-recovery").map(String::as_str), Some("ops"));
-        assert_eq!(two.get("privacy-recovery").map(String::as_str), Some("ops"));
+    let one = load_project_aliases(&conn, 1).unwrap();
+    let two = load_project_aliases(&conn, 2).unwrap();
+    assert_eq!(one.get("privacy-recovery").map(String::as_str), Some("ops"));
+    assert_eq!(two.get("privacy-recovery").map(String::as_str), Some("ops"));
 
-        let mismatch = conn.execute(
-            "INSERT INTO track_aliases(project_id,alias_key,track_id,active,created_at)
+    let mismatch = conn.execute(
+        "INSERT INTO track_aliases(project_id,alias_key,track_id,active,created_at)
              VALUES(1,'wrong-project',20,1,'now')",
-            [],
-        );
-        assert!(mismatch.is_err());
+        [],
+    );
+    assert!(mismatch.is_err());
 
-        let manual: i64 = conn.query_row(
+    let manual: i64 = conn
+        .query_row(
             "SELECT manual FROM run_assignments WHERE run_id=500",
             [],
             |row| row.get(0),
-        ).unwrap();
-        assert_eq!(manual, 1);
-    }
+        )
+        .unwrap();
+    assert_eq!(manual, 1);
+}
 
-    #[test]
-    fn fingerprints_are_isolated_by_project_and_repository() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
+#[test]
+fn fingerprints_are_isolated_by_project_and_repository() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
             "CREATE TABLE watch_tracks(
                id INTEGER PRIMARY KEY,
                project_id INTEGER NOT NULL,
@@ -2348,26 +2398,26 @@
                      (5,10,'workflow_name','wrong-repo',202,50,1);"
         ).unwrap();
 
-        let project_one = load_fingerprints(&conn, 1, 101).unwrap();
-        let patterns: HashSet<_> = project_one.iter().map(|fp| fp.pattern.as_str()).collect();
-        assert_eq!(patterns.len(), 2);
-        assert!(patterns.contains("global-one"));
-        assert!(patterns.contains("repo-one"));
-        assert!(!patterns.contains("global-two"));
-        assert!(!patterns.contains("cross-track"));
-        assert!(!patterns.contains("wrong-repo"));
+    let project_one = load_fingerprints(&conn, 1, 101).unwrap();
+    let patterns: HashSet<_> = project_one.iter().map(|fp| fp.pattern.as_str()).collect();
+    assert_eq!(patterns.len(), 2);
+    assert!(patterns.contains("global-one"));
+    assert!(patterns.contains("repo-one"));
+    assert!(!patterns.contains("global-two"));
+    assert!(!patterns.contains("cross-track"));
+    assert!(!patterns.contains("wrong-repo"));
 
-        let project_two = load_fingerprints(&conn, 2, 202).unwrap();
-        let patterns: HashSet<_> = project_two.iter().map(|fp| fp.pattern.as_str()).collect();
-        assert_eq!(patterns, HashSet::from(["global-two"]));
+    let project_two = load_fingerprints(&conn, 2, 202).unwrap();
+    let patterns: HashSet<_> = project_two.iter().map(|fp| fp.pattern.as_str()).collect();
+    assert_eq!(patterns, HashSet::from(["global-two"]));
 
-        assert!(load_fingerprints(&conn, 1, 202).is_err());
-    }
+    assert!(load_fingerprints(&conn, 1, 202).is_err());
+}
 
-    #[test]
-    fn attribution_detail_exposes_final_decision_and_ordered_evidence() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
+#[test]
+fn attribution_detail_exposes_final_decision_and_ordered_evidence() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
             "CREATE TABLE monitored_repositories(
                id INTEGER PRIMARY KEY,
                project_id INTEGER NOT NULL,
@@ -2420,807 +2470,865 @@
                (1000,'ops','run_name',100,'[WT:ops] CI','2026-09-24T02:00:00Z');"
         ).unwrap();
 
-        let detail = load_run_attribution_detail(&conn, 1000).unwrap();
-        assert_eq!(detail.project_id, 1);
-        assert_eq!(detail.repository, "example/repo");
-        assert_eq!(detail.assigned_track_key.as_deref(), Some("ops"));
-        assert_eq!(detail.source.as_deref(), Some("manual"));
-        assert_eq!(detail.confidence, Some(100));
-        assert_eq!(detail.manual, Some(true));
-        assert_eq!(detail.evidence.len(), 2);
-        assert_eq!(detail.evidence[0].signal_type, "run_name");
-        assert_eq!(detail.evidence[0].score, 100);
-        assert_eq!(detail.evidence[1].signal_type, "branch");
+    let detail = load_run_attribution_detail(&conn, 1000).unwrap();
+    assert_eq!(detail.project_id, 1);
+    assert_eq!(detail.repository, "example/repo");
+    assert_eq!(detail.assigned_track_key.as_deref(), Some("ops"));
+    assert_eq!(detail.source.as_deref(), Some("manual"));
+    assert_eq!(detail.confidence, Some(100));
+    assert_eq!(detail.manual, Some(true));
+    assert_eq!(detail.evidence.len(), 2);
+    assert_eq!(detail.evidence[0].signal_type, "run_name");
+    assert_eq!(detail.evidence[0].score, 100);
+    assert_eq!(detail.evidence[1].signal_type, "branch");
+}
+
+#[test]
+fn responsibility_map_source_health_preserves_last_good_snapshot_on_failure() {
+    let path = legacy_v02_db_path("responsibility-map-source-health");
+    init_db(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
+
+    let repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let contracts = vec![RepositoryResponsibilityContract {
+        workflow_path: ".github/workflows/current-main-health.yml".into(),
+        workflow_name: "BEJEWELY Current Main Health".into(),
+        binding_kind: "project-wide".into(),
+        track_key: None,
+        source_binding: "unassigned-by-design".into(),
+        source_path: RESPONSIBILITY_MAP_PATH.into(),
+    }];
+    replace_repository_responsibility_contracts(
+        &conn,
+        repository_id,
+        &contracts,
+        "2026-09-24T07:00:00Z",
+    )
+    .unwrap();
+    update_repository_responsibility_source(
+        &conn,
+        repository_id,
+        "synced",
+        "2026-09-24T07:00:00Z",
+        None,
+    )
+    .unwrap();
+
+    update_repository_responsibility_source(
+        &conn,
+        repository_id,
+        "error",
+        "2026-09-24T07:05:00Z",
+        Some("HTTP 503"),
+    )
+    .unwrap();
+
+    let statuses = responsibility_map_source_statuses(&conn).unwrap();
+    let visualy = statuses
+        .iter()
+        .find(|item| item.repository_id == repository_id)
+        .unwrap();
+    assert_eq!(visualy.status, "error");
+    assert_eq!(
+        visualy.last_attempt_at.as_deref(),
+        Some("2026-09-24T07:05:00Z")
+    );
+    assert_eq!(
+        visualy.last_success_at.as_deref(),
+        Some("2026-09-24T07:00:00Z")
+    );
+    assert_eq!(visualy.last_error.as_deref(), Some("HTTP 503"));
+    assert_eq!(visualy.contract_count, 1);
+
+    let contract_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM repository_responsibility_contracts WHERE repository_id=?",
+            params![repository_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(contract_count, 1);
+
+    update_repository_responsibility_source(
+        &conn,
+        repository_id,
+        "not_found",
+        "2026-09-24T07:10:00Z",
+        None,
+    )
+    .unwrap();
+    let statuses = responsibility_map_source_statuses(&conn).unwrap();
+    let visualy = statuses
+        .iter()
+        .find(|item| item.repository_id == repository_id)
+        .unwrap();
+    assert_eq!(visualy.status, "not_found");
+    assert_eq!(
+        visualy.last_success_at.as_deref(),
+        Some("2026-09-24T07:00:00Z")
+    );
+    assert_eq!(visualy.contract_count, 1);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
+fn responsibility_map_drift_is_detect_only_and_repository_scoped() {
+    let path = legacy_v02_db_path("responsibility-map-drift");
+    init_db(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
+
+    let repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let project_id: i64 = conn
+        .query_row(
+            "SELECT project_id FROM monitored_repositories WHERE id=?",
+            params![repository_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let now = "2026-09-24T06:30:00Z";
+    conn.execute(
+        "INSERT OR IGNORE INTO project_workflow_rules(
+               project_id,repository_id,workflow_name,active,created_at
+             ) VALUES(?,?,'Kind Mismatch',1,?)",
+        params![project_id, repository_id, now],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR IGNORE INTO dynamic_workflow_rules(
+               project_id,repository_id,workflow_name,active,protected,created_at
+             ) VALUES(?,?,'Kind Mismatch Project',1,1,?)",
+        params![project_id, repository_id, now],
+    )
+    .unwrap();
+
+    conn.execute(
+        "INSERT INTO monitored_repositories(
+               project_id,repo,enabled,running_count,queued_count,created_at,updated_at
+             ) VALUES(?,'example/other-visualy-repo',1,0,0,?,?)",
+        params![project_id, now, now],
+    )
+    .unwrap();
+    let other_repository_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO dynamic_workflow_rules(
+               project_id,repository_id,workflow_name,active,protected,created_at
+             ) VALUES(?,?,'Scoped Dynamic',1,0,?)",
+        params![project_id, other_repository_id, now],
+    )
+    .unwrap();
+
+    for (run_id, workflow_id, workflow_name, workflow_path, display_title) in [
+        (
+            9_800_001_i64,
+            9801_i64,
+            "Stale Dynamic",
+            ".github/workflows/stale-dynamic.yml",
+            "Stale Dynamic",
+        ),
+        (
+            9_800_002_i64,
+            9802_i64,
+            "Stale Project",
+            ".github/workflows/stale-project.yml",
+            "Stale Project",
+        ),
+        (
+            9_800_003_i64,
+            9803_i64,
+            "Static Clean",
+            ".github/workflows/static-clean.yml",
+            "[WT:mobile] Static Clean",
+        ),
+        (
+            9_800_004_i64,
+            9804_i64,
+            "Wrong Static",
+            ".github/workflows/wrong-static.yml",
+            "[WT:trust] Wrong Static",
+        ),
+        (
+            9_800_005_i64,
+            9805_i64,
+            "Missing Project",
+            ".github/workflows/missing-project.yml",
+            "Missing Project",
+        ),
+    ] {
+        let run = GithubRun {
+            id: run_id,
+            workflow_id,
+            name: workflow_name.into(),
+            path: Some(workflow_path.into()),
+            display_title: Some(display_title.into()),
+            event: "push".into(),
+            head_branch: Some("main".into()),
+            head_sha: format!("sha-{run_id}"),
+            run_number: run_id,
+            run_attempt: 1,
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            html_url: format!("https://example/{run_id}"),
+            created_at: now.into(),
+            run_started_at: Some(now.into()),
+            updated_at: now.into(),
+            pull_requests: vec![],
+        };
+        upsert_run(&conn, repository_id, &run, now).unwrap();
     }
 
-    #[test]
-    fn responsibility_map_source_health_preserves_last_good_snapshot_on_failure() {
-        let path = legacy_v02_db_path("responsibility-map-source-health");
-        init_db(&path).unwrap();
-        let conn = Connection::open(&path).unwrap();
-        conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
+    conn.execute(
+        "INSERT OR IGNORE INTO dynamic_workflow_rules(
+               project_id,repository_id,workflow_name,active,protected,created_at
+             ) VALUES(?,?,'Stale Dynamic',1,1,?)",
+        params![project_id, repository_id, now],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR IGNORE INTO project_workflow_rules(
+               project_id,repository_id,workflow_name,active,created_at
+             ) VALUES(?,?,'Stale Project',1,?)",
+        params![project_id, repository_id, now],
+    )
+    .unwrap();
 
-        let repository_id: i64 = conn
-            .query_row(
-                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        let contracts = vec![RepositoryResponsibilityContract {
+    let contracts = vec![
+        RepositoryResponsibilityContract {
             workflow_path: ".github/workflows/current-main-health.yml".into(),
             workflow_name: "BEJEWELY Current Main Health".into(),
             binding_kind: "project-wide".into(),
             track_key: None,
             source_binding: "unassigned-by-design".into(),
             source_path: RESPONSIBILITY_MAP_PATH.into(),
-        }];
-        replace_repository_responsibility_contracts(
-            &conn,
-            repository_id,
-            &contracts,
-            "2026-09-24T07:00:00Z",
-        )
-        .unwrap();
-        update_repository_responsibility_source(
-            &conn,
-            repository_id,
-            "synced",
-            "2026-09-24T07:00:00Z",
-            None,
-        )
-        .unwrap();
+        },
+        RepositoryResponsibilityContract {
+            workflow_path: ".github/workflows/security-boundary.yml".into(),
+            workflow_name: "BEJEWELY Security Boundary".into(),
+            binding_kind: "dynamic".into(),
+            track_key: None,
+            source_binding: "dynamic-by-run".into(),
+            source_path: RESPONSIBILITY_MAP_PATH.into(),
+        },
+        RepositoryResponsibilityContract {
+            workflow_path: ".github/workflows/static-clean.yml".into(),
+            workflow_name: "Static Clean".into(),
+            binding_kind: "static".into(),
+            track_key: Some("mobile".into()),
+            source_binding: "static:mobile".into(),
+            source_path: RESPONSIBILITY_MAP_PATH.into(),
+        },
+        RepositoryResponsibilityContract {
+            workflow_path: ".github/workflows/missing-dynamic.yml".into(),
+            workflow_name: "Missing Dynamic".into(),
+            binding_kind: "dynamic".into(),
+            track_key: None,
+            source_binding: "dynamic-by-run".into(),
+            source_path: RESPONSIBILITY_MAP_PATH.into(),
+        },
+        RepositoryResponsibilityContract {
+            workflow_path: ".github/workflows/missing-project.yml".into(),
+            workflow_name: "Missing Project".into(),
+            binding_kind: "project-wide".into(),
+            track_key: None,
+            source_binding: "unassigned-by-design".into(),
+            source_path: RESPONSIBILITY_MAP_PATH.into(),
+        },
+        RepositoryResponsibilityContract {
+            workflow_path: ".github/workflows/kind-mismatch.yml".into(),
+            workflow_name: "Kind Mismatch".into(),
+            binding_kind: "dynamic".into(),
+            track_key: None,
+            source_binding: "dynamic-by-run".into(),
+            source_path: RESPONSIBILITY_MAP_PATH.into(),
+        },
+        RepositoryResponsibilityContract {
+            workflow_path: ".github/workflows/kind-mismatch-project.yml".into(),
+            workflow_name: "Kind Mismatch Project".into(),
+            binding_kind: "project-wide".into(),
+            track_key: None,
+            source_binding: "unassigned-by-design".into(),
+            source_path: RESPONSIBILITY_MAP_PATH.into(),
+        },
+        RepositoryResponsibilityContract {
+            workflow_path: ".github/workflows/wrong-static.yml".into(),
+            workflow_name: "Wrong Static".into(),
+            binding_kind: "static".into(),
+            track_key: Some("mobile".into()),
+            source_binding: "static:mobile".into(),
+            source_path: RESPONSIBILITY_MAP_PATH.into(),
+        },
+        RepositoryResponsibilityContract {
+            workflow_path: ".github/workflows/scoped-dynamic.yml".into(),
+            workflow_name: "Scoped Dynamic".into(),
+            binding_kind: "dynamic".into(),
+            track_key: None,
+            source_binding: "dynamic-by-run".into(),
+            source_path: RESPONSIBILITY_MAP_PATH.into(),
+        },
+        RepositoryResponsibilityContract {
+            workflow_path: ".github/workflows/ghost-static.yml".into(),
+            workflow_name: "Ghost Static".into(),
+            binding_kind: "static".into(),
+            track_key: Some("ghost-track".into()),
+            source_binding: "static:ghost-track".into(),
+            source_path: RESPONSIBILITY_MAP_PATH.into(),
+        },
+    ];
+    replace_repository_responsibility_contracts(&conn, repository_id, &contracts, now).unwrap();
 
-        update_repository_responsibility_source(
-            &conn,
-            repository_id,
-            "error",
-            "2026-09-24T07:05:00Z",
-            Some("HTTP 503"),
-        )
-        .unwrap();
-
-        let statuses = responsibility_map_source_statuses(&conn).unwrap();
-        let visualy = statuses
-            .iter()
-            .find(|item| item.repository_id == repository_id)
-            .unwrap();
-        assert_eq!(visualy.status, "error");
-        assert_eq!(
-            visualy.last_attempt_at.as_deref(),
-            Some("2026-09-24T07:05:00Z")
-        );
-        assert_eq!(
-            visualy.last_success_at.as_deref(),
-            Some("2026-09-24T07:00:00Z")
-        );
-        assert_eq!(visualy.last_error.as_deref(), Some("HTTP 503"));
-        assert_eq!(visualy.contract_count, 1);
-
-        let contract_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM repository_responsibility_contracts WHERE repository_id=?",
-                params![repository_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(contract_count, 1);
-
-        update_repository_responsibility_source(
-            &conn,
-            repository_id,
-            "not_found",
-            "2026-09-24T07:10:00Z",
-            None,
-        )
-        .unwrap();
-        let statuses = responsibility_map_source_statuses(&conn).unwrap();
-        let visualy = statuses
-            .iter()
-            .find(|item| item.repository_id == repository_id)
-            .unwrap();
-        assert_eq!(visualy.status, "not_found");
-        assert_eq!(
-            visualy.last_success_at.as_deref(),
-            Some("2026-09-24T07:00:00Z")
-        );
-        assert_eq!(visualy.contract_count, 1);
-
-        drop(conn);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
-    }
-
-    #[test]
-    fn responsibility_map_drift_is_detect_only_and_repository_scoped() {
-        let path = legacy_v02_db_path("responsibility-map-drift");
-        init_db(&path).unwrap();
-        let conn = Connection::open(&path).unwrap();
-        conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
-
-        let repository_id: i64 = conn
-            .query_row(
-                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let project_id: i64 = conn
-            .query_row(
-                "SELECT project_id FROM monitored_repositories WHERE id=?",
-                params![repository_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        let now = "2026-09-24T06:30:00Z";
-        conn.execute(
-            "INSERT OR IGNORE INTO project_workflow_rules(
-               project_id,repository_id,workflow_name,active,created_at
-             ) VALUES(?,?,'Kind Mismatch',1,?)",
-            params![project_id, repository_id, now],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT OR IGNORE INTO dynamic_workflow_rules(
-               project_id,repository_id,workflow_name,active,protected,created_at
-             ) VALUES(?,?,'Kind Mismatch Project',1,1,?)",
-            params![project_id, repository_id, now],
-        )
+    let track_count_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0))
         .unwrap();
 
-        conn.execute(
-            "INSERT INTO monitored_repositories(
-               project_id,repo,enabled,running_count,queued_count,created_at,updated_at
-             ) VALUES(?,'example/other-visualy-repo',1,0,0,?,?)",
-            params![project_id, now, now],
+    let mobile_track_id: i64 = conn
+        .query_row(
+            "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='mobile' AND active=1",
+            params![project_id],
+            |row| row.get(0),
         )
         .unwrap();
-        let other_repository_id = conn.last_insert_rowid();
-        conn.execute(
-            "INSERT INTO dynamic_workflow_rules(
-               project_id,repository_id,workflow_name,active,protected,created_at
-             ) VALUES(?,?,'Scoped Dynamic',1,0,?)",
-            params![project_id, other_repository_id, now],
-        )
-        .unwrap();
-
-        for (run_id, workflow_id, workflow_name, workflow_path, display_title) in [
-            (
-                9_800_001_i64,
-                9801_i64,
-                "Stale Dynamic",
-                ".github/workflows/stale-dynamic.yml",
-                "Stale Dynamic",
-            ),
-            (
-                9_800_002_i64,
-                9802_i64,
-                "Stale Project",
-                ".github/workflows/stale-project.yml",
-                "Stale Project",
-            ),
-            (
-                9_800_003_i64,
-                9803_i64,
-                "Static Clean",
-                ".github/workflows/static-clean.yml",
-                "[WT:mobile] Static Clean",
-            ),
-            (
-                9_800_004_i64,
-                9804_i64,
-                "Wrong Static",
-                ".github/workflows/wrong-static.yml",
-                "[WT:trust] Wrong Static",
-            ),
-            (
-                9_800_005_i64,
-                9805_i64,
-                "Missing Project",
-                ".github/workflows/missing-project.yml",
-                "Missing Project",
-            ),
-        ] {
-            let run = GithubRun {
-                id: run_id,
-                workflow_id,
-                name: workflow_name.into(),
-                path: Some(workflow_path.into()),
-                display_title: Some(display_title.into()),
-                event: "push".into(),
-                head_branch: Some("main".into()),
-                head_sha: format!("sha-{run_id}"),
-                run_number: run_id,
-                run_attempt: 1,
-                status: "completed".into(),
-                conclusion: Some("success".into()),
-                html_url: format!("https://example/{run_id}"),
-                created_at: now.into(),
-                run_started_at: Some(now.into()),
-                updated_at: now.into(),
-                pull_requests: vec![],
-            };
-            upsert_run(&conn, repository_id, &run, now).unwrap();
-        }
-
-        conn.execute(
-            "INSERT OR IGNORE INTO dynamic_workflow_rules(
-               project_id,repository_id,workflow_name,active,protected,created_at
-             ) VALUES(?,?,'Stale Dynamic',1,1,?)",
-            params![project_id, repository_id, now],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT OR IGNORE INTO project_workflow_rules(
-               project_id,repository_id,workflow_name,active,created_at
-             ) VALUES(?,?,'Stale Project',1,?)",
-            params![project_id, repository_id, now],
-        )
-        .unwrap();
-
-        let contracts = vec![
-            RepositoryResponsibilityContract {
-                workflow_path: ".github/workflows/current-main-health.yml".into(),
-                workflow_name: "BEJEWELY Current Main Health".into(),
-                binding_kind: "project-wide".into(),
-                track_key: None,
-                source_binding: "unassigned-by-design".into(),
-                source_path: RESPONSIBILITY_MAP_PATH.into(),
-            },
-            RepositoryResponsibilityContract {
-                workflow_path: ".github/workflows/security-boundary.yml".into(),
-                workflow_name: "BEJEWELY Security Boundary".into(),
-                binding_kind: "dynamic".into(),
-                track_key: None,
-                source_binding: "dynamic-by-run".into(),
-                source_path: RESPONSIBILITY_MAP_PATH.into(),
-            },
-            RepositoryResponsibilityContract {
-                workflow_path: ".github/workflows/static-clean.yml".into(),
-                workflow_name: "Static Clean".into(),
-                binding_kind: "static".into(),
-                track_key: Some("mobile".into()),
-                source_binding: "static:mobile".into(),
-                source_path: RESPONSIBILITY_MAP_PATH.into(),
-            },
-            RepositoryResponsibilityContract {
-                workflow_path: ".github/workflows/missing-dynamic.yml".into(),
-                workflow_name: "Missing Dynamic".into(),
-                binding_kind: "dynamic".into(),
-                track_key: None,
-                source_binding: "dynamic-by-run".into(),
-                source_path: RESPONSIBILITY_MAP_PATH.into(),
-            },
-            RepositoryResponsibilityContract {
-                workflow_path: ".github/workflows/missing-project.yml".into(),
-                workflow_name: "Missing Project".into(),
-                binding_kind: "project-wide".into(),
-                track_key: None,
-                source_binding: "unassigned-by-design".into(),
-                source_path: RESPONSIBILITY_MAP_PATH.into(),
-            },
-            RepositoryResponsibilityContract {
-                workflow_path: ".github/workflows/kind-mismatch.yml".into(),
-                workflow_name: "Kind Mismatch".into(),
-                binding_kind: "dynamic".into(),
-                track_key: None,
-                source_binding: "dynamic-by-run".into(),
-                source_path: RESPONSIBILITY_MAP_PATH.into(),
-            },
-            RepositoryResponsibilityContract {
-                workflow_path: ".github/workflows/kind-mismatch-project.yml".into(),
-                workflow_name: "Kind Mismatch Project".into(),
-                binding_kind: "project-wide".into(),
-                track_key: None,
-                source_binding: "unassigned-by-design".into(),
-                source_path: RESPONSIBILITY_MAP_PATH.into(),
-            },
-            RepositoryResponsibilityContract {
-                workflow_path: ".github/workflows/wrong-static.yml".into(),
-                workflow_name: "Wrong Static".into(),
-                binding_kind: "static".into(),
-                track_key: Some("mobile".into()),
-                source_binding: "static:mobile".into(),
-                source_path: RESPONSIBILITY_MAP_PATH.into(),
-            },
-            RepositoryResponsibilityContract {
-                workflow_path: ".github/workflows/scoped-dynamic.yml".into(),
-                workflow_name: "Scoped Dynamic".into(),
-                binding_kind: "dynamic".into(),
-                track_key: None,
-                source_binding: "dynamic-by-run".into(),
-                source_path: RESPONSIBILITY_MAP_PATH.into(),
-            },
-            RepositoryResponsibilityContract {
-                workflow_path: ".github/workflows/ghost-static.yml".into(),
-                workflow_name: "Ghost Static".into(),
-                binding_kind: "static".into(),
-                track_key: Some("ghost-track".into()),
-                source_binding: "static:ghost-track".into(),
-                source_path: RESPONSIBILITY_MAP_PATH.into(),
-            },
-        ];
-        replace_repository_responsibility_contracts(&conn, repository_id, &contracts, now).unwrap();
-
-        let track_count_before: i64 =
-            conn.query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0)).unwrap();
-
-        let mobile_track_id: i64 = conn
-            .query_row(
-                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='mobile' AND active=1",
-                params![project_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO run_assignments(
+    conn.execute(
+        "INSERT OR REPLACE INTO run_assignments(
                run_id,track_id,confidence,source,reason,manual,assigned_at
              ) VALUES(9_800_005,?,100,'manual','manual preservation fixture',1,?)",
-            params![mobile_track_id, now],
+        params![mobile_track_id, now],
+    )
+    .unwrap();
+    let assignment_count_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM run_assignments", [], |row| row.get(0))
+        .unwrap();
+
+    let drifts = responsibility_map_drifts(&conn).unwrap();
+
+    let track_count_after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0))
+        .unwrap();
+    let assignment_count_after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM run_assignments", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(track_count_before, track_count_after);
+    assert_eq!(assignment_count_before, assignment_count_after);
+
+    assert!(!drifts
+        .iter()
+        .any(|item| item.workflow_name == "BEJEWELY Current Main Health"));
+    assert!(!drifts
+        .iter()
+        .any(|item| item.workflow_name == "BEJEWELY Security Boundary"));
+    assert!(!drifts
+        .iter()
+        .any(|item| item.workflow_name == "Static Clean"));
+
+    let missing_names: HashSet<&str> = drifts
+        .iter()
+        .filter(|item| item.drift_type == "missing_in_watchtower")
+        .map(|item| item.workflow_name.as_str())
+        .collect();
+    assert!(missing_names.contains("Missing Dynamic"));
+    assert!(missing_names.contains("Missing Project"));
+    assert!(missing_names.contains("Scoped Dynamic"));
+
+    let missing_dynamic = drifts
+        .iter()
+        .find(|item| item.workflow_name == "Missing Dynamic")
+        .unwrap();
+    assert_eq!(missing_dynamic.source_path, RESPONSIBILITY_MAP_PATH);
+    assert_eq!(
+        missing_dynamic.recommended_action,
+        "review_add_dynamic_rule"
+    );
+    assert!(missing_dynamic
+        .reason
+        .contains("no matching active Dynamic rule"));
+
+    let kind_mismatch = drifts
+        .iter()
+        .find(|item| item.workflow_name == "Kind Mismatch")
+        .unwrap();
+    assert_eq!(kind_mismatch.drift_type, "responsibility_kind_mismatch");
+    assert_eq!(
+        kind_mismatch.recommended_action,
+        "review_reclassify_dynamic"
+    );
+    assert!(kind_mismatch.reason.contains("dynamic-by-run"));
+    assert!(kind_mismatch.reason.contains("project-wide"));
+    let wrong_static = drifts
+        .iter()
+        .find(|item| item.workflow_name == "Wrong Static")
+        .unwrap();
+    assert_eq!(wrong_static.drift_type, "track_binding_mismatch");
+    assert_eq!(wrong_static.expected_track_key.as_deref(), Some("mobile"));
+    assert_eq!(wrong_static.actual_track_key.as_deref(), Some("trust"));
+    assert_eq!(wrong_static.recommended_action, "review_producer_run_name");
+    assert!(wrong_static.reason.contains("static:mobile"));
+    assert!(wrong_static.reason.contains("trust"));
+
+    let ghost_static = drifts
+        .iter()
+        .find(|item| item.workflow_name == "Ghost Static")
+        .unwrap();
+    assert_eq!(ghost_static.drift_type, "track_binding_mismatch");
+    assert_eq!(
+        ghost_static.recommended_action,
+        "review_track_registry_or_map"
+    );
+    assert!(ghost_static.reason.contains("canonical Track"));
+
+    let stale_dynamic = drifts
+        .iter()
+        .find(|item| item.workflow_name == "Stale Dynamic")
+        .unwrap();
+    assert_eq!(stale_dynamic.drift_type, "stale_in_watchtower");
+    assert_eq!(stale_dynamic.watchtower_binding.as_deref(), Some("dynamic"));
+    assert_eq!(
+        stale_dynamic.recommended_action,
+        "review_remove_or_confirm_stale_rule"
+    );
+
+    let stale_project = drifts
+        .iter()
+        .find(|item| item.workflow_name == "Stale Project")
+        .unwrap();
+    assert_eq!(stale_project.drift_type, "stale_in_watchtower");
+    assert_eq!(
+        stale_project.watchtower_binding.as_deref(),
+        Some("project-wide")
+    );
+    assert_eq!(
+        stale_project.recommended_action,
+        "review_remove_or_confirm_stale_rule"
+    );
+
+    let preview = resolution_preview_for_drift(&conn, missing_dynamic).unwrap();
+    assert!(preview.executable);
+    assert_eq!(preview.action, "add_dynamic_rule");
+    assert!(preview
+        .changes
+        .iter()
+        .any(|item| item.contains("protected Dynamic")));
+    assert!(
+        exact_dynamic_rule(&conn, project_id, repository_id, "Missing Dynamic")
+            .unwrap()
+            .is_none()
+    );
+
+    let deferred = defer_responsibility_drift_with_conn(
+        &conn,
+        &DeferResponsibilityDriftInput {
+            review_key: missing_dynamic.review_key.clone(),
+            fingerprint: missing_dynamic.fingerprint.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(deferred.status, "deferred");
+    let deferred_drift = current_responsibility_drift(&conn, &missing_dynamic.review_key).unwrap();
+    assert_eq!(deferred_drift.review_status, "deferred");
+    let reopened = reopen_responsibility_drift_with_conn(
+        &conn,
+        &DeferResponsibilityDriftInput {
+            review_key: missing_dynamic.review_key.clone(),
+            fingerprint: missing_dynamic.fingerprint.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(reopened.status, "open");
+    let reopened_drift = current_responsibility_drift(&conn, &missing_dynamic.review_key).unwrap();
+    assert_eq!(reopened_drift.review_status, "open");
+
+    let resolved_missing_dynamic = resolve_responsibility_drift_with_conn(
+        &conn,
+        &ResolveResponsibilityDriftInput {
+            review_key: missing_dynamic.review_key.clone(),
+            fingerprint: missing_dynamic.fingerprint.clone(),
+            action: "add_dynamic_rule".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(resolved_missing_dynamic.status, "resolved");
+    let created_dynamic = exact_dynamic_rule(&conn, project_id, repository_id, "Missing Dynamic")
+        .unwrap()
+        .unwrap();
+    assert!(created_dynamic.protected);
+
+    let missing_project = responsibility_map_drifts(&conn)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.workflow_name == "Missing Project")
+        .unwrap();
+    let resolved_missing_project = resolve_responsibility_drift_with_conn(
+        &conn,
+        &ResolveResponsibilityDriftInput {
+            review_key: missing_project.review_key.clone(),
+            fingerprint: missing_project.fingerprint.clone(),
+            action: "add_project_wide_rule".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(resolved_missing_project.status, "resolved");
+    assert!(
+        exact_project_rule(&conn, project_id, repository_id, "Missing Project")
+            .unwrap()
+            .is_some()
+    );
+    let manual_preserved: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM run_assignments WHERE run_id=9_800_005 AND manual=1",
+            [],
+            |row| row.get(0),
         )
         .unwrap();
-        let assignment_count_before: i64 =
-            conn.query_row("SELECT COUNT(*) FROM run_assignments", [], |row| row.get(0)).unwrap();
+    assert_eq!(manual_preserved, 1);
 
-        let drifts = responsibility_map_drifts(&conn).unwrap();
-
-        let track_count_after: i64 =
-            conn.query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0)).unwrap();
-        let assignment_count_after: i64 =
-            conn.query_row("SELECT COUNT(*) FROM run_assignments", [], |row| row.get(0)).unwrap();
-        assert_eq!(track_count_before, track_count_after);
-        assert_eq!(assignment_count_before, assignment_count_after);
-
-        assert!(!drifts.iter().any(|item| item.workflow_name == "BEJEWELY Current Main Health"));
-        assert!(!drifts.iter().any(|item| item.workflow_name == "BEJEWELY Security Boundary"));
-        assert!(!drifts.iter().any(|item| item.workflow_name == "Static Clean"));
-
-        let missing_names: HashSet<&str> = drifts
-            .iter()
-            .filter(|item| item.drift_type == "missing_in_watchtower")
-            .map(|item| item.workflow_name.as_str())
-            .collect();
-        assert!(missing_names.contains("Missing Dynamic"));
-        assert!(missing_names.contains("Missing Project"));
-        assert!(missing_names.contains("Scoped Dynamic"));
-
-        let missing_dynamic = drifts
-            .iter()
-            .find(|item| item.workflow_name == "Missing Dynamic")
-            .unwrap();
-        assert_eq!(missing_dynamic.source_path, RESPONSIBILITY_MAP_PATH);
-        assert_eq!(missing_dynamic.recommended_action, "review_add_dynamic_rule");
-        assert!(missing_dynamic.reason.contains("no matching active Dynamic rule"));
-
-        let kind_mismatch = drifts
-            .iter()
-            .find(|item| item.workflow_name == "Kind Mismatch")
-            .unwrap();
-        assert_eq!(kind_mismatch.drift_type, "responsibility_kind_mismatch");
-        assert_eq!(kind_mismatch.recommended_action, "review_reclassify_dynamic");
-        assert!(kind_mismatch.reason.contains("dynamic-by-run"));
-        assert!(kind_mismatch.reason.contains("project-wide"));
-        let wrong_static = drifts
-            .iter()
-            .find(|item| item.workflow_name == "Wrong Static")
-            .unwrap();
-        assert_eq!(wrong_static.drift_type, "track_binding_mismatch");
-        assert_eq!(wrong_static.expected_track_key.as_deref(), Some("mobile"));
-        assert_eq!(wrong_static.actual_track_key.as_deref(), Some("trust"));
-        assert_eq!(wrong_static.recommended_action, "review_producer_run_name");
-        assert!(wrong_static.reason.contains("static:mobile"));
-        assert!(wrong_static.reason.contains("trust"));
-
-        let ghost_static = drifts
-            .iter()
-            .find(|item| item.workflow_name == "Ghost Static")
-            .unwrap();
-        assert_eq!(ghost_static.drift_type, "track_binding_mismatch");
-        assert_eq!(ghost_static.recommended_action, "review_track_registry_or_map");
-        assert!(ghost_static.reason.contains("canonical Track"));
-
-        let stale_dynamic = drifts
-            .iter()
-            .find(|item| item.workflow_name == "Stale Dynamic")
-            .unwrap();
-        assert_eq!(stale_dynamic.drift_type, "stale_in_watchtower");
-        assert_eq!(stale_dynamic.watchtower_binding.as_deref(), Some("dynamic"));
-        assert_eq!(
-            stale_dynamic.recommended_action,
-            "review_remove_or_confirm_stale_rule"
-        );
-
-        let stale_project = drifts
-            .iter()
-            .find(|item| item.workflow_name == "Stale Project")
-            .unwrap();
-        assert_eq!(stale_project.drift_type, "stale_in_watchtower");
-        assert_eq!(
-            stale_project.watchtower_binding.as_deref(),
-            Some("project-wide")
-        );
-        assert_eq!(
-            stale_project.recommended_action,
-            "review_remove_or_confirm_stale_rule"
-        );
-
-        let preview = resolution_preview_for_drift(&conn, missing_dynamic).unwrap();
-        assert!(preview.executable);
-        assert_eq!(preview.action, "add_dynamic_rule");
-        assert!(preview.changes.iter().any(|item| item.contains("protected Dynamic")));
-        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Missing Dynamic")
-            .unwrap()
-            .is_none());
-
-        let deferred = defer_responsibility_drift_with_conn(
-            &conn,
-            &DeferResponsibilityDriftInput {
-                review_key: missing_dynamic.review_key.clone(),
-                fingerprint: missing_dynamic.fingerprint.clone(),
-            },
-        )
+    let kind_dynamic = responsibility_map_drifts(&conn)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.workflow_name == "Kind Mismatch")
         .unwrap();
-        assert_eq!(deferred.status, "deferred");
-        let deferred_drift = current_responsibility_drift(&conn, &missing_dynamic.review_key).unwrap();
-        assert_eq!(deferred_drift.review_status, "deferred");
-        let reopened = reopen_responsibility_drift_with_conn(
-            &conn,
-            &DeferResponsibilityDriftInput {
-                review_key: missing_dynamic.review_key.clone(),
-                fingerprint: missing_dynamic.fingerprint.clone(),
-            },
-        )
-        .unwrap();
-        assert_eq!(reopened.status, "open");
-        let reopened_drift = current_responsibility_drift(&conn, &missing_dynamic.review_key).unwrap();
-        assert_eq!(reopened_drift.review_status, "open");
+    let kind_dynamic_result = resolve_responsibility_drift_with_conn(
+        &conn,
+        &ResolveResponsibilityDriftInput {
+            review_key: kind_dynamic.review_key.clone(),
+            fingerprint: kind_dynamic.fingerprint.clone(),
+            action: "reclassify_to_dynamic".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(kind_dynamic_result.status, "resolved");
+    assert!(
+        exact_project_rule(&conn, project_id, repository_id, "Kind Mismatch")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        exact_dynamic_rule(&conn, project_id, repository_id, "Kind Mismatch")
+            .unwrap()
+            .unwrap()
+            .protected
+    );
 
-        let resolved_missing_dynamic = resolve_responsibility_drift_with_conn(
-            &conn,
-            &ResolveResponsibilityDriftInput {
-                review_key: missing_dynamic.review_key.clone(),
-                fingerprint: missing_dynamic.fingerprint.clone(),
-                action: "add_dynamic_rule".into(),
-            },
-        )
+    let kind_project = responsibility_map_drifts(&conn)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.workflow_name == "Kind Mismatch Project")
         .unwrap();
-        assert_eq!(resolved_missing_dynamic.status, "resolved");
-        let created_dynamic = exact_dynamic_rule(&conn, project_id, repository_id, "Missing Dynamic")
+    let kind_project_result = resolve_responsibility_drift_with_conn(
+        &conn,
+        &ResolveResponsibilityDriftInput {
+            review_key: kind_project.review_key.clone(),
+            fingerprint: kind_project.fingerprint.clone(),
+            action: "reclassify_to_project_wide".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(kind_project_result.status, "resolved");
+    assert!(
+        exact_dynamic_rule(&conn, project_id, repository_id, "Kind Mismatch Project")
             .unwrap()
-            .unwrap();
-        assert!(created_dynamic.protected);
+            .is_none()
+    );
+    assert!(
+        exact_project_rule(&conn, project_id, repository_id, "Kind Mismatch Project")
+            .unwrap()
+            .is_some()
+    );
 
-        let missing_project = responsibility_map_drifts(&conn)
-            .unwrap()
-            .into_iter()
-            .find(|item| item.workflow_name == "Missing Project")
-            .unwrap();
-        let resolved_missing_project = resolve_responsibility_drift_with_conn(
-            &conn,
-            &ResolveResponsibilityDriftInput {
-                review_key: missing_project.review_key.clone(),
-                fingerprint: missing_project.fingerprint.clone(),
-                action: "add_project_wide_rule".into(),
-            },
-        )
+    let stale_dynamic_current = responsibility_map_drifts(&conn)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.workflow_name == "Stale Dynamic")
         .unwrap();
-        assert_eq!(resolved_missing_project.status, "resolved");
-        assert!(exact_project_rule(&conn, project_id, repository_id, "Missing Project")
+    let stale_dynamic_result = resolve_responsibility_drift_with_conn(
+        &conn,
+        &ResolveResponsibilityDriftInput {
+            review_key: stale_dynamic_current.review_key.clone(),
+            fingerprint: stale_dynamic_current.fingerprint.clone(),
+            action: "remove_stale_rule".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(stale_dynamic_result.status, "resolved");
+    assert!(
+        exact_dynamic_rule(&conn, project_id, repository_id, "Stale Dynamic")
             .unwrap()
-            .is_some());
-        let manual_preserved: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9_800_005 AND manual=1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(manual_preserved, 1);
+            .is_none()
+    );
 
-        let kind_dynamic = responsibility_map_drifts(&conn)
-            .unwrap()
-            .into_iter()
-            .find(|item| item.workflow_name == "Kind Mismatch")
-            .unwrap();
-        let kind_dynamic_result = resolve_responsibility_drift_with_conn(
-            &conn,
-            &ResolveResponsibilityDriftInput {
-                review_key: kind_dynamic.review_key.clone(),
-                fingerprint: kind_dynamic.fingerprint.clone(),
-                action: "reclassify_to_dynamic".into(),
-            },
-        )
+    let wrong_static_current = responsibility_map_drifts(&conn)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.workflow_name == "Wrong Static")
         .unwrap();
-        assert_eq!(kind_dynamic_result.status, "resolved");
-        assert!(exact_project_rule(&conn, project_id, repository_id, "Kind Mismatch")
-            .unwrap()
-            .is_none());
-        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Kind Mismatch")
-            .unwrap()
-            .unwrap()
-            .protected);
+    let blocked_preview = resolution_preview_for_drift(&conn, &wrong_static_current).unwrap();
+    assert!(!blocked_preview.executable);
+    assert_eq!(blocked_preview.action, "blocked");
+    let blocked_result = resolve_responsibility_drift_with_conn(
+        &conn,
+        &ResolveResponsibilityDriftInput {
+            review_key: wrong_static_current.review_key.clone(),
+            fingerprint: wrong_static_current.fingerprint.clone(),
+            action: "blocked".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(blocked_result.status, "blocked");
 
-        let kind_project = responsibility_map_drifts(&conn)
-            .unwrap()
-            .into_iter()
-            .find(|item| item.workflow_name == "Kind Mismatch Project")
-            .unwrap();
-        let kind_project_result = resolve_responsibility_drift_with_conn(
-            &conn,
-            &ResolveResponsibilityDriftInput {
-                review_key: kind_project.review_key.clone(),
-                fingerprint: kind_project.fingerprint.clone(),
-                action: "reclassify_to_project_wide".into(),
-            },
-        )
+    let scoped_dynamic = responsibility_map_drifts(&conn)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.workflow_name == "Scoped Dynamic")
         .unwrap();
-        assert_eq!(kind_project_result.status, "resolved");
-        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Kind Mismatch Project")
-            .unwrap()
-            .is_none());
-        assert!(exact_project_rule(&conn, project_id, repository_id, "Kind Mismatch Project")
-            .unwrap()
-            .is_some());
-
-        let stale_dynamic_current = responsibility_map_drifts(&conn)
-            .unwrap()
-            .into_iter()
-            .find(|item| item.workflow_name == "Stale Dynamic")
-            .unwrap();
-        let stale_dynamic_result = resolve_responsibility_drift_with_conn(
-            &conn,
-            &ResolveResponsibilityDriftInput {
-                review_key: stale_dynamic_current.review_key.clone(),
-                fingerprint: stale_dynamic_current.fingerprint.clone(),
-                action: "remove_stale_rule".into(),
-            },
-        )
-        .unwrap();
-        assert_eq!(stale_dynamic_result.status, "resolved");
-        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Stale Dynamic")
-            .unwrap()
-            .is_none());
-
-        let wrong_static_current = responsibility_map_drifts(&conn)
-            .unwrap()
-            .into_iter()
-            .find(|item| item.workflow_name == "Wrong Static")
-            .unwrap();
-        let blocked_preview = resolution_preview_for_drift(&conn, &wrong_static_current).unwrap();
-        assert!(!blocked_preview.executable);
-        assert_eq!(blocked_preview.action, "blocked");
-        let blocked_result = resolve_responsibility_drift_with_conn(
-            &conn,
-            &ResolveResponsibilityDriftInput {
-                review_key: wrong_static_current.review_key.clone(),
-                fingerprint: wrong_static_current.fingerprint.clone(),
-                action: "blocked".into(),
-            },
-        )
-        .unwrap();
-        assert_eq!(blocked_result.status, "blocked");
-
-        let scoped_dynamic = responsibility_map_drifts(&conn)
-            .unwrap()
-            .into_iter()
-            .find(|item| item.workflow_name == "Scoped Dynamic")
-            .unwrap();
-        let old_fingerprint = scoped_dynamic.fingerprint.clone();
-        conn.execute(
-            "UPDATE repository_responsibility_contracts
+    let old_fingerprint = scoped_dynamic.fingerprint.clone();
+    conn.execute(
+        "UPDATE repository_responsibility_contracts
              SET binding_kind='project-wide',source_binding='unassigned-by-design'
              WHERE repository_id=? AND workflow_name='Scoped Dynamic'",
-            params![repository_id],
-        )
-        .unwrap();
-        let stale_rejected = resolve_responsibility_drift_with_conn(
-            &conn,
-            &ResolveResponsibilityDriftInput {
-                review_key: scoped_dynamic.review_key.clone(),
-                fingerprint: old_fingerprint,
-                action: "add_dynamic_rule".into(),
-            },
-        )
-        .unwrap();
-        assert_eq!(stale_rejected.status, "stale_rejected");
-        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Scoped Dynamic")
+        params![repository_id],
+    )
+    .unwrap();
+    let stale_rejected = resolve_responsibility_drift_with_conn(
+        &conn,
+        &ResolveResponsibilityDriftInput {
+            review_key: scoped_dynamic.review_key.clone(),
+            fingerprint: old_fingerprint,
+            action: "add_dynamic_rule".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(stale_rejected.status, "stale_rejected");
+    assert!(
+        exact_dynamic_rule(&conn, project_id, repository_id, "Scoped Dynamic")
             .unwrap()
-            .is_none());
-        let stale_attention = current_responsibility_drift(&conn, &scoped_dynamic.review_key).unwrap();
-        assert_eq!(stale_attention.review_status, "attention");
-        let reopened_stale = reopen_responsibility_drift_with_conn(
-            &conn,
-            &DeferResponsibilityDriftInput {
-                review_key: stale_attention.review_key.clone(),
-                fingerprint: stale_attention.fingerprint.clone(),
-            },
-        )
-        .unwrap();
-        assert_eq!(reopened_stale.status, "open");
-        assert_eq!(
-            current_responsibility_drift(&conn, &stale_attention.review_key)
-                .unwrap()
-                .review_status,
-            "open"
-        );
-
-        let failed_drift = responsibility_map_drifts(&conn)
+            .is_none()
+    );
+    let stale_attention = current_responsibility_drift(&conn, &scoped_dynamic.review_key).unwrap();
+    assert_eq!(stale_attention.review_status, "attention");
+    let reopened_stale = reopen_responsibility_drift_with_conn(
+        &conn,
+        &DeferResponsibilityDriftInput {
+            review_key: stale_attention.review_key.clone(),
+            fingerprint: stale_attention.fingerprint.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(reopened_stale.status, "open");
+    assert_eq!(
+        current_responsibility_drift(&conn, &stale_attention.review_key)
             .unwrap()
-            .into_iter()
-            .find(|item| item.workflow_name == "Stale Project")
+            .review_status,
+        "open"
+    );
+
+    let failed_drift = responsibility_map_drifts(&conn)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.workflow_name == "Stale Project")
+        .unwrap();
+    let failed_binding = current_watchtower_responsibility_binding(&conn, &failed_drift).unwrap();
+    insert_resolution_audit(
+        &conn,
+        &failed_drift,
+        "remove_stale_rule",
+        &failed_drift.fingerprint,
+        &failed_drift.fingerprint,
+        failed_binding.as_deref(),
+        "failed",
+    )
+    .unwrap();
+    assert_eq!(
+        current_responsibility_drift(&conn, &failed_drift.review_key)
+            .unwrap()
+            .review_status,
+        "attention"
+    );
+    let reopened_failed = reopen_responsibility_drift_with_conn(
+        &conn,
+        &DeferResponsibilityDriftInput {
+            review_key: failed_drift.review_key.clone(),
+            fingerprint: failed_drift.fingerprint.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(reopened_failed.status, "open");
+
+    let track_count_final: i64 = conn
+        .query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(track_count_before, track_count_final);
+    let audit_results: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT result FROM responsibility_resolution_audit ORDER BY id")
             .unwrap();
-        let failed_binding = current_watchtower_responsibility_binding(&conn, &failed_drift).unwrap();
-        insert_resolution_audit(
-            &conn,
-            &failed_drift,
-            "remove_stale_rule",
-            &failed_drift.fingerprint,
-            &failed_drift.fingerprint,
-            failed_binding.as_deref(),
-            "failed",
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    assert!(audit_results.contains(&"deferred".to_string()));
+    assert!(audit_results.contains(&"resolved".to_string()));
+    assert!(audit_results.contains(&"blocked".to_string()));
+    assert!(audit_results.contains(&"stale_rejected".to_string()));
+
+    let history = responsibility_resolution_history(&conn, 200).unwrap();
+    let deferred_history = history
+        .iter()
+        .find(|item| item.id == deferred.audit_id)
+        .unwrap();
+    assert_eq!(deferred_history.result, "deferred");
+    assert_eq!(deferred_history.before_watchtower_contract, None);
+    assert_eq!(deferred_history.after_watchtower_contract, None);
+    assert!(!deferred_history.stale);
+
+    let missing_dynamic_history: Vec<&ResponsibilityResolutionAuditEntry> = history
+        .iter()
+        .filter(|item| item.review_key == missing_dynamic.review_key)
+        .collect();
+    assert_eq!(missing_dynamic_history.len(), 3);
+    assert!(missing_dynamic_history
+        .iter()
+        .any(|item| item.result == "deferred"));
+    assert!(missing_dynamic_history
+        .iter()
+        .any(|item| item.action == "reopen" && item.result == "still_open"));
+    let resolved_dynamic_history = missing_dynamic_history
+        .iter()
+        .find(|item| item.result == "resolved")
+        .unwrap();
+    assert_eq!(
+        resolved_dynamic_history
+            .after_watchtower_contract
+            .as_deref(),
+        Some("dynamic")
+    );
+    assert_eq!(
+        resolved_dynamic_history.repository_contract,
+        "dynamic-by-run"
+    );
+
+    let resolved_project_history = history
+        .iter()
+        .find(|item| item.id == resolved_missing_project.audit_id)
+        .unwrap();
+    assert_eq!(
+        resolved_project_history
+            .after_watchtower_contract
+            .as_deref(),
+        Some("project-wide")
+    );
+    let reclassified_dynamic_history = history
+        .iter()
+        .find(|item| item.id == kind_dynamic_result.audit_id)
+        .unwrap();
+    assert_eq!(
+        reclassified_dynamic_history
+            .before_watchtower_contract
+            .as_deref(),
+        Some("project-wide")
+    );
+    assert_eq!(
+        reclassified_dynamic_history
+            .after_watchtower_contract
+            .as_deref(),
+        Some("dynamic")
+    );
+    let reclassified_project_history = history
+        .iter()
+        .find(|item| item.id == kind_project_result.audit_id)
+        .unwrap();
+    assert_eq!(
+        reclassified_project_history
+            .before_watchtower_contract
+            .as_deref(),
+        Some("dynamic")
+    );
+    assert_eq!(
+        reclassified_project_history
+            .after_watchtower_contract
+            .as_deref(),
+        Some("project-wide")
+    );
+    let stale_history = history
+        .iter()
+        .find(|item| item.id == stale_rejected.audit_id)
+        .unwrap();
+    assert_eq!(stale_history.result, "stale_rejected");
+    assert!(stale_history.stale);
+    assert_ne!(
+        stale_history.requested_fingerprint,
+        stale_history.current_fingerprint
+    );
+    let blocked_history = history
+        .iter()
+        .find(|item| item.id == blocked_result.audit_id)
+        .unwrap();
+    assert_eq!(blocked_history.result, "blocked");
+    assert_eq!(blocked_history.repository_id, repository_id);
+
+    let deferred_row_unchanged: String = conn
+        .query_row(
+            "SELECT result FROM responsibility_resolution_audit WHERE id=?",
+            params![deferred.audit_id],
+            |row| row.get(0),
         )
         .unwrap();
-        assert_eq!(
-            current_responsibility_drift(&conn, &failed_drift.review_key)
-                .unwrap()
-                .review_status,
-            "attention"
-        );
-        let reopened_failed = reopen_responsibility_drift_with_conn(
-            &conn,
-            &DeferResponsibilityDriftInput {
-                review_key: failed_drift.review_key.clone(),
-                fingerprint: failed_drift.fingerprint.clone(),
-            },
+    assert_eq!(deferred_row_unchanged, "deferred");
+    let manual_assignment_final: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM run_assignments WHERE run_id=9_800_005 AND manual=1",
+            [],
+            |row| row.get(0),
         )
         .unwrap();
-        assert_eq!(reopened_failed.status, "open");
+    assert_eq!(manual_assignment_final, 1);
 
-        let track_count_final: i64 =
-            conn.query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0)).unwrap();
-        assert_eq!(track_count_before, track_count_final);
-        let audit_results: Vec<String> = {
-            let mut stmt = conn
-                .prepare("SELECT result FROM responsibility_resolution_audit ORDER BY id")
-                .unwrap();
-            stmt.query_map([], |row| row.get(0))
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-        };
-        assert!(audit_results.contains(&"deferred".to_string()));
-        assert!(audit_results.contains(&"resolved".to_string()));
-        assert!(audit_results.contains(&"blocked".to_string()));
-        assert!(audit_results.contains(&"stale_rejected".to_string()));
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
 
-        let history = responsibility_resolution_history(&conn, 200).unwrap();
-        let deferred_history = history
-            .iter()
-            .find(|item| item.id == deferred.audit_id)
-            .unwrap();
-        assert_eq!(deferred_history.result, "deferred");
-        assert_eq!(deferred_history.before_watchtower_contract, None);
-        assert_eq!(deferred_history.after_watchtower_contract, None);
-        assert!(!deferred_history.stale);
+#[test]
+fn repository_responsibility_binding_normalizes_supported_contracts() {
+    assert_eq!(
+        normalize_repository_binding("unassigned-by-design"),
+        ("project-wide".into(), None)
+    );
+    assert_eq!(
+        normalize_repository_binding("dynamic-by-run"),
+        ("dynamic".into(), None)
+    );
+    assert_eq!(
+        normalize_repository_binding("static:taxonomy&AI"),
+        ("static".into(), Some("taxonomy-ai".into()))
+    );
+    assert_eq!(
+        normalize_repository_binding("future-contract"),
+        ("unknown".into(), None)
+    );
+}
 
-        let missing_dynamic_history: Vec<&ResponsibilityResolutionAuditEntry> = history
-            .iter()
-            .filter(|item| item.review_key == missing_dynamic.review_key)
-            .collect();
-        assert_eq!(missing_dynamic_history.len(), 3);
-        assert!(missing_dynamic_history.iter().any(|item| item.result == "deferred"));
-        assert!(missing_dynamic_history
-            .iter()
-            .any(|item| item.action == "reopen" && item.result == "still_open"));
-        let resolved_dynamic_history = missing_dynamic_history
-            .iter()
-            .find(|item| item.result == "resolved")
-            .unwrap();
-        assert_eq!(
-            resolved_dynamic_history.after_watchtower_contract.as_deref(),
-            Some("dynamic")
-        );
-        assert_eq!(resolved_dynamic_history.repository_contract, "dynamic-by-run");
-
-        let resolved_project_history = history
-            .iter()
-            .find(|item| item.id == resolved_missing_project.audit_id)
-            .unwrap();
-        assert_eq!(
-            resolved_project_history.after_watchtower_contract.as_deref(),
-            Some("project-wide")
-        );
-        let reclassified_dynamic_history = history
-            .iter()
-            .find(|item| item.id == kind_dynamic_result.audit_id)
-            .unwrap();
-        assert_eq!(
-            reclassified_dynamic_history.before_watchtower_contract.as_deref(),
-            Some("project-wide")
-        );
-        assert_eq!(
-            reclassified_dynamic_history.after_watchtower_contract.as_deref(),
-            Some("dynamic")
-        );
-        let reclassified_project_history = history
-            .iter()
-            .find(|item| item.id == kind_project_result.audit_id)
-            .unwrap();
-        assert_eq!(
-            reclassified_project_history.before_watchtower_contract.as_deref(),
-            Some("dynamic")
-        );
-        assert_eq!(
-            reclassified_project_history.after_watchtower_contract.as_deref(),
-            Some("project-wide")
-        );
-        let stale_history = history
-            .iter()
-            .find(|item| item.id == stale_rejected.audit_id)
-            .unwrap();
-        assert_eq!(stale_history.result, "stale_rejected");
-        assert!(stale_history.stale);
-        assert_ne!(
-            stale_history.requested_fingerprint,
-            stale_history.current_fingerprint
-        );
-        let blocked_history = history
-            .iter()
-            .find(|item| item.id == blocked_result.audit_id)
-            .unwrap();
-        assert_eq!(blocked_history.result, "blocked");
-        assert_eq!(blocked_history.repository_id, repository_id);
-
-        let deferred_row_unchanged: String = conn
-            .query_row(
-                "SELECT result FROM responsibility_resolution_audit WHERE id=?",
-                params![deferred.audit_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(deferred_row_unchanged, "deferred");
-        let manual_assignment_final: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9_800_005 AND manual=1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(manual_assignment_final, 1);
-
-        drop(conn);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
-    }
-
-    #[test]
-    fn repository_responsibility_binding_normalizes_supported_contracts() {
-        assert_eq!(
-            normalize_repository_binding("unassigned-by-design"),
-            ("project-wide".into(), None)
-        );
-        assert_eq!(
-            normalize_repository_binding("dynamic-by-run"),
-            ("dynamic".into(), None)
-        );
-        assert_eq!(
-            normalize_repository_binding("static:taxonomy&AI"),
-            ("static".into(), Some("taxonomy-ai".into()))
-        );
-        assert_eq!(
-            normalize_repository_binding("future-contract"),
-            ("unknown".into(), None)
-        );
-    }
-
-    #[test]
-    fn attribution_detail_identifies_repository_specific_project_rule() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
+#[test]
+fn attribution_detail_identifies_repository_specific_project_rule() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
             "CREATE TABLE monitored_repositories(
                id INTEGER PRIMARY KEY,
                project_id INTEGER NOT NULL,
@@ -3270,59 +3378,59 @@
              INSERT INTO project_workflow_rules VALUES(8,1,100,'Governance',1);"
         ).unwrap();
 
-        let detail = load_run_attribution_detail(&conn, 1000).unwrap();
-        assert_eq!(detail.resolution_status, "project");
-        assert_eq!(detail.source.as_deref(), Some("project_workflow"));
-        assert_eq!(detail.confidence, Some(100));
-        assert_eq!(detail.project_rule_id, Some(8));
-        assert_eq!(detail.project_rule_repository_id, Some(100));
-        assert!(detail.evidence.is_empty());
-    }
+    let detail = load_run_attribution_detail(&conn, 1000).unwrap();
+    assert_eq!(detail.resolution_status, "project");
+    assert_eq!(detail.source.as_deref(), Some("project_workflow"));
+    assert_eq!(detail.confidence, Some(100));
+    assert_eq!(detail.project_rule_id, Some(8));
+    assert_eq!(detail.project_rule_repository_id, Some(100));
+    assert!(detail.evidence.is_empty());
+}
 
-    #[test]
-    fn workflow_name_fingerprint_alone_stays_below_auto_assignment_threshold() {
-        let tracks = vec![track(10, "ops")];
-        let fingerprints = vec![Fingerprint {
-            track_key: "ops".into(),
-            signal_type: "workflow_name".into(),
-            pattern: "Shared CI".into(),
-            weight: 50,
-        }];
-        let run = GithubRun {
-            id: 101,
-            workflow_id: 1,
-            name: "Shared CI".into(),
-            path: None,
-            display_title: Some("Shared CI".into()),
-            event: "push".into(),
-            head_branch: Some("main".into()),
-            head_sha: "sha-101".into(),
-            run_number: 101,
-            run_attempt: 1,
-            status: "completed".into(),
-            conclusion: Some("success".into()),
-            html_url: "https://github.com/example/repo/actions/runs/101".into(),
-            created_at: "2026-09-24T01:00:00Z".into(),
-            run_started_at: Some("2026-09-24T01:00:01Z".into()),
-            updated_at: "2026-09-24T01:01:00Z".into(),
-            pull_requests: Vec::new(),
-        };
+#[test]
+fn workflow_name_fingerprint_alone_stays_below_auto_assignment_threshold() {
+    let tracks = vec![track(10, "ops")];
+    let fingerprints = vec![Fingerprint {
+        track_key: "ops".into(),
+        signal_type: "workflow_name".into(),
+        pattern: "Shared CI".into(),
+        weight: 50,
+    }];
+    let run = GithubRun {
+        id: 101,
+        workflow_id: 1,
+        name: "Shared CI".into(),
+        path: None,
+        display_title: Some("Shared CI".into()),
+        event: "push".into(),
+        head_branch: Some("main".into()),
+        head_sha: "sha-101".into(),
+        run_number: 101,
+        run_attempt: 1,
+        status: "completed".into(),
+        conclusion: Some("success".into()),
+        html_url: "https://github.com/example/repo/actions/runs/101".into(),
+        created_at: "2026-09-24T01:00:00Z".into(),
+        run_started_at: Some("2026-09-24T01:00:01Z".into()),
+        updated_at: "2026-09-24T01:01:00Z".into(),
+        pull_requests: Vec::new(),
+    };
 
-        let resolution = resolve_evidence(
-            &tracks,
-            &HashMap::new(),
-            fingerprint_evidence(&fingerprints, &run),
-        );
+    let resolution = resolve_evidence(
+        &tracks,
+        &HashMap::new(),
+        fingerprint_evidence(&fingerprints, &run),
+    );
 
-        assert_eq!(resolution.status, "unassigned");
-        assert_eq!(resolution.track_id, None);
-        assert_eq!(resolution.confidence, Some(50));
-    }
+    assert_eq!(resolution.status, "unassigned");
+    assert_eq!(resolution.track_id, None);
+    assert_eq!(resolution.confidence, Some(50));
+}
 
-    #[test]
-    fn manual_assignment_learning_and_project_wide_transition_complete_acceptance_cycle() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
+#[test]
+fn manual_assignment_learning_and_project_wide_transition_complete_acceptance_cycle() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
             "CREATE TABLE watch_tracks(
                id INTEGER PRIMARY KEY,
                project_id INTEGER NOT NULL,
@@ -3395,109 +3503,131 @@
                (2000,200,'Shared CI','.github/workflows/shared.yml','unassigned',0,NULL);"
         ).unwrap();
 
-        assign_run_in_conn(&conn, 1000, 10, "2026-09-24T01:00:00Z").unwrap();
+    assign_run_in_conn(&conn, 1000, 10, "2026-09-24T01:00:00Z").unwrap();
 
-        let manual: (i64, i64, String) = conn.query_row(
+    let manual: (i64, i64, String) = conn
+        .query_row(
             "SELECT track_id,manual,source FROM run_assignments WHERE run_id=1000",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).unwrap();
-        assert_eq!(manual, (10, 1, "manual".into()));
+        )
+        .unwrap();
+    assert_eq!(manual, (10, 1, "manual".into()));
 
-        let learned = load_fingerprints(&conn, 1, 100).unwrap();
-        let learned_signals: HashMap<_, _> = learned
-            .iter()
-            .map(|item| (item.signal_type.as_str(), item.weight))
-            .collect();
-        assert_eq!(learned_signals.get("workflow_name"), Some(&50));
-        assert_eq!(learned_signals.get("workflow_path"), Some(&35));
-        assert!(load_fingerprints(&conn, 2, 200).unwrap().is_empty());
+    let learned = load_fingerprints(&conn, 1, 100).unwrap();
+    let learned_signals: HashMap<_, _> = learned
+        .iter()
+        .map(|item| (item.signal_type.as_str(), item.weight))
+        .collect();
+    assert_eq!(learned_signals.get("workflow_name"), Some(&50));
+    assert_eq!(learned_signals.get("workflow_path"), Some(&35));
+    assert!(load_fingerprints(&conn, 2, 200).unwrap().is_empty());
 
-        let next_run = GithubRun {
-            id: 1001,
-            workflow_id: 1,
-            name: "Shared CI".into(),
-            path: Some(".github/workflows/shared.yml".into()),
-            display_title: Some("Shared CI".into()),
-            event: "push".into(),
-            head_branch: Some("main".into()),
-            head_sha: "sha-1001".into(),
-            run_number: 2,
-            run_attempt: 1,
-            status: "completed".into(),
-            conclusion: Some("success".into()),
-            html_url: "https://github.com/example/repo/actions/runs/1001".into(),
-            created_at: "2026-09-24T01:10:00Z".into(),
-            run_started_at: Some("2026-09-24T01:10:01Z".into()),
-            updated_at: "2026-09-24T01:11:00Z".into(),
-            pull_requests: Vec::new(),
-        };
-        let inferred = resolve_evidence(
-            &[track(10, "ops")],
-            &HashMap::new(),
-            fingerprint_evidence(&learned, &next_run),
-        );
-        assert_eq!(inferred.status, "assigned");
-        assert_eq!(inferred.track_id, Some(10));
-        assert_eq!(inferred.confidence, Some(85));
-        assert_eq!(inferred.source.as_deref(), Some("inference"));
+    let next_run = GithubRun {
+        id: 1001,
+        workflow_id: 1,
+        name: "Shared CI".into(),
+        path: Some(".github/workflows/shared.yml".into()),
+        display_title: Some("Shared CI".into()),
+        event: "push".into(),
+        head_branch: Some("main".into()),
+        head_sha: "sha-1001".into(),
+        run_number: 2,
+        run_attempt: 1,
+        status: "completed".into(),
+        conclusion: Some("success".into()),
+        html_url: "https://github.com/example/repo/actions/runs/1001".into(),
+        created_at: "2026-09-24T01:10:00Z".into(),
+        run_started_at: Some("2026-09-24T01:10:01Z".into()),
+        updated_at: "2026-09-24T01:11:00Z".into(),
+        pull_requests: Vec::new(),
+    };
+    let inferred = resolve_evidence(
+        &[track(10, "ops")],
+        &HashMap::new(),
+        fingerprint_evidence(&learned, &next_run),
+    );
+    assert_eq!(inferred.status, "assigned");
+    assert_eq!(inferred.track_id, Some(10));
+    assert_eq!(inferred.confidence, Some(85));
+    assert_eq!(inferred.source.as_deref(), Some("inference"));
 
-        persist_resolution(&conn, 1001, &inferred, "2026-09-24T01:11:00Z").unwrap();
-        let automatic: (i64, i64, String) = conn.query_row(
+    persist_resolution(&conn, 1001, &inferred, "2026-09-24T01:11:00Z").unwrap();
+    let automatic: (i64, i64, String) = conn
+        .query_row(
             "SELECT track_id,manual,source FROM run_assignments WHERE run_id=1001",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).unwrap();
-        assert_eq!(automatic, (10, 0, "inference".into()));
+        )
+        .unwrap();
+    assert_eq!(automatic, (10, 0, "inference".into()));
 
-        assign_run_to_project_in_conn(
-            &conn,
-            1001,
-            1,
-            true,
-            "2026-09-24T01:12:00Z",
-        ).unwrap();
+    assign_run_to_project_in_conn(&conn, 1001, 1, true, "2026-09-24T01:12:00Z").unwrap();
 
-        let rules = list_project_workflow_rules(&conn).unwrap();
-        assert!(project_rule_matches(&rules, 1, 100, "Shared CI"));
-        assert!(project_rule_matches(&rules, 1, 110, "Shared CI"));
-        assert!(!project_rule_matches(&rules, 2, 200, "Shared CI"));
+    let rules = list_project_workflow_rules(&conn).unwrap();
+    assert!(project_rule_matches(&rules, 1, 100, "Shared CI"));
+    assert!(project_rule_matches(&rules, 1, 110, "Shared CI"));
+    assert!(!project_rule_matches(&rules, 2, 200, "Shared CI"));
 
-        let promoted_status: String = conn.query_row(
+    let promoted_status: String = conn
+        .query_row(
             "SELECT resolution_status FROM workflow_runs WHERE run_id=1001",
             [],
             |row| row.get(0),
-        ).unwrap();
-        assert_eq!(promoted_status, "project");
-        let promoted_assignment_count: i64 = conn.query_row(
+        )
+        .unwrap();
+    assert_eq!(promoted_status, "project");
+    let promoted_assignment_count: i64 = conn
+        .query_row(
             "SELECT COUNT(*) FROM run_assignments WHERE run_id=1001",
             [],
             |row| row.get(0),
-        ).unwrap();
-        assert_eq!(promoted_assignment_count, 0);
+        )
+        .unwrap();
+    assert_eq!(promoted_assignment_count, 0);
 
-        let preserved_manual: (String, i64) = conn.query_row(
+    let preserved_manual: (String, i64) = conn
+        .query_row(
             "SELECT wr.resolution_status,ra.manual
              FROM workflow_runs wr
              JOIN run_assignments ra ON ra.run_id=wr.run_id
              WHERE wr.run_id=1000",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
-        assert_eq!(preserved_manual, ("assigned".into(), 1));
+        )
+        .unwrap();
+    assert_eq!(preserved_manual, ("assigned".into(), 1));
 
-        let other_project_status: String = conn.query_row(
+    let other_project_status: String = conn
+        .query_row(
             "SELECT resolution_status FROM workflow_runs WHERE run_id=2000",
             [],
             |row| row.get(0),
-        ).unwrap();
-        assert_eq!(other_project_status, "unassigned");
-    }
+        )
+        .unwrap();
+    assert_eq!(other_project_status, "unassigned");
+}
 
-    #[test]
-    fn explicit_conflict_model_has_distinct_keys() {
-        let tracks = vec![track(1, "ops"), track(2, "saju")];
-        let known: HashSet<_> = tracks.iter().map(|t| t.track_key.as_str()).collect();
-        assert!(known.contains("ops"));
-        assert!(known.contains("saju"));
-    }
+#[test]
+fn explicit_conflict_model_has_distinct_keys() {
+    let tracks = vec![track(1, "ops"), track(2, "saju")];
+    let known: HashSet<_> = tracks.iter().map(|t| t.track_key.as_str()).collect();
+    assert!(known.contains("ops"));
+    assert!(known.contains("saju"));
+}
+
+#[test]
+fn responsibility_review_priority_and_age_bucket_follow_operational_order() {
+    assert_eq!(responsibility_review_priority("attention", 0), "p0");
+    assert_eq!(responsibility_review_priority("open", 72), "p1");
+    assert_eq!(responsibility_review_priority("open", 71), "p2");
+    assert_eq!(responsibility_review_priority("deferred", 120), "p3");
+    assert_eq!(responsibility_review_priority("blocked", 120), "blocked");
+    assert_eq!(responsibility_review_age_bucket(23), "fresh");
+    assert_eq!(responsibility_review_age_bucket(24), "aging");
+    assert_eq!(responsibility_review_age_bucket(71), "aging");
+    assert_eq!(responsibility_review_age_bucket(72), "overdue");
+    assert!(responsibility_review_priority_rank("p0") < responsibility_review_priority_rank("p1"));
+    assert!(responsibility_review_priority_rank("p1") < responsibility_review_priority_rank("p2"));
+    assert!(responsibility_review_priority_rank("p2") < responsibility_review_priority_rank("p3"));
+}
