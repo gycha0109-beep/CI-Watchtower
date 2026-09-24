@@ -406,6 +406,24 @@ select:focus { border-color: #4a73ee; box-shadow: 0 0 0 3px rgba(74,115,238,.12)
 .attribution-audit-panel { padding: 18px 20px; border-color: #30456f; }
 .attribution-audit-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
 .attribution-audit-head h2 { margin-bottom: 0; }
+.audit-producer-context {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 7px;
+  border: 1px solid #355043;
+  border-radius: 999px;
+  background: rgba(75,193,139,.08);
+  color: #7ed8aa;
+  padding: 3px 7px;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .04em;
+}
+.audit-producer-context.historical {
+  border-color: #3d465d;
+  background: rgba(113,128,156,.08);
+  color: #8f9db7;
+}
 .audit-summary-grid {
   display: grid;
   grid-template-columns: repeat(5,minmax(0,1fr));
