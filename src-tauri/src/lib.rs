@@ -69,6 +69,25 @@ struct ProjectWorkflowRuleInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct DynamicWorkflowRule {
+    id: i64,
+    project_id: i64,
+    repository_id: Option<i64>,
+    workflow_name: String,
+    active: bool,
+    protected: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DynamicWorkflowRuleInput {
+    project_id: i64,
+    repository_id: Option<i64>,
+    workflow_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Track {
     id: i64,
     project_id: i64,
@@ -222,6 +241,7 @@ struct Dashboard {
     repositories: Vec<MonitoredRepository>,
     tracks: Vec<DashboardTrack>,
     project_workflow_rules: Vec<ProjectWorkflowRule>,
+    dynamic_workflow_rules: Vec<DynamicWorkflowRule>,
     repository_scope_stats: Vec<RepositoryScopeStats>,
     producer_contract_stats: Vec<ProducerContractStats>,
     producer_contract_runs: Vec<ProducerContractRun>,
@@ -514,6 +534,7 @@ fn init_db(path: &Path) -> Result<()> {
           repository_id INTEGER REFERENCES monitored_repositories(id) ON DELETE CASCADE,
           workflow_name TEXT NOT NULL,
           active INTEGER NOT NULL DEFAULT 1,
+          protected INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL
         );
 
@@ -596,6 +617,7 @@ fn init_db(path: &Path) -> Result<()> {
     ensure_column(&conn, "watch_tracks", "project_id", "INTEGER")?;
     ensure_column(&conn, "monitored_repositories", "project_id", "INTEGER")?;
     ensure_column(&conn, "workflow_runs", "last_resolution_attempt_at", "TEXT")?;
+    ensure_column(&conn, "dynamic_workflow_rules", "protected", "INTEGER NOT NULL DEFAULT 0")?;
     conn.execute(
         "INSERT OR IGNORE INTO app_settings(id, queue_congestion_threshold, active_poll_seconds, idle_poll_seconds, auto_archive_completed, queue_congested) VALUES(1,?,?,?,?,0)",
         params![DEFAULT_QUEUE_THRESHOLD, DEFAULT_ACTIVE_POLL_SECONDS, DEFAULT_IDLE_POLL_SECONDS, 0],
@@ -1025,9 +1047,16 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
         if let Some(repository_id) = saju_repository_id {
             conn.execute(
                 "INSERT OR IGNORE INTO dynamic_workflow_rules(
-                   project_id,repository_id,workflow_name,active,created_at
-                 ) VALUES(?,?,'MESH6J Manual Browser Capture Surface CI',1,?)",
+                   project_id,repository_id,workflow_name,active,protected,created_at
+                 ) VALUES(?,?,'MESH6J Manual Browser Capture Surface CI',1,1,?)",
                 params![myeongha_project_id, repository_id, now],
+            )?;
+            conn.execute(
+                "UPDATE dynamic_workflow_rules
+                 SET active=1,protected=1
+                 WHERE project_id=? AND repository_id=?
+                   AND workflow_name='MESH6J Manual Browser Capture Surface CI'",
+                params![myeongha_project_id, repository_id],
             )?;
         }
     }
@@ -1256,7 +1285,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.12")
+        .user_agent("ci-watchtower/0.3.13")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -1445,6 +1474,24 @@ fn list_project_workflow_rules(conn: &Connection) -> Result<Vec<ProjectWorkflowR
             repository_id: row.get(2)?,
             workflow_name: row.get(3)?,
             active: row.get::<_, i64>(4)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn list_dynamic_workflow_rules(conn: &Connection) -> Result<Vec<DynamicWorkflowRule>> {
+    let mut stmt = conn.prepare(
+        "SELECT id,project_id,repository_id,workflow_name,active,protected
+         FROM dynamic_workflow_rules WHERE active=1 ORDER BY project_id,workflow_name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DynamicWorkflowRule {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            repository_id: row.get(2)?,
+            workflow_name: row.get(3)?,
+            active: row.get::<_, i64>(4)? != 0,
+            protected: row.get::<_, i64>(5)? != 0,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1993,6 +2040,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
     let repositories = list_repositories(&conn, false)?;
     let tracks = list_tracks(&conn, true)?;
     let project_workflow_rules = list_project_workflow_rules(&conn)?;
+    let dynamic_workflow_rules = list_dynamic_workflow_rules(&conn)?;
     let mut dashboard_tracks = Vec::with_capacity(tracks.len());
     for track in tracks {
         let runs = runs_for_track(&conn, track.id, 30)?;
@@ -2060,6 +2108,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         repositories,
         tracks: dashboard_tracks,
         project_workflow_rules,
+        dynamic_workflow_rules,
         repository_scope_stats,
         producer_contract_stats,
         producer_contract_runs,
@@ -3103,6 +3152,86 @@ fn delete_project_workflow_rule(id: i64, state: State<'_, AppState>) -> std::res
 }
 
 #[tauri::command]
+fn save_dynamic_workflow_rule(
+    input: DynamicWorkflowRuleInput,
+    state: State<'_, AppState>,
+) -> std::result::Result<i64, String> {
+    let result = (|| -> Result<i64> {
+        let workflow_name = input.workflow_name.trim();
+        if workflow_name.is_empty() {
+            return Err(anyhow!("Workflow 이름을 입력하십시오."));
+        }
+        let conn = db(&state)?;
+        let project_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1)",
+            params![input.project_id],
+            |row| Ok(row.get::<_, i64>(0)? != 0),
+        )?;
+        if !project_exists {
+            return Err(anyhow!("프로젝트를 찾지 못했습니다."));
+        }
+        if let Some(repository_id) = input.repository_id {
+            let belongs: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM monitored_repositories WHERE id=? AND project_id=?)",
+                params![repository_id, input.project_id],
+                |row| Ok(row.get::<_, i64>(0)? != 0),
+            )?;
+            if !belongs {
+                return Err(anyhow!("저장소가 선택한 프로젝트에 속하지 않습니다."));
+            }
+        }
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR IGNORE INTO dynamic_workflow_rules(
+               project_id,repository_id,workflow_name,active,protected,created_at
+             ) VALUES(?,?,?,1,0,?)",
+            params![input.project_id, input.repository_id, workflow_name, now],
+        )?;
+        conn.execute(
+            "UPDATE dynamic_workflow_rules SET active=1
+             WHERE project_id=? AND workflow_name=?
+               AND ((repository_id IS NULL AND ? IS NULL) OR repository_id=?)",
+            params![input.project_id, workflow_name, input.repository_id, input.repository_id],
+        )?;
+        let id: i64 = conn.query_row(
+            "SELECT id FROM dynamic_workflow_rules
+             WHERE project_id=? AND workflow_name=?
+               AND ((repository_id IS NULL AND ? IS NULL) OR repository_id=?)",
+            params![input.project_id, workflow_name, input.repository_id, input.repository_id],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_dynamic_workflow_rule(
+    id: i64,
+    state: State<'_, AppState>,
+) -> std::result::Result<(), String> {
+    let result = (|| -> Result<()> {
+        let conn = db(&state)?;
+        let protected: Option<i64> = conn
+            .query_row(
+                "SELECT protected FROM dynamic_workflow_rules WHERE id=?",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(protected) = protected else {
+            return Err(anyhow!("삭제할 Dynamic Workflow 규칙을 찾지 못했습니다."));
+        };
+        if protected != 0 {
+            return Err(anyhow!("기본 Dynamic Workflow 계약은 삭제할 수 없습니다."));
+        }
+        conn.execute("DELETE FROM dynamic_workflow_rules WHERE id=?", params![id])?;
+        Ok(())
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn save_track(input: TrackInput, state: State<'_, AppState>) -> std::result::Result<i64, String> {
     let result = (|| -> Result<i64> {
         let name = input.name.trim();
@@ -3536,6 +3665,8 @@ pub fn run() {
             delete_project,
             save_project_workflow_rule,
             delete_project_workflow_rule,
+            save_dynamic_workflow_rule,
+            delete_dynamic_workflow_rule,
             save_track,
             delete_track,
             save_repository,
