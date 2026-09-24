@@ -2031,6 +2031,101 @@ fn responsibility_review_status(
     .into())
 }
 
+fn responsibility_review_priority(status: &str, age_hours: i64) -> String {
+    match status {
+        "attention" => "p0".into(),
+        "open" if age_hours >= 72 => "p1".into(),
+        "open" => "p2".into(),
+        "deferred" => "p3".into(),
+        "blocked" => "blocked".into(),
+        _ => "p2".into(),
+    }
+}
+
+fn responsibility_review_priority_rank(priority: &str) -> i64 {
+    match priority {
+        "p0" => 0,
+        "p1" => 1,
+        "p2" => 2,
+        "p3" => 3,
+        "blocked" => 4,
+        _ => 5,
+    }
+}
+
+fn responsibility_review_age_bucket(age_hours: i64) -> String {
+    if age_hours >= 72 {
+        "overdue".into()
+    } else if age_hours >= 24 {
+        "aging".into()
+    } else {
+        "fresh".into()
+    }
+}
+
+fn populate_responsibility_review_operations(
+    conn: &Connection,
+    drift: &mut ResponsibilityMapDrift,
+) -> Result<()> {
+    let now = Utc::now();
+    let now_text = now.to_rfc3339();
+    conn.execute(
+        "INSERT INTO responsibility_review_state(
+           review_key,fingerprint,project_id,repository_id,workflow_name,drift_type,first_seen_at,last_seen_at
+         ) VALUES(?,?,?,?,?,?,?,?)
+         ON CONFLICT(review_key,fingerprint) DO UPDATE SET
+           project_id=excluded.project_id,
+           repository_id=excluded.repository_id,
+           workflow_name=excluded.workflow_name,
+           drift_type=excluded.drift_type,
+           last_seen_at=excluded.last_seen_at",
+        params![
+            drift.review_key,
+            drift.fingerprint,
+            drift.project_id,
+            drift.repository_id,
+            drift.workflow_name,
+            drift.drift_type,
+            now_text,
+            now_text,
+        ],
+    )?;
+
+    let first_seen_at: String = conn.query_row(
+        "SELECT first_seen_at FROM responsibility_review_state
+         WHERE review_key=? AND fingerprint=?",
+        params![drift.review_key, drift.fingerprint],
+        |row| row.get(0),
+    )?;
+    let first_seen = DateTime::parse_from_rfc3339(&first_seen_at)
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or(now);
+    let age_hours = now.signed_duration_since(first_seen).num_hours().max(0);
+
+    let (event_count, failed_attempt_count, last_reviewed_at): (i64, i64, Option<String>) =
+        conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE
+                      WHEN result IN ('failed','stale_rejected') THEN 1
+                      WHEN result='still_open' AND action<>'reopen' THEN 1
+                      ELSE 0 END),0),
+                    MAX(created_at)
+             FROM responsibility_resolution_audit
+             WHERE review_key=? AND fingerprint=?",
+            params![drift.review_key, drift.fingerprint],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+    drift.first_seen_at = first_seen_at;
+    drift.review_age_hours = age_hours;
+    drift.review_age_bucket = responsibility_review_age_bucket(age_hours);
+    drift.review_event_count = event_count;
+    drift.failed_attempt_count = failed_attempt_count;
+    drift.last_reviewed_at = last_reviewed_at;
+    drift.review_priority = responsibility_review_priority(&drift.review_status, age_hours);
+    Ok(())
+}
+
 fn finalize_responsibility_drifts(
     conn: &Connection,
     drifts: &mut [ResponsibilityMapDrift],
@@ -2050,6 +2145,7 @@ fn finalize_responsibility_drifts(
             &drift.fingerprint,
             &drift.recommended_action,
         )?;
+        populate_responsibility_review_operations(conn, drift)?;
     }
     Ok(())
 }
