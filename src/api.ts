@@ -7,6 +7,7 @@ import type {
   ProjectWorkflowRuleInput,
   RepositoryInput,
   ResolveResponsibilityDriftInput,
+  ResponsibilityResolutionAuditEntry,
   ResponsibilityResolutionPreview,
   ResponsibilityResolutionPreviewInput,
   ResponsibilityResolutionResult,
@@ -23,6 +24,8 @@ export const api = {
     invoke<ResponsibilityResolutionResult>('resolve_responsibility_drift', { input }),
   deferResponsibilityDrift: (input: DeferResponsibilityDriftInput) =>
     invoke<ResponsibilityResolutionResult>('defer_responsibility_drift', { input }),
+  getResponsibilityResolutionHistory: () =>
+    invoke<ResponsibilityResolutionAuditEntry[]>('get_responsibility_resolution_history'),
   getRunAttribution: (runId: number) =>
     invoke<RunAttributionDetail>('get_run_attribution', { runId }),
   pollNow: () => invoke<Dashboard>('poll_now'),
