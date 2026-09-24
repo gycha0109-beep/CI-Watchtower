@@ -5,6 +5,8 @@ import type {
   DashboardTrack,
   MonitoredRepository,
   Project,
+  ResponsibilityMapDrift,
+  ResponsibilityResolutionPreview,
   RunAttributionDetail,
   Settings,
   TrackInput,
@@ -85,6 +87,17 @@ function responsibilityActionLabel(action: string) {
   }
 }
 
+function resolutionActionLabel(action: string) {
+  switch (action) {
+    case 'add_project_wide_rule': return 'Repository-scoped Project-wide 규칙 추가';
+    case 'add_dynamic_rule': return 'Repository-scoped protected Dynamic 규칙 추가';
+    case 'reclassify_to_project_wide': return 'Dynamic → Project-wide 재분류';
+    case 'reclassify_to_dynamic': return 'Project-wide → Dynamic 재분류';
+    case 'remove_stale_rule': return 'Stale responsibility 규칙 제거';
+    default: return 'WatchTower 내부 해결 불가';
+  }
+}
+
 function repositoryState(repo: MonitoredRepository) {
   if (!repo.enabled) return 'OFF';
   if (repo.lastError) return 'ERROR';
@@ -154,6 +167,8 @@ function App() {
   const [auditRun, setAuditRun] = useState<WorkflowRunSummary | null>(null);
   const [auditDetail, setAuditDetail] = useState<RunAttributionDetail | null>(null);
   const [auditLoadingId, setAuditLoadingId] = useState<number | null>(null);
+  const [resolutionPreview, setResolutionPreview] = useState<ResponsibilityResolutionPreview | null>(null);
+  const [resolutionLoadingKey, setResolutionLoadingKey] = useState<string | null>(null);
 
   const refresh = useCallback(async (poll = false) => {
     try {
@@ -361,6 +376,68 @@ function App() {
       await refresh(poll);
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const openResolutionPreview = async (item: ResponsibilityMapDrift) => {
+    try {
+      setError(null);
+      setNotice(null);
+      setResolutionLoadingKey(item.reviewKey);
+      setResolutionPreview(await api.getResponsibilityResolutionPreview({ reviewKey: item.reviewKey }));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setResolutionLoadingKey(null);
+    }
+  };
+
+  const deferResolution = async (item: ResponsibilityMapDrift) => {
+    try {
+      setError(null);
+      setNotice(null);
+      setResolutionLoadingKey(item.reviewKey);
+      const result = await api.deferResponsibilityDrift({
+        reviewKey: item.reviewKey,
+        fingerprint: item.fingerprint,
+      });
+      setResolutionPreview(null);
+      setNotice(result.status === 'deferred'
+        ? 'Responsibility 검토를 보류했습니다. Drift는 숨기지 않고 Deferred 상태로 유지합니다.'
+        : 'Responsibility 상태가 변경되어 보류 요청을 적용하지 않았습니다.');
+      await refresh(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setResolutionLoadingKey(null);
+    }
+  };
+
+  const applyResolution = async (preview: ResponsibilityResolutionPreview) => {
+    try {
+      setError(null);
+      setNotice(null);
+      setResolutionLoadingKey(preview.reviewKey);
+      const result = await api.resolveResponsibilityDrift({
+        reviewKey: preview.reviewKey,
+        fingerprint: preview.fingerprint,
+        action: preview.action,
+      });
+      setResolutionPreview(null);
+      setNotice(
+        result.status === 'resolved'
+          ? '승인한 Responsibility 변경을 적용했고 Drift 재검증까지 통과했습니다.'
+          : result.status === 'stale_rejected'
+            ? 'Preview 이후 Responsibility 상태가 변경되어 적용을 중단했습니다. 최신 상태를 다시 검토하십시오.'
+            : result.status === 'still_open'
+              ? '변경은 적용됐지만 Drift가 남아 있습니다. 최신 Inbox 항목을 다시 검토하십시오.'
+              : '현재 상태에서는 해당 Responsibility 변경을 실행할 수 없습니다.',
+      );
+      await refresh(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setResolutionLoadingKey(null);
     }
   };
 
@@ -700,7 +777,10 @@ function App() {
                       <b>{item.workflowName}</b>
                       <small>{item.repository}</small>
                     </span>
-                    <span className="responsibility-review-action">{responsibilityActionLabel(item.recommendedAction)}</span>
+                    <span className="responsibility-review-head-actions">
+                      <span className={`responsibility-review-state ${item.reviewStatus}`}>{item.reviewStatus.toUpperCase()}</span>
+                      <span className="responsibility-review-action">{responsibilityActionLabel(item.recommendedAction)}</span>
+                    </span>
                   </div>
                   <div className="responsibility-review-contract-grid">
                     <div>
@@ -724,8 +804,70 @@ function App() {
                   </div>
                   <div className="responsibility-review-foot">
                     <span>{responsibilityActionLabel(item.recommendedAction)}</span>
-                    <small>검토 전용 · 자동 변경 없음</small>
+                    <span className="responsibility-review-buttons">
+                      {item.reviewStatus !== 'blocked' && (
+                        <button
+                          type="button"
+                          className="ghost tiny"
+                          disabled={resolutionLoadingKey === item.reviewKey}
+                          onClick={() => void deferResolution(item)}
+                        >
+                          보류
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="primary tiny"
+                        disabled={resolutionLoadingKey === item.reviewKey}
+                        onClick={() => void openResolutionPreview(item)}
+                      >
+                        {resolutionLoadingKey === item.reviewKey ? '확인 중…' : '변경 내용 검토'}
+                      </button>
+                    </span>
                   </div>
+                  {resolutionPreview?.reviewKey === item.reviewKey && (
+                    <div className="responsibility-resolution-preview">
+                      <div className="responsibility-resolution-preview-head">
+                        <div>
+                          <span>Resolution Preview</span>
+                          <b>{resolutionActionLabel(resolutionPreview.action)}</b>
+                        </div>
+                        <button type="button" className="ghost tiny" onClick={() => setResolutionPreview(null)}>닫기</button>
+                      </div>
+                      <div className="responsibility-resolution-summary">
+                        <div><span>Repository authority</span><b>{resolutionPreview.repositoryContract}</b></div>
+                        <div><span>현재 WatchTower</span><b>{resolutionPreview.watchtowerContract ?? '미선언'}</b></div>
+                      </div>
+                      {resolutionPreview.blockedReason && (
+                        <div className="responsibility-resolution-blocked">{resolutionPreview.blockedReason}</div>
+                      )}
+                      {resolutionPreview.changes.length > 0 && (
+                        <div className="responsibility-resolution-list">
+                          <span>적용될 변경</span>
+                          {resolutionPreview.changes.map(change => <code key={change}>{change}</code>)}
+                        </div>
+                      )}
+                      <div className="responsibility-resolution-list">
+                        <span>변경되지 않는 것</span>
+                        {resolutionPreview.invariants.map(invariant => <small key={invariant}>✓ {invariant}</small>)}
+                      </div>
+                      <div className="responsibility-resolution-confirm">
+                        <small>
+                          실행 직전 fingerprint를 다시 검증합니다. Preview 이후 상태가 바뀌었으면 변경을 거부합니다.
+                        </small>
+                        {resolutionPreview.executable && (
+                          <button
+                            type="button"
+                            className="primary"
+                            disabled={resolutionLoadingKey === item.reviewKey}
+                            onClick={() => void applyResolution(resolutionPreview)}
+                          >
+                            승인 및 적용
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </article>
               ))}
             </div>

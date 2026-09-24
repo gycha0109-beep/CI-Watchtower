@@ -1,10 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   Dashboard,
+  DeferResponsibilityDriftInput,
   DynamicWorkflowRuleInput,
   ProjectInput,
   ProjectWorkflowRuleInput,
   RepositoryInput,
+  ResolveResponsibilityDriftInput,
+  ResponsibilityResolutionPreview,
+  ResponsibilityResolutionPreviewInput,
+  ResponsibilityResolutionResult,
   RunAttributionDetail,
   Settings,
   TrackInput,
@@ -12,6 +17,12 @@ import type {
 
 export const api = {
   getDashboard: () => invoke<Dashboard>('get_dashboard'),
+  getResponsibilityResolutionPreview: (input: ResponsibilityResolutionPreviewInput) =>
+    invoke<ResponsibilityResolutionPreview>('get_responsibility_resolution_preview', { input }),
+  resolveResponsibilityDrift: (input: ResolveResponsibilityDriftInput) =>
+    invoke<ResponsibilityResolutionResult>('resolve_responsibility_drift', { input }),
+  deferResponsibilityDrift: (input: DeferResponsibilityDriftInput) =>
+    invoke<ResponsibilityResolutionResult>('defer_responsibility_drift', { input }),
   getRunAttribution: (runId: number) =>
     invoke<RunAttributionDetail>('get_run_attribution', { runId }),
   pollNow: () => invoke<Dashboard>('poll_now'),

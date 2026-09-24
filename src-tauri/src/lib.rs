@@ -113,6 +113,54 @@ struct ResponsibilityMapDrift {
     source_path: String,
     reason: String,
     recommended_action: String,
+    review_key: String,
+    fingerprint: String,
+    review_status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponsibilityResolutionPreviewInput {
+    review_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveResponsibilityDriftInput {
+    review_key: String,
+    fingerprint: String,
+    action: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeferResponsibilityDriftInput {
+    review_key: String,
+    fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponsibilityResolutionPreview {
+    review_key: String,
+    fingerprint: String,
+    workflow_name: String,
+    repository: String,
+    repository_contract: String,
+    watchtower_contract: Option<String>,
+    action: String,
+    changes: Vec<String>,
+    invariants: Vec<String>,
+    executable: bool,
+    blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponsibilityResolutionResult {
+    status: String,
+    audit_id: i64,
+    current_drift: Option<ResponsibilityMapDrift>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -632,6 +680,27 @@ fn init_db(path: &Path) -> Result<()> {
           last_success_at TEXT,
           last_error TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS responsibility_resolution_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          review_key TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          repository_id INTEGER NOT NULL REFERENCES monitored_repositories(id) ON DELETE CASCADE,
+          workflow_name TEXT NOT NULL,
+          drift_type TEXT NOT NULL,
+          action TEXT NOT NULL,
+          before_repository_binding TEXT NOT NULL,
+          before_watchtower_binding TEXT,
+          after_repository_binding TEXT,
+          after_watchtower_binding TEXT,
+          result TEXT NOT NULL CHECK(result IN ('resolved','deferred','blocked','stale_rejected','still_open','failed')),
+          actor TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_responsibility_resolution_audit_review
+          ON responsibility_resolution_audit(review_key, id DESC);
 
         CREATE TABLE IF NOT EXISTS track_aliases (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1441,7 +1510,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.21")
+        .user_agent("ci-watchtower/0.3.22")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -1839,6 +1908,97 @@ fn latest_workflow_run_title(
         .optional()?)
 }
 
+fn stable_fingerprint(value: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn responsibility_review_key(
+    project_id: i64,
+    repository_id: i64,
+    workflow_path: &str,
+    workflow_name: &str,
+    drift_type: &str,
+) -> String {
+    stable_fingerprint(&format!(
+        "{project_id}|{repository_id}|{workflow_path}|{workflow_name}|{drift_type}"
+    ))
+}
+
+fn responsibility_drift_fingerprint(drift: &ResponsibilityMapDrift) -> String {
+    stable_fingerprint(&format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        drift.project_id,
+        drift.repository_id,
+        drift.workflow_path,
+        drift.workflow_name,
+        drift.drift_type,
+        drift.repository_binding,
+        drift.watchtower_binding.as_deref().unwrap_or(""),
+        drift.expected_track_key.as_deref().unwrap_or(""),
+        drift.actual_track_key.as_deref().unwrap_or(""),
+        drift.source_path,
+    ))
+}
+
+fn responsibility_review_status(
+    conn: &Connection,
+    review_key: &str,
+    fingerprint: &str,
+    recommended_action: &str,
+) -> Result<String> {
+    if matches!(
+        recommended_action,
+        "review_track_registry_or_map"
+            | "review_producer_run_name"
+            | "review_repository_map_binding"
+            | "review_remove_conflicting_responsibility_rule"
+    ) {
+        return Ok("blocked".into());
+    }
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT result FROM responsibility_resolution_audit
+             WHERE review_key=? AND fingerprint=?
+             ORDER BY id DESC LIMIT 1",
+            params![review_key, fingerprint],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(match latest.as_deref() {
+        Some("deferred") => "deferred",
+        _ => "open",
+    }
+    .into())
+}
+
+fn finalize_responsibility_drifts(
+    conn: &Connection,
+    drifts: &mut [ResponsibilityMapDrift],
+) -> Result<()> {
+    for drift in drifts {
+        drift.review_key = responsibility_review_key(
+            drift.project_id,
+            drift.repository_id,
+            &drift.workflow_path,
+            &drift.workflow_name,
+            &drift.drift_type,
+        );
+        drift.fingerprint = responsibility_drift_fingerprint(drift);
+        drift.review_status = responsibility_review_status(
+            conn,
+            &drift.review_key,
+            &drift.fingerprint,
+            &drift.recommended_action,
+        )?;
+    }
+    Ok(())
+}
+
 fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapDrift>> {
     let project_rules = list_project_workflow_rules(conn)?;
     let dynamic_rules = list_dynamic_workflow_rules(conn)?;
@@ -2040,6 +2200,9 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                 source_path: contract.source_path.clone(),
                 reason,
                 recommended_action: recommended_action.into(),
+                review_key: String::new(),
+                fingerprint: String::new(),
+                review_status: "open".into(),
             });
         }
     }
@@ -2071,6 +2234,9 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                     source_path: RESPONSIBILITY_MAP_PATH.into(),
                     reason: "WatchTower still declares this workflow as Project-wide, but the current repository responsibility map no longer contains the producer.".into(),
                     recommended_action: "review_remove_or_confirm_stale_rule".into(),
+                    review_key: String::new(),
+                    fingerprint: String::new(),
+                    review_status: "open".into(),
                 });
             }
         }
@@ -2096,11 +2262,15 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                     source_path: RESPONSIBILITY_MAP_PATH.into(),
                     reason: "WatchTower still declares this workflow as Dynamic, but the current repository responsibility map no longer contains the producer.".into(),
                     recommended_action: "review_remove_or_confirm_stale_rule".into(),
+                    review_key: String::new(),
+                    fingerprint: String::new(),
+                    review_status: "open".into(),
                 });
             }
         }
     }
 
+    finalize_responsibility_drifts(conn, &mut drifts)?;
     drifts.sort_by(|a, b| {
         a.repository
             .cmp(&b.repository)
@@ -3694,6 +3864,519 @@ fn get_dashboard(state: State<'_, AppState>) -> std::result::Result<Dashboard, S
     build_dashboard(&state).map_err(|e| e.to_string())
 }
 
+fn current_responsibility_drift(conn: &Connection, review_key: &str) -> Result<ResponsibilityMapDrift> {
+    responsibility_map_drifts(conn)?
+        .into_iter()
+        .find(|item| item.review_key == review_key)
+        .ok_or_else(|| anyhow!("검토 대상 Responsibility Drift가 더 이상 존재하지 않습니다."))
+}
+
+fn exact_project_rule(
+    conn: &Connection,
+    project_id: i64,
+    repository_id: i64,
+    workflow_name: &str,
+) -> Result<Option<ProjectWorkflowRule>> {
+    Ok(conn
+        .query_row(
+            "SELECT id,project_id,repository_id,workflow_name,active
+             FROM project_workflow_rules
+             WHERE project_id=? AND repository_id=? AND workflow_name=? AND active=1",
+            params![project_id, repository_id, workflow_name],
+            |row| {
+                Ok(ProjectWorkflowRule {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    repository_id: row.get(2)?,
+                    workflow_name: row.get(3)?,
+                    active: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn exact_dynamic_rule(
+    conn: &Connection,
+    project_id: i64,
+    repository_id: i64,
+    workflow_name: &str,
+) -> Result<Option<DynamicWorkflowRule>> {
+    Ok(conn
+        .query_row(
+            "SELECT id,project_id,repository_id,workflow_name,active,protected
+             FROM dynamic_workflow_rules
+             WHERE project_id=? AND repository_id=? AND workflow_name=? AND active=1",
+            params![project_id, repository_id, workflow_name],
+            |row| {
+                Ok(DynamicWorkflowRule {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    repository_id: row.get(2)?,
+                    workflow_name: row.get(3)?,
+                    active: row.get::<_, i64>(4)? != 0,
+                    protected: row.get::<_, i64>(5)? != 0,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn matching_global_project_rule(
+    conn: &Connection,
+    project_id: i64,
+    workflow_name: &str,
+) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM project_workflow_rules
+           WHERE project_id=? AND repository_id IS NULL AND workflow_name=? AND active=1
+         )",
+        params![project_id, workflow_name],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )
+    .map_err(Into::into)
+}
+
+fn matching_global_dynamic_rule(
+    conn: &Connection,
+    project_id: i64,
+    workflow_name: &str,
+) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM dynamic_workflow_rules
+           WHERE project_id=? AND repository_id IS NULL AND workflow_name=? AND active=1
+         )",
+        params![project_id, workflow_name],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )
+    .map_err(Into::into)
+}
+
+fn resolution_preview_for_drift(
+    conn: &Connection,
+    drift: &ResponsibilityMapDrift,
+) -> Result<ResponsibilityResolutionPreview> {
+    let mut executable = true;
+    let mut blocked_reason = None;
+    let (action, changes) = match drift.recommended_action.as_str() {
+        "review_add_project_wide_rule" => (
+            "add_project_wide_rule",
+            vec![format!(
+                "Add repository-scoped Project-wide rule: {}",
+                drift.workflow_name
+            )],
+        ),
+        "review_add_dynamic_rule" => (
+            "add_dynamic_rule",
+            vec![format!(
+                "Add repository-scoped protected Dynamic rule: {}",
+                drift.workflow_name
+            )],
+        ),
+        "review_reclassify_project_wide" => {
+            if matching_global_dynamic_rule(conn, drift.project_id, &drift.workflow_name)? {
+                executable = false;
+                blocked_reason = Some(
+                    "현재 Dynamic 선언이 Project 전체 범위입니다. 단일 Repository drift 해결을 위해 전역 규칙을 자동 변경하지 않습니다.".into(),
+                );
+            } else if exact_dynamic_rule(
+                conn,
+                drift.project_id,
+                drift.repository_id,
+                &drift.workflow_name,
+            )?
+            .is_none()
+            {
+                executable = false;
+                blocked_reason = Some("변경할 repository-scoped Dynamic 규칙을 찾지 못했습니다.".into());
+            }
+            (
+                "reclassify_to_project_wide",
+                vec![
+                    format!("Remove repository-scoped Dynamic rule: {}", drift.workflow_name),
+                    format!("Add repository-scoped Project-wide rule: {}", drift.workflow_name),
+                ],
+            )
+        }
+        "review_reclassify_dynamic" => {
+            if matching_global_project_rule(conn, drift.project_id, &drift.workflow_name)? {
+                executable = false;
+                blocked_reason = Some(
+                    "현재 Project-wide 선언이 Project 전체 범위입니다. 단일 Repository drift 해결을 위해 전역 규칙을 자동 변경하지 않습니다.".into(),
+                );
+            } else if exact_project_rule(
+                conn,
+                drift.project_id,
+                drift.repository_id,
+                &drift.workflow_name,
+            )?
+            .is_none()
+            {
+                executable = false;
+                blocked_reason = Some("변경할 repository-scoped Project-wide 규칙을 찾지 못했습니다.".into());
+            }
+            (
+                "reclassify_to_dynamic",
+                vec![
+                    format!("Remove repository-scoped Project-wide rule: {}", drift.workflow_name),
+                    format!("Add repository-scoped protected Dynamic rule: {}", drift.workflow_name),
+                ],
+            )
+        }
+        "review_remove_or_confirm_stale_rule" => {
+            let exact_exists = match drift.watchtower_binding.as_deref() {
+                Some("project-wide") => {
+                    if matching_global_project_rule(conn, drift.project_id, &drift.workflow_name)? {
+                        executable = false;
+                        blocked_reason = Some(
+                            "Stale 선언이 Project 전체 범위입니다. 다른 Repository에 영향을 줄 수 있어 자동 제거하지 않습니다.".into(),
+                        );
+                        false
+                    } else {
+                        exact_project_rule(
+                            conn,
+                            drift.project_id,
+                            drift.repository_id,
+                            &drift.workflow_name,
+                        )?
+                        .is_some()
+                    }
+                }
+                Some("dynamic") => {
+                    if matching_global_dynamic_rule(conn, drift.project_id, &drift.workflow_name)? {
+                        executable = false;
+                        blocked_reason = Some(
+                            "Stale Dynamic 선언이 Project 전체 범위입니다. 다른 Repository에 영향을 줄 수 있어 자동 제거하지 않습니다.".into(),
+                        );
+                        false
+                    } else {
+                        exact_dynamic_rule(
+                            conn,
+                            drift.project_id,
+                            drift.repository_id,
+                            &drift.workflow_name,
+                        )?
+                        .is_some()
+                    }
+                }
+                _ => false,
+            };
+            if executable && !exact_exists {
+                executable = false;
+                blocked_reason = Some("제거할 repository-scoped 규칙을 찾지 못했습니다.".into());
+            }
+            (
+                "remove_stale_rule",
+                vec![format!(
+                    "Remove repository-scoped stale {} rule: {}",
+                    drift.watchtower_binding.as_deref().unwrap_or("responsibility"),
+                    drift.workflow_name
+                )],
+            )
+        }
+        _ => {
+            executable = false;
+            blocked_reason = Some(match drift.recommended_action.as_str() {
+                "review_track_registry_or_map" => {
+                    "Canonical Track registry 또는 repository responsibility map을 먼저 검토해야 합니다."
+                }
+                "review_producer_run_name" => {
+                    "Producer run-name의 [WT:*] evidence를 repository에서 수정해야 합니다."
+                }
+                "review_remove_conflicting_responsibility_rule" => {
+                    "Static Track 계약과 충돌하는 책임 규칙은 자동 제거하지 않습니다. Track evidence를 먼저 확인해야 합니다."
+                }
+                _ => "이 drift 유형은 WatchTower 내부 자동 변경 대상이 아닙니다.",
+            }
+            .into());
+            ("blocked", Vec::new())
+        }
+    };
+
+    Ok(ResponsibilityResolutionPreview {
+        review_key: drift.review_key.clone(),
+        fingerprint: drift.fingerprint.clone(),
+        workflow_name: drift.workflow_name.clone(),
+        repository: drift.repository.clone(),
+        repository_contract: drift.repository_binding.clone(),
+        watchtower_contract: drift.watchtower_binding.clone(),
+        action: action.into(),
+        changes,
+        invariants: vec![
+            "Canonical Tracks are not created or modified.".into(),
+            "workflow_runs are not deleted.".into(),
+            "Manual run assignments are preserved.".into(),
+            "Producer YAML and repository responsibility map are not modified.".into(),
+        ],
+        executable,
+        blocked_reason,
+    })
+}
+
+fn insert_resolution_audit(
+    conn: &Connection,
+    drift: &ResponsibilityMapDrift,
+    action: &str,
+    after: Option<&ResponsibilityMapDrift>,
+    result: &str,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO responsibility_resolution_audit(
+           review_key,fingerprint,project_id,repository_id,workflow_name,drift_type,
+           action,before_repository_binding,before_watchtower_binding,
+           after_repository_binding,after_watchtower_binding,result,actor,created_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        params![
+            drift.review_key,
+            drift.fingerprint,
+            drift.project_id,
+            drift.repository_id,
+            drift.workflow_name,
+            drift.drift_type,
+            action,
+            drift.repository_binding,
+            drift.watchtower_binding,
+            after.map(|item| item.repository_binding.clone()),
+            after.and_then(|item| item.watchtower_binding.clone()),
+            result,
+            "local-user",
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn add_project_rule_for_resolution(conn: &Connection, drift: &ResponsibilityMapDrift) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
+         VALUES(?,?,?,1,?)",
+        params![drift.project_id, drift.repository_id, drift.workflow_name, now],
+    )?;
+    conn.execute(
+        "UPDATE project_workflow_rules SET active=1
+         WHERE project_id=? AND repository_id=? AND workflow_name=?",
+        params![drift.project_id, drift.repository_id, drift.workflow_name],
+    )?;
+    conn.execute(
+        "DELETE FROM run_assignments
+         WHERE manual=0 AND run_id IN (
+           SELECT wr.run_id FROM workflow_runs wr
+           WHERE wr.repository_id=? AND wr.workflow_name=?
+         )",
+        params![drift.repository_id, drift.workflow_name],
+    )?;
+    conn.execute(
+        "UPDATE workflow_runs
+         SET resolution_status='project'
+         WHERE ignored=0 AND repository_id=? AND workflow_name=?
+           AND NOT EXISTS(
+             SELECT 1 FROM run_assignments ra
+             WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+           )",
+        params![drift.repository_id, drift.workflow_name],
+    )?;
+    Ok(())
+}
+
+fn remove_project_rule_for_resolution(conn: &Connection, drift: &ResponsibilityMapDrift) -> Result<()> {
+    let deleted = conn.execute(
+        "DELETE FROM project_workflow_rules
+         WHERE project_id=? AND repository_id=? AND workflow_name=?",
+        params![drift.project_id, drift.repository_id, drift.workflow_name],
+    )?;
+    if deleted == 0 {
+        return Err(anyhow!("제거할 repository-scoped Project-wide 규칙을 찾지 못했습니다."));
+    }
+    conn.execute(
+        "UPDATE workflow_runs
+         SET resolution_status='unassigned'
+         WHERE ignored=0 AND resolution_status='project'
+           AND repository_id=? AND workflow_name=?
+           AND NOT EXISTS(
+             SELECT 1 FROM run_assignments ra
+             WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM project_workflow_rules pwr
+             WHERE pwr.active=1
+               AND pwr.project_id=?
+               AND pwr.workflow_name=workflow_runs.workflow_name
+               AND (pwr.repository_id IS NULL OR pwr.repository_id=workflow_runs.repository_id)
+           )",
+        params![
+            drift.repository_id,
+            drift.workflow_name,
+            drift.project_id
+        ],
+    )?;
+    Ok(())
+}
+
+fn add_dynamic_rule_for_resolution(conn: &Connection, drift: &ResponsibilityMapDrift) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO dynamic_workflow_rules(
+           project_id,repository_id,workflow_name,active,protected,created_at
+         ) VALUES(?,?,?,1,1,?)",
+        params![drift.project_id, drift.repository_id, drift.workflow_name, now],
+    )?;
+    conn.execute(
+        "UPDATE dynamic_workflow_rules SET active=1,protected=1
+         WHERE project_id=? AND repository_id=? AND workflow_name=?",
+        params![drift.project_id, drift.repository_id, drift.workflow_name],
+    )?;
+    Ok(())
+}
+
+fn remove_dynamic_rule_for_resolution(conn: &Connection, drift: &ResponsibilityMapDrift) -> Result<()> {
+    let deleted = conn.execute(
+        "DELETE FROM dynamic_workflow_rules
+         WHERE project_id=? AND repository_id=? AND workflow_name=?",
+        params![drift.project_id, drift.repository_id, drift.workflow_name],
+    )?;
+    if deleted == 0 {
+        return Err(anyhow!("제거할 repository-scoped Dynamic 규칙을 찾지 못했습니다."));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_responsibility_resolution_preview(
+    input: ResponsibilityResolutionPreviewInput,
+    state: State<'_, AppState>,
+) -> std::result::Result<ResponsibilityResolutionPreview, String> {
+    let result = (|| -> Result<ResponsibilityResolutionPreview> {
+        let conn = db(&state)?;
+        let drift = current_responsibility_drift(&conn, &input.review_key)?;
+        resolution_preview_for_drift(&conn, &drift)
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+fn defer_responsibility_drift_with_conn(
+    conn: &Connection,
+    input: &DeferResponsibilityDriftInput,
+) -> Result<ResponsibilityResolutionResult> {
+    let drift = current_responsibility_drift(conn, &input.review_key)?;
+    if drift.fingerprint != input.fingerprint {
+        let audit_id = insert_resolution_audit(conn, &drift, "defer", Some(&drift), "stale_rejected")?;
+        return Ok(ResponsibilityResolutionResult {
+            status: "stale_rejected".into(),
+            audit_id,
+            current_drift: Some(drift),
+        });
+    }
+    let audit_id = insert_resolution_audit(conn, &drift, "defer", Some(&drift), "deferred")?;
+    let mut current = drift.clone();
+    current.review_status = "deferred".into();
+    Ok(ResponsibilityResolutionResult {
+        status: "deferred".into(),
+        audit_id,
+        current_drift: Some(current),
+    })
+}
+
+fn resolve_responsibility_drift_with_conn(
+    conn: &Connection,
+    input: &ResolveResponsibilityDriftInput,
+) -> Result<ResponsibilityResolutionResult> {
+    let drift = current_responsibility_drift(conn, &input.review_key)?;
+    if drift.fingerprint != input.fingerprint {
+        let audit_id = insert_resolution_audit(
+            conn,
+            &drift,
+            &input.action,
+            Some(&drift),
+            "stale_rejected",
+        )?;
+        return Ok(ResponsibilityResolutionResult {
+            status: "stale_rejected".into(),
+            audit_id,
+            current_drift: Some(drift),
+        });
+    }
+    let preview = resolution_preview_for_drift(conn, &drift)?;
+    if !preview.executable || preview.action != input.action {
+        let audit_id = insert_resolution_audit(
+            conn,
+            &drift,
+            &input.action,
+            Some(&drift),
+            "blocked",
+        )?;
+        return Ok(ResponsibilityResolutionResult {
+            status: "blocked".into(),
+            audit_id,
+            current_drift: Some(drift),
+        });
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    match input.action.as_str() {
+        "add_project_wide_rule" => add_project_rule_for_resolution(&tx, &drift)?,
+        "add_dynamic_rule" => add_dynamic_rule_for_resolution(&tx, &drift)?,
+        "reclassify_to_project_wide" => {
+            remove_dynamic_rule_for_resolution(&tx, &drift)?;
+            add_project_rule_for_resolution(&tx, &drift)?;
+        }
+        "reclassify_to_dynamic" => {
+            remove_project_rule_for_resolution(&tx, &drift)?;
+            add_dynamic_rule_for_resolution(&tx, &drift)?;
+        }
+        "remove_stale_rule" => match drift.watchtower_binding.as_deref() {
+            Some("project-wide") => remove_project_rule_for_resolution(&tx, &drift)?,
+            Some("dynamic") => remove_dynamic_rule_for_resolution(&tx, &drift)?,
+            _ => return Err(anyhow!("제거할 stale responsibility 규칙을 판정하지 못했습니다.")),
+        },
+        _ => return Err(anyhow!("지원하지 않는 Responsibility resolution action입니다.")),
+    }
+
+    let after = responsibility_map_drifts(&tx)?
+        .into_iter()
+        .find(|item| item.review_key == drift.review_key);
+    let result_status = if after.is_none() { "resolved" } else { "still_open" };
+    let audit_id = insert_resolution_audit(
+        &tx,
+        &drift,
+        &input.action,
+        after.as_ref(),
+        result_status,
+    )?;
+    tx.commit()?;
+    Ok(ResponsibilityResolutionResult {
+        status: result_status.into(),
+        audit_id,
+        current_drift: after,
+    })
+}
+
+#[tauri::command]
+fn defer_responsibility_drift(
+    input: DeferResponsibilityDriftInput,
+    state: State<'_, AppState>,
+) -> std::result::Result<ResponsibilityResolutionResult, String> {
+    let result = (|| -> Result<ResponsibilityResolutionResult> {
+        let conn = db(&state)?;
+        defer_responsibility_drift_with_conn(&conn, &input)
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn resolve_responsibility_drift(
+    input: ResolveResponsibilityDriftInput,
+    state: State<'_, AppState>,
+) -> std::result::Result<ResponsibilityResolutionResult, String> {
+    let result = (|| -> Result<ResponsibilityResolutionResult> {
+        let conn = db(&state)?;
+        resolve_responsibility_drift_with_conn(&conn, &input)
+    })();
+    result.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn get_run_attribution(
     run_id: i64,
@@ -4386,6 +5069,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_dashboard,
+            get_responsibility_resolution_preview,
+            resolve_responsibility_drift,
+            defer_responsibility_drift,
             get_run_attribution,
             poll_now,
             save_project,
@@ -6977,6 +7663,13 @@ mod tests {
             params![project_id, repository_id, now],
         )
         .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO dynamic_workflow_rules(
+               project_id,repository_id,workflow_name,active,protected,created_at
+             ) VALUES(?,?,'Kind Mismatch Project',1,1,?)",
+            params![project_id, repository_id, now],
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO monitored_repositories(
@@ -7023,6 +7716,13 @@ mod tests {
                 ".github/workflows/wrong-static.yml",
                 "[WT:trust] Wrong Static",
             ),
+            (
+                9_800_005_i64,
+                9805_i64,
+                "Missing Project",
+                ".github/workflows/missing-project.yml",
+                "Missing Project",
+            ),
         ] {
             let run = GithubRun {
                 id: run_id,
@@ -7049,7 +7749,7 @@ mod tests {
         conn.execute(
             "INSERT OR IGNORE INTO dynamic_workflow_rules(
                project_id,repository_id,workflow_name,active,protected,created_at
-             ) VALUES(?,?,'Stale Dynamic',1,0,?)",
+             ) VALUES(?,?,'Stale Dynamic',1,1,?)",
             params![project_id, repository_id, now],
         )
         .unwrap();
@@ -7095,11 +7795,27 @@ mod tests {
                 source_path: RESPONSIBILITY_MAP_PATH.into(),
             },
             RepositoryResponsibilityContract {
+                workflow_path: ".github/workflows/missing-project.yml".into(),
+                workflow_name: "Missing Project".into(),
+                binding_kind: "project-wide".into(),
+                track_key: None,
+                source_binding: "unassigned-by-design".into(),
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            },
+            RepositoryResponsibilityContract {
                 workflow_path: ".github/workflows/kind-mismatch.yml".into(),
                 workflow_name: "Kind Mismatch".into(),
                 binding_kind: "dynamic".into(),
                 track_key: None,
                 source_binding: "dynamic-by-run".into(),
+                source_path: RESPONSIBILITY_MAP_PATH.into(),
+            },
+            RepositoryResponsibilityContract {
+                workflow_path: ".github/workflows/kind-mismatch-project.yml".into(),
+                workflow_name: "Kind Mismatch Project".into(),
+                binding_kind: "project-wide".into(),
+                track_key: None,
+                source_binding: "unassigned-by-design".into(),
                 source_path: RESPONSIBILITY_MAP_PATH.into(),
             },
             RepositoryResponsibilityContract {
@@ -7131,6 +7847,21 @@ mod tests {
 
         let track_count_before: i64 =
             conn.query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0)).unwrap();
+
+        let mobile_track_id: i64 = conn
+            .query_row(
+                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='mobile' AND active=1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO run_assignments(
+               run_id,track_id,confidence,source,reason,manual,assigned_at
+             ) VALUES(9_800_005,?,100,'manual','manual preservation fixture',1,?)",
+            params![mobile_track_id, now],
+        )
+        .unwrap();
         let assignment_count_before: i64 =
             conn.query_row("SELECT COUNT(*) FROM run_assignments", [], |row| row.get(0)).unwrap();
 
@@ -7153,6 +7884,7 @@ mod tests {
             .map(|item| item.workflow_name.as_str())
             .collect();
         assert!(missing_names.contains("Missing Dynamic"));
+        assert!(missing_names.contains("Missing Project"));
         assert!(missing_names.contains("Scoped Dynamic"));
 
         let missing_dynamic = drifts
@@ -7214,6 +7946,184 @@ mod tests {
             stale_project.recommended_action,
             "review_remove_or_confirm_stale_rule"
         );
+
+        let preview = resolution_preview_for_drift(&conn, missing_dynamic).unwrap();
+        assert!(preview.executable);
+        assert_eq!(preview.action, "add_dynamic_rule");
+        assert!(preview.changes.iter().any(|item| item.contains("protected Dynamic")));
+        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Missing Dynamic")
+            .unwrap()
+            .is_none());
+
+        let deferred = defer_responsibility_drift_with_conn(
+            &conn,
+            &DeferResponsibilityDriftInput {
+                review_key: missing_dynamic.review_key.clone(),
+                fingerprint: missing_dynamic.fingerprint.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(deferred.status, "deferred");
+        let deferred_drift = current_responsibility_drift(&conn, &missing_dynamic.review_key).unwrap();
+        assert_eq!(deferred_drift.review_status, "deferred");
+
+        let resolved_missing_dynamic = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: missing_dynamic.review_key.clone(),
+                fingerprint: missing_dynamic.fingerprint.clone(),
+                action: "add_dynamic_rule".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved_missing_dynamic.status, "resolved");
+        let created_dynamic = exact_dynamic_rule(&conn, project_id, repository_id, "Missing Dynamic")
+            .unwrap()
+            .unwrap();
+        assert!(created_dynamic.protected);
+
+        let missing_project = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Missing Project")
+            .unwrap();
+        let resolved_missing_project = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: missing_project.review_key.clone(),
+                fingerprint: missing_project.fingerprint.clone(),
+                action: "add_project_wide_rule".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved_missing_project.status, "resolved");
+        assert!(exact_project_rule(&conn, project_id, repository_id, "Missing Project")
+            .unwrap()
+            .is_some());
+        let manual_preserved: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9_800_005 AND manual=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(manual_preserved, 1);
+
+        let kind_dynamic = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Kind Mismatch")
+            .unwrap();
+        let kind_dynamic_result = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: kind_dynamic.review_key.clone(),
+                fingerprint: kind_dynamic.fingerprint.clone(),
+                action: "reclassify_to_dynamic".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(kind_dynamic_result.status, "resolved");
+        assert!(exact_project_rule(&conn, project_id, repository_id, "Kind Mismatch")
+            .unwrap()
+            .is_none());
+        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Kind Mismatch")
+            .unwrap()
+            .unwrap()
+            .protected);
+
+        let kind_project = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Kind Mismatch Project")
+            .unwrap();
+        let kind_project_result = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: kind_project.review_key.clone(),
+                fingerprint: kind_project.fingerprint.clone(),
+                action: "reclassify_to_project_wide".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(kind_project_result.status, "resolved");
+        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Kind Mismatch Project")
+            .unwrap()
+            .is_none());
+        assert!(exact_project_rule(&conn, project_id, repository_id, "Kind Mismatch Project")
+            .unwrap()
+            .is_some());
+
+        let stale_dynamic_current = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Stale Dynamic")
+            .unwrap();
+        let stale_dynamic_result = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: stale_dynamic_current.review_key.clone(),
+                fingerprint: stale_dynamic_current.fingerprint.clone(),
+                action: "remove_stale_rule".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(stale_dynamic_result.status, "resolved");
+        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Stale Dynamic")
+            .unwrap()
+            .is_none());
+
+        let wrong_static_current = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Wrong Static")
+            .unwrap();
+        let blocked_preview = resolution_preview_for_drift(&conn, &wrong_static_current).unwrap();
+        assert!(!blocked_preview.executable);
+        assert_eq!(blocked_preview.action, "blocked");
+
+        let scoped_dynamic = responsibility_map_drifts(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.workflow_name == "Scoped Dynamic")
+            .unwrap();
+        let old_fingerprint = scoped_dynamic.fingerprint.clone();
+        conn.execute(
+            "UPDATE repository_responsibility_contracts
+             SET binding_kind='project-wide',source_binding='unassigned-by-design'
+             WHERE repository_id=? AND workflow_name='Scoped Dynamic'",
+            params![repository_id],
+        )
+        .unwrap();
+        let stale_rejected = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: scoped_dynamic.review_key.clone(),
+                fingerprint: old_fingerprint,
+                action: "add_dynamic_rule".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(stale_rejected.status, "stale_rejected");
+        assert!(exact_dynamic_rule(&conn, project_id, repository_id, "Scoped Dynamic")
+            .unwrap()
+            .is_none());
+
+        let track_count_final: i64 =
+            conn.query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0)).unwrap();
+        assert_eq!(track_count_before, track_count_final);
+        let audit_results: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT result FROM responsibility_resolution_audit ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert!(audit_results.contains(&"deferred".to_string()));
+        assert!(audit_results.contains(&"resolved".to_string()));
+        assert!(audit_results.contains(&"stale_rejected".to_string()));
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
