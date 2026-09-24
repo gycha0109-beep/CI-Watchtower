@@ -5026,8 +5026,8 @@ mod tests {
     }
 
     #[test]
-    fn visualy_security_boundary_is_project_wide_and_preserves_manual_override() {
-        let path = legacy_v02_db_path("visualy-security-boundary");
+    fn visualy_repository_responsibility_map_uses_dynamic_rules_and_retires_stale_project_wide_security() {
+        let path = legacy_v02_db_path("visualy-responsibility-map");
         init_db(&path).unwrap();
 
         let conn = Connection::open(&path).unwrap();
@@ -5045,233 +5045,133 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let ops_track_id: i64 = conn
-            .query_row(
-                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='ops'",
-                params![project_id],
-                |row| row.get(0),
-            )
-            .unwrap();
 
-        for (run_id, manual) in [(9_200_001_i64, 0_i64), (9_200_002_i64, 1_i64)] {
-            conn.execute(
-                "INSERT INTO workflow_runs(
-                   run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
-                   head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
-                   created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored,last_resolution_attempt_at
-                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                params![
-                    run_id,
-                    repository_id,
-                    920_i64,
-                    "BEJEWELY Security Boundary",
-                    ".github/workflows/security-boundary.yml",
-                    "security boundary",
-                    "pull_request",
-                    "ci/security-boundary-ownership",
-                    format!("sha-{run_id}"),
-                    run_id,
-                    1_i64,
-                    "completed",
-                    "success",
-                    format!("https://example/{run_id}"),
-                    "2026-09-24T01:00:00Z",
-                    Option::<String>::None,
-                    "2026-09-24T01:01:00Z",
-                    "2026-09-24T01:01:00Z",
-                    "assigned",
-                    0_i64,
-                    Option::<String>::None,
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO run_assignments(
-                   run_id,track_id,confidence,source,reason,manual,assigned_at
-                 ) VALUES(?,?,?,?,?,?,?)",
-                params![
-                    run_id,
-                    ops_track_id,
-                    if manual == 1 { 100_i64 } else { 90_i64 },
-                    if manual == 1 { "manual" } else { "branch" },
-                    "fixture",
-                    manual,
-                    "2026-09-24T01:02:00Z",
-                ],
-            )
-            .unwrap();
+        let project_wide_names: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT workflow_name FROM project_workflow_rules
+                     WHERE project_id=? AND active=1
+                     ORDER BY workflow_name",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map(params![project_id], |row| row.get(0))
+                .unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(
+            project_wide_names,
+            vec![
+                "BEJEWELY Current Main Health".to_string(),
+                "PIE Prospective Shadow".to_string(),
+            ]
+        );
+
+        let dynamic_names: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT workflow_name,protected FROM dynamic_workflow_rules
+                     WHERE project_id=? AND repository_id=? AND active=1
+                     ORDER BY workflow_name",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map(params![project_id, repository_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(dynamic_names.len(), 11);
+        assert!(dynamic_names.iter().all(|(_, protected)| *protected == 1));
+        for expected in [
+            "Admin - Access Foundation",
+            "Admin - Product Current Main Integration",
+            "Product Offer Runtime - DATA-OFFER17 Controlled RPC Diagnostic",
+            "Product Data Pipeline - Hwahae Provenance Non-Main PR Guard",
+            "Product Data Pipeline - Identity Key Repair Confirm",
+            "Product Data Pipeline - Product Offers",
+            "Product Data Pipeline - Source Bindings",
+            "BEJEWELY Security Boundary",
+            "Recommendation Admission - G3A PF Authority Read",
+            "BEJEWELY Supply Chain Security",
+            "BEJEWELY AI Provider Runtime",
+        ] {
+            assert!(dynamic_names.iter().any(|(name, _)| name == expected));
         }
+
+        conn.execute(
+            "INSERT INTO project_workflow_rules(
+               project_id,repository_id,workflow_name,active,created_at
+             ) VALUES(?,NULL,'BEJEWELY Security Boundary',1,'2026-09-24T00:00:00Z')",
+            params![project_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workflow_runs(
+               run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
+               head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
+               created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored,last_resolution_attempt_at
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![
+                9_200_001_i64,
+                repository_id,
+                920_i64,
+                "BEJEWELY Security Boundary",
+                ".github/workflows/security-boundary.yml",
+                "BEJEWELY Security Boundary",
+                "push",
+                "main",
+                "sha-9200001",
+                9200001_i64,
+                1_i64,
+                "completed",
+                "success",
+                "https://example/9200001",
+                "2026-09-24T01:00:00Z",
+                Option::<String>::None,
+                "2026-09-24T01:01:00Z",
+                "2026-09-24T01:01:00Z",
+                "project",
+                0_i64,
+                Option::<String>::None,
+            ],
+        )
+        .unwrap();
         drop(conn);
 
         seed_bejewely_project_scope(&Connection::open(&path).unwrap()).unwrap();
 
         let conn = Connection::open(&path).unwrap();
-        let rule_count: i64 = conn
+        let stale_rule_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM project_workflow_rules
-                 WHERE project_id=? AND repository_id IS NULL
-                   AND workflow_name='BEJEWELY Security Boundary' AND active=1",
+                 WHERE project_id=?
+                   AND workflow_name IN ('BEJEWELY Security Boundary','BEJEWELY Supply Chain Security')",
                 params![project_id],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(rule_count, 1);
+        assert_eq!(stale_rule_count, 0);
 
-        let automatic_status: String = conn
+        let corrected_status: String = conn
             .query_row(
                 "SELECT resolution_status FROM workflow_runs WHERE run_id=9200001",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        let automatic_assignment_count: i64 = conn
+        assert_eq!(corrected_status, "unassigned");
+
+        let mesh_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9200001",
-                [],
+                "SELECT COUNT(*) FROM dynamic_workflow_rules
+                 WHERE project_id=? AND repository_id=? AND active=1",
+                params![project_id, repository_id],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(automatic_status, "project");
-        assert_eq!(automatic_assignment_count, 0);
-
-        let manual_row: (String, i64) = conn
-            .query_row(
-                "SELECT wr.resolution_status,ra.manual
-                 FROM workflow_runs wr
-                 JOIN run_assignments ra ON ra.run_id=wr.run_id
-                 WHERE wr.run_id=9200002",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(manual_row, ("assigned".into(), 1));
-
-        drop(conn);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
-    }
-
-    #[test]
-    fn visualy_supply_chain_security_is_project_wide_and_preserves_manual_override() {
-        let path = legacy_v02_db_path("visualy-supply-chain-security");
-        init_db(&path).unwrap();
-
-        let conn = Connection::open(&path).unwrap();
-        let repository_id: i64 = conn
-            .query_row(
-                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let project_id: i64 = conn
-            .query_row(
-                "SELECT project_id FROM monitored_repositories WHERE id=?",
-                params![repository_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let ops_track_id: i64 = conn
-            .query_row(
-                "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='ops'",
-                params![project_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        for (run_id, manual) in [(9_210_001_i64, 0_i64), (9_210_002_i64, 1_i64)] {
-            conn.execute(
-                "INSERT INTO workflow_runs(
-                   run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
-                   head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
-                   created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored,last_resolution_attempt_at
-                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                params![
-                    run_id,
-                    repository_id,
-                    921_i64,
-                    "BEJEWELY Supply Chain Security",
-                    ".github/workflows/supply-chain-security.yml",
-                    "BEJEWELY Supply Chain Security",
-                    "pull_request",
-                    "ci/supply-chain-security-ownership",
-                    format!("sha-{run_id}"),
-                    run_id,
-                    1_i64,
-                    "completed",
-                    "success",
-                    format!("https://example/{run_id}"),
-                    "2026-09-24T02:00:00Z",
-                    Option::<String>::None,
-                    "2026-09-24T02:01:00Z",
-                    "2026-09-24T02:01:00Z",
-                    "assigned",
-                    0_i64,
-                    Option::<String>::None,
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO run_assignments(
-                   run_id,track_id,confidence,source,reason,manual,assigned_at
-                 ) VALUES(?,?,?,?,?,?,?)",
-                params![
-                    run_id,
-                    ops_track_id,
-                    if manual == 1 { 100_i64 } else { 98_i64 },
-                    if manual == 1 { "manual" } else { "pr_marker" },
-                    "fixture",
-                    manual,
-                    "2026-09-24T02:02:00Z",
-                ],
-            )
-            .unwrap();
-        }
-        drop(conn);
-
-        seed_bejewely_project_scope(&Connection::open(&path).unwrap()).unwrap();
-
-        let conn = Connection::open(&path).unwrap();
-        let rule_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM project_workflow_rules
-                 WHERE project_id=? AND repository_id IS NULL
-                   AND workflow_name='BEJEWELY Supply Chain Security' AND active=1",
-                params![project_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(rule_count, 1);
-
-        let automatic_status: String = conn
-            .query_row(
-                "SELECT resolution_status FROM workflow_runs WHERE run_id=9210001",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let automatic_assignment_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9210001",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(automatic_status, "project");
-        assert_eq!(automatic_assignment_count, 0);
-
-        let manual_row: (String, i64) = conn
-            .query_row(
-                "SELECT wr.resolution_status,ra.manual
-                 FROM workflow_runs wr
-                 JOIN run_assignments ra ON ra.run_id=wr.run_id
-                 WHERE wr.run_id=9210002",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(manual_row, ("assigned".into(), 1));
+        assert_eq!(mesh_count, 11);
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
