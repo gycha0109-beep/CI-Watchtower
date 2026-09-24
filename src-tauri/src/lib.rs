@@ -123,6 +123,11 @@ struct ResponsibilityMapDrift {
     failed_attempt_count: i64,
     last_reviewed_at: Option<String>,
     first_seen_at: String,
+    sla_status: String,
+    sla_target_hours: Option<i64>,
+    sla_remaining_hours: Option<i64>,
+    escalation_level: String,
+    escalation_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1595,7 +1600,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.25")
+        .user_agent("ci-watchtower/0.3.26")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -2108,6 +2113,84 @@ fn responsibility_review_age_bucket(age_hours: i64) -> String {
     }
 }
 
+fn responsibility_review_sla(
+    priority: &str,
+    age_hours: i64,
+) -> (String, Option<i64>, Option<i64>, String, Option<String>) {
+    let target_hours = match priority {
+        "p0" => Some(24),
+        "p1" => Some(96),
+        "p2" => Some(72),
+        "p3" | "blocked" => None,
+        _ => None,
+    };
+    let Some(target_hours) = target_hours else {
+        return ("exempt".into(), None, None, "none".into(), None);
+    };
+    let remaining = target_hours - age_hours;
+    if remaining <= 0 {
+        let reason = match priority {
+            "p0" => format!(
+                "P0 attention drift exceeded the 24h review SLA by {}h.",
+                -remaining
+            ),
+            "p1" => format!(
+                "P1 aging drift exceeded the 96h review SLA by {}h.",
+                -remaining
+            ),
+            _ => format!("Review SLA exceeded by {}h.", -remaining),
+        };
+        return (
+            "breached".into(),
+            Some(target_hours),
+            Some(remaining),
+            if matches!(priority, "p0" | "p1") {
+                "critical".into()
+            } else {
+                "none".into()
+            },
+            Some(reason),
+        );
+    }
+    let due_soon = match priority {
+        "p0" => remaining <= 12,
+        "p1" | "p2" => remaining <= 24,
+        _ => false,
+    };
+    let status = if due_soon { "due_soon" } else { "within_sla" };
+    let escalation_level = if matches!(priority, "p0" | "p1") {
+        "warning"
+    } else {
+        "none"
+    };
+    let reason = match priority {
+        "p0" => Some(format!(
+            "P0 attention drift has {}h remaining before the 24h review SLA.",
+            remaining
+        )),
+        "p1" => Some(format!(
+            "P1 aging drift has {}h remaining before the 96h review SLA.",
+            remaining
+        )),
+        _ => None,
+    };
+    (
+        status.into(),
+        Some(target_hours),
+        Some(remaining),
+        escalation_level.into(),
+        reason,
+    )
+}
+
+fn responsibility_escalation_rank(level: &str) -> i64 {
+    match level {
+        "critical" => 0,
+        "warning" => 1,
+        _ => 2,
+    }
+}
+
 fn populate_responsibility_review_operations(
     conn: &Connection,
     drift: &mut ResponsibilityMapDrift,
@@ -2168,6 +2251,13 @@ fn populate_responsibility_review_operations(
     drift.failed_attempt_count = failed_attempt_count;
     drift.last_reviewed_at = last_reviewed_at;
     drift.review_priority = responsibility_review_priority(&drift.review_status, age_hours);
+    let (sla_status, sla_target_hours, sla_remaining_hours, escalation_level, escalation_reason) =
+        responsibility_review_sla(&drift.review_priority, age_hours);
+    drift.sla_status = sla_status;
+    drift.sla_target_hours = sla_target_hours;
+    drift.sla_remaining_hours = sla_remaining_hours;
+    drift.escalation_level = escalation_level;
+    drift.escalation_reason = escalation_reason;
     Ok(())
 }
 
@@ -2401,6 +2491,11 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                 failed_attempt_count: 0,
                 last_reviewed_at: None,
                 first_seen_at: String::new(),
+                sla_status: "within_sla".into(),
+                sla_target_hours: Some(72),
+                sla_remaining_hours: Some(72),
+                escalation_level: "none".into(),
+                escalation_reason: None,
             });
         }
     }
@@ -2446,6 +2541,11 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                     failed_attempt_count: 0,
                     last_reviewed_at: None,
                     first_seen_at: String::new(),
+                sla_status: "within_sla".into(),
+                sla_target_hours: Some(72),
+                sla_remaining_hours: Some(72),
+                escalation_level: "none".into(),
+                escalation_reason: None,
                 });
             }
         }
@@ -2481,6 +2581,11 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                     failed_attempt_count: 0,
                     last_reviewed_at: None,
                     first_seen_at: String::new(),
+                sla_status: "within_sla".into(),
+                sla_target_hours: Some(72),
+                sla_remaining_hours: Some(72),
+                escalation_level: "none".into(),
+                escalation_reason: None,
                 });
             }
         }
@@ -2488,8 +2593,12 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
 
     finalize_responsibility_drifts(conn, &mut drifts)?;
     drifts.sort_by(|a, b| {
-        responsibility_review_priority_rank(&a.review_priority)
-            .cmp(&responsibility_review_priority_rank(&b.review_priority))
+        responsibility_escalation_rank(&a.escalation_level)
+            .cmp(&responsibility_escalation_rank(&b.escalation_level))
+            .then_with(|| {
+                responsibility_review_priority_rank(&a.review_priority)
+                    .cmp(&responsibility_review_priority_rank(&b.review_priority))
+            })
             .then_with(|| b.review_age_hours.cmp(&a.review_age_hours))
             .then_with(|| b.failed_attempt_count.cmp(&a.failed_attempt_count))
             .then_with(|| a.repository.cmp(&b.repository))

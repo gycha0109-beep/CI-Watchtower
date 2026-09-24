@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn legacy_v02_db_path(label: &str) -> std::path::PathBuf {
@@ -3630,4 +3629,36 @@ fn responsibility_review_priority_and_age_bucket_follow_operational_order() {
     assert!(responsibility_review_priority_rank("p0") < responsibility_review_priority_rank("p1"));
     assert!(responsibility_review_priority_rank("p1") < responsibility_review_priority_rank("p2"));
     assert!(responsibility_review_priority_rank("p2") < responsibility_review_priority_rank("p3"));
+}
+
+#[test]
+fn responsibility_review_sla_escalates_p0_and_p1_without_escalating_p2() {
+    let p0_fresh = responsibility_review_sla("p0", 0);
+    assert_eq!(p0_fresh.0, "within_sla");
+    assert_eq!(p0_fresh.1, Some(24));
+    assert_eq!(p0_fresh.2, Some(24));
+    assert_eq!(p0_fresh.3, "warning");
+    let p0_due = responsibility_review_sla("p0", 12);
+    assert_eq!(p0_due.0, "due_soon");
+    assert_eq!(p0_due.2, Some(12));
+    let p0_breached = responsibility_review_sla("p0", 24);
+    assert_eq!(p0_breached.0, "breached");
+    assert_eq!(p0_breached.3, "critical");
+    let p1_due = responsibility_review_sla("p1", 72);
+    assert_eq!(p1_due.0, "due_soon");
+    assert_eq!(p1_due.1, Some(96));
+    assert_eq!(p1_due.2, Some(24));
+    assert_eq!(p1_due.3, "warning");
+    let p1_breached = responsibility_review_sla("p1", 100);
+    assert_eq!(p1_breached.0, "breached");
+    assert_eq!(p1_breached.2, Some(-4));
+    assert_eq!(p1_breached.3, "critical");
+    let p2_due = responsibility_review_sla("p2", 48);
+    assert_eq!(p2_due.0, "due_soon");
+    assert_eq!(p2_due.3, "none");
+    let deferred = responsibility_review_sla("p3", 500);
+    assert_eq!(deferred.0, "exempt");
+    assert_eq!(deferred.1, None);
+    assert!(responsibility_escalation_rank("critical") < responsibility_escalation_rank("warning"));
+    assert!(responsibility_escalation_rank("warning") < responsibility_escalation_rank("none"));
 }

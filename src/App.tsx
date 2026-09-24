@@ -104,6 +104,20 @@ function responsibilityPriorityLabel(priority: string) {
   return priority === 'blocked' ? 'BLOCKED' : priority.toUpperCase();
 }
 
+function responsibilityEscalationRank(level: string) {
+  switch (level) {
+    case 'critical': return 0;
+    case 'warning': return 1;
+    default: return 2;
+  }
+}
+
+function responsibilitySlaLabel(status: string, remaining: number | null) {
+  if (status === 'exempt' || remaining == null) return 'SLA EXEMPT';
+  if (status === 'breached') return 'SLA +' + Math.abs(remaining) + 'h';
+  return 'SLA ' + remaining + 'h';
+}
+
 function responsibilityAgeLabel(hours: number) {
   if (hours >= 48) return Math.floor(hours / 24) + 'd ' + (hours % 24) + 'h';
   return hours + 'h';
@@ -376,6 +390,7 @@ function App() {
         (selectedRepository === 'all' || item.repositoryId === selectedRepository)
       )
       .sort((a, b) =>
+        responsibilityEscalationRank(a.escalationLevel) - responsibilityEscalationRank(b.escalationLevel) ||
         responsibilityPriorityRank(a.reviewPriority) - responsibilityPriorityRank(b.reviewPriority) ||
         b.reviewAgeHours - a.reviewAgeHours ||
         b.failedAttemptCount - a.failedAttemptCount ||
@@ -433,6 +448,15 @@ function App() {
     p1: responsibilityMapDriftsInScope.filter(item => item.reviewPriority === 'p1').length,
     overdue: responsibilityMapDriftsInScope.filter(item => item.reviewAgeBucket === 'overdue').length,
   }), [responsibilityMapDriftsInScope]);
+  const responsibilityEscalations = useMemo(
+    () => responsibilityMapDriftsInScope.filter(item => item.escalationLevel !== 'none'),
+    [responsibilityMapDriftsInScope],
+  );
+  const responsibilityEscalationCounts = useMemo(() => ({
+    critical: responsibilityEscalations.filter(item => item.escalationLevel === 'critical').length,
+    warning: responsibilityEscalations.filter(item => item.escalationLevel === 'warning').length,
+    breached: responsibilityEscalations.filter(item => item.slaStatus === 'breached').length,
+  }), [responsibilityEscalations]);
   const responsibilityMapSourceWarnings = responsibilityMapSourcesInScope.filter(item =>
     item.status === 'error' || (item.status === 'not_found' && item.contractCount > 0)
   );
@@ -862,6 +886,9 @@ function App() {
                 {' · '}P0 {responsibilityReviewPriorityCounts.p0}
                 {' · '}P1 {responsibilityReviewPriorityCounts.p1}
                 {' · '}overdue {responsibilityReviewPriorityCounts.overdue}
+                {' · '}critical {responsibilityEscalationCounts.critical}
+                {' · '}warning {responsibilityEscalationCounts.warning}
+                {' · '}SLA breach {responsibilityEscalationCounts.breached}
                 {' · '}source synced {responsibilityMapSynced.length}
               </span>
             </div>
@@ -887,6 +914,32 @@ function App() {
                   </span>
                 </div>
               ))}
+            </div>
+          )}
+          {responsibilityEscalations.length > 0 && (
+            <div className="responsibility-escalation-queue">
+              <div className="responsibility-escalation-head">
+                <div>
+                  <b>SLA Escalation</b>
+                  <span>P0/P1 review SLA가 임박했거나 초과된 항목만 별도로 표시합니다.</span>
+                </div>
+                <small>critical {responsibilityEscalationCounts.critical} · warning {responsibilityEscalationCounts.warning}</small>
+              </div>
+              <div className="responsibility-escalation-list">
+                {responsibilityEscalations.map(item => (
+                  <div className={'responsibility-escalation-row ' + item.escalationLevel} key={'escalation:' + item.reviewKey}>
+                    <span className={'responsibility-escalation-level ' + item.escalationLevel}>{item.escalationLevel.toUpperCase()}</span>
+                    <span className="responsibility-escalation-main">
+                      <b>{item.workflowName}</b>
+                      <small>{item.repository} · {responsibilityPriorityLabel(item.reviewPriority)}</small>
+                    </span>
+                    <span className={'responsibility-sla-badge ' + item.slaStatus}>
+                      {responsibilitySlaLabel(item.slaStatus, item.slaRemainingHours)}
+                    </span>
+                    <small>{item.escalationReason ?? 'Review SLA escalation'}</small>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           {responsibilityMapSourceWarnings.length > 0 ? (
@@ -925,6 +978,12 @@ function App() {
                         {item.reviewAgeBucket.toUpperCase()} · {responsibilityAgeLabel(item.reviewAgeHours)}
                       </span>
                       <span className={`responsibility-review-state ${item.reviewStatus}`}>{item.reviewStatus.toUpperCase()}</span>
+                      {item.escalationLevel !== 'none' && (
+                        <span className={`responsibility-escalation-level ${item.escalationLevel}`}>{item.escalationLevel.toUpperCase()}</span>
+                      )}
+                      <span className={`responsibility-sla-badge ${item.slaStatus}`}>
+                        {responsibilitySlaLabel(item.slaStatus, item.slaRemainingHours)}
+                      </span>
                       <span className="responsibility-review-action">{responsibilityActionLabel(item.recommendedAction)}</span>
                     </span>
                   </div>
@@ -953,6 +1012,8 @@ function App() {
                     <span>Review events <b>{item.reviewEventCount}</b></span>
                     <span>Failed attempts <b>{item.failedAttemptCount}</b></span>
                     <span>Last reviewed <b>{item.lastReviewedAt ? formatAuditTime(item.lastReviewedAt) : '없음'}</b></span>
+                    <span>SLA target <b>{item.slaTargetHours == null ? 'exempt' : item.slaTargetHours + 'h'}</b></span>
+                    <span>SLA state <b>{item.slaStatus.toUpperCase()}</b></span>
                   </div>
                   {(resolutionHistoryByReviewKey.get(item.reviewKey)?.length ?? 0) > 0 && (
                     <button

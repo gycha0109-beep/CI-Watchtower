@@ -235,6 +235,11 @@ export interface ResponsibilityMapDrift {
   failedAttemptCount: number;
   lastReviewedAt: string | null;
   firstSeenAt: string;
+  slaStatus: 'within_sla' | 'due_soon' | 'breached' | 'exempt' | string;
+  slaTargetHours: number | null;
+  slaRemainingHours: number | null;
+  escalationLevel: 'critical' | 'warning' | 'none' | string;
+  escalationReason: string | null;
 }
 
 export interface ResponsibilityResolutionPreviewInput {
