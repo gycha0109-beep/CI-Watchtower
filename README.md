@@ -34,7 +34,8 @@ Repository: gycha0109-beep/K_beauty
 
 Project-wide CI
 ├─ BEJEWELY Current Main Health
-└─ PIE Prospective Shadow
+├─ PIE Prospective Shadow
+└─ BEJEWELY Security Boundary
 
 Tracks
 ├─ CI Watchtower / CI 운영 정리        → ops
@@ -47,11 +48,11 @@ Tracks
 
 기존 producer에서 사용된 `taxonomy&AI`는 Track Key 문자 규칙과 맞지 않으므로 Watchtower가 과거 evidence를 읽을 때 `taxonomy-ai`로 정규화합니다. 신규 producer는 `taxonomy-ai`를 사용합니다.
 
-K_beauty가 기존 Project 아래에 등록되어 있던 경우 Repository를 `비주얼리`로 이동하고, 다른 Project Track에 남아 있는 잘못된 Run 귀속을 정리합니다. 두 Project-wide Workflow의 기존 Run도 공용 CI로 즉시 재분류합니다.
+K_beauty가 기존 Project 아래에 등록되어 있던 경우 Repository를 `비주얼리`로 이동하고, 다른 Project Track에 남아 있는 잘못된 Run 귀속을 정리합니다. 등록된 Project-wide Workflow의 기존 자동 귀속 Run도 공용 CI로 즉시 재분류하며, 수동 귀속은 보존합니다.
 
 ## Project-wide CI
 
-명하 migration은 다음 Workflow 이름을 기본 공용 CI 규칙으로 등록합니다.
+명하 migration은 다음 Workflow 이름을 Project 전체 공용 CI 규칙으로 등록합니다.
 
 ```text
 CI
@@ -59,6 +60,19 @@ Governance
 Web PR Domain Gates
 PIE Prospective Shadow
 ```
+
+또한 `gycha0109-beep/MyeongHa` Repository에는 다음 shared gate를 Repository 범위 Project-wide 규칙으로 등록합니다.
+
+```text
+DB Content Reading Suite
+DB Runtime Authority Suite
+DB PostgreSQL 17 Authority Suite
+Supabase Production
+Web Browser Smoke
+Web Auth Browser Regression
+```
+
+이 Repository-scoped 규칙은 같은 이름의 Workflow가 Saju 등 다른 Repository에 존재하더라도 전파되지 않습니다. 자동 Track 귀속은 Project-wide로 정리하지만 수동 귀속은 보존합니다.
 
 공용 CI 규칙은 UI에서 추가/삭제할 수 있으며 프로젝트 전체 또는 특정 Repository 범위로 제한할 수 있습니다. 미귀속 Inbox의 Run에서 **공용 CI로 분류**를 선택하면 같은 Project의 동일 Workflow 이름을 공용 규칙으로 학습합니다.
 
@@ -114,14 +128,14 @@ run-name: "[WT:${{ inputs.watchtower_track }}] ${{ github.workflow }}"
 
 ## Producer Contract Health
 
-Dashboard는 각 Repository의 **최근 최대 50개 Run**을 기준으로 producer contract 상태를 집계합니다.
+Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.
 
 정상 계약으로 계산하는 경우:
 
 - Project-wide CI 규칙으로 분류된 Run
 - `run_name`, `pr_marker`, `commit_marker`, `branch` 명시 신호로 Track에 귀속된 Run
 
-별도 drift로 표시하는 경우:
+drift bucket으로 분류하는 경우:
 
 - learned fingerprint 기반 `inference`
 - 과거 alias migration의 `track_alias`
@@ -131,7 +145,12 @@ Dashboard는 각 Repository의 **최근 최대 50개 Run**을 기준으로 produ
 
 따라서 Project-wide CI는 `[WT:*]`가 없어도 정상이며, shared workflow를 억지로 Track에 넣어 coverage를 올리지 않습니다. 이 지표의 목적은 resolver 성공률이 아니라 **producer가 스스로 귀속 근거를 얼마나 명시적으로 남기고 있는지** 확인하는 것입니다.
 
-Producer Contract 패널의 **Contract Drift** 목록은 같은 표본에서 정상 계약이 아닌 Run을 직접 보여줍니다. `inference`, `track_alias`, 수동 귀속, `unassigned/conflict`, 기타 비표준 귀속을 Repository/Workflow/branch와 함께 확인할 수 있고, 행을 선택하면 기존 Attribution Audit에서 실제 resolver evidence와 Historical Reconciliation 이력을 검토할 수 있습니다. 이 목록은 producer 저장소를 추측으로 일괄 수정하지 않고 실제 drift부터 보정하기 위한 작업 큐입니다.
+Producer Contract 패널은 drift를 두 층으로 분리합니다.
+
+- **Current Drift**: `repository_id + workflow_id` 기준 최신 Run이 비정상 계약인 producer. 상단 coverage와 위험 색상은 이 집합만 기준으로 계산합니다.
+- **Historical Drift**: 같은 workflow에 더 최신 Run이 이미 존재하는 과거 비정상 Run. 최근 50-run evidence와 Attribution Audit에서는 계속 확인할 수 있지만 현재 producer 이상으로 계산하지 않습니다.
+
+최근 50-run bucket 통계는 historical evidence를 포함한 표본 통계로 남습니다. 따라서 과거 untagged Run이 표본에 남아 있어도 최신 producer가 정상 계약으로 회복됐다면 현재 coverage를 계속 낮추지 않습니다. 각 drift 행을 선택하면 기존 Attribution Audit에서 resolver evidence와 Historical Reconciliation 이력을 검토할 수 있습니다.
 
 ## Resolver
 
@@ -242,3 +261,6 @@ npm run tauri build
 - 최근 100개에서 밀린 과거 미귀속 Run 점진 재평가
 - 미귀속 전체 건수와 화면 표시 건수 구분
 - 다른 Project Track으로 수동 오귀속 방지
+- `repository_id + workflow_id` 최신 Run 기준 Current Drift / Historical Drift 분리
+- 과거 drift가 남아 있어도 최신 정상 producer coverage를 낮추지 않음
+- Repository-scoped Project-wide 규칙이 다른 Repository에 전파되지 않음
