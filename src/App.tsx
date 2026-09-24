@@ -6,6 +6,7 @@ import type {
   MonitoredRepository,
   Project,
   ResponsibilityMapDrift,
+  ResponsibilityResolutionAuditEntry,
   ResponsibilityResolutionPreview,
   RunAttributionDetail,
   Settings,
@@ -16,6 +17,7 @@ import type {
 type TrackFormState = Omit<TrackInput, 'longCiMinutes'> & { longCiMinutes: number | '' };
 type ViewFilter = 'all' | 'project' | 'unassigned' | number;
 type ScopeFilter = 'all' | number;
+type ResolutionHistoryFilter = 'all' | 'resolved' | 'deferred' | 'blocked' | 'stale_rejected' | 'failed';
 
 const emptyTrack = (projectId = 0): TrackFormState => ({
   projectId,
@@ -98,6 +100,30 @@ function resolutionActionLabel(action: string) {
   }
 }
 
+function resolutionResultLabel(result: string) {
+  switch (result) {
+    case 'resolved': return 'RESOLVED';
+    case 'deferred': return 'DEFERRED';
+    case 'blocked': return 'BLOCKED';
+    case 'stale_rejected': return 'STALE';
+    case 'still_open': return 'OPEN';
+    case 'failed': return 'FAILED';
+    default: return result.toUpperCase();
+  }
+}
+
+function formatAuditTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('ko-KR', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
 function repositoryState(repo: MonitoredRepository) {
   if (!repo.enabled) return 'OFF';
   if (repo.lastError) return 'ERROR';
@@ -169,12 +195,21 @@ function App() {
   const [auditLoadingId, setAuditLoadingId] = useState<number | null>(null);
   const [resolutionPreview, setResolutionPreview] = useState<ResponsibilityResolutionPreview | null>(null);
   const [resolutionLoadingKey, setResolutionLoadingKey] = useState<string | null>(null);
+  const [resolutionHistory, setResolutionHistory] = useState<ResponsibilityResolutionAuditEntry[]>([]);
+  const [resolutionHistoryFilter, setResolutionHistoryFilter] = useState<ResolutionHistoryFilter>('all');
+  const [resolutionHistoryReviewKey, setResolutionHistoryReviewKey] = useState<string | null>(null);
+  const [expandedResolutionAuditId, setExpandedResolutionAuditId] = useState<number | null>(null);
 
   const refresh = useCallback(async (poll = false) => {
     try {
       setBusy(true);
       setError(null);
-      setDashboard(await (poll ? api.pollNow() : api.getDashboard()));
+      const [nextDashboard, nextHistory] = await Promise.all([
+        poll ? api.pollNow() : api.getDashboard(),
+        api.getResponsibilityResolutionHistory(),
+      ]);
+      setDashboard(nextDashboard);
+      setResolutionHistory(nextHistory);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -325,6 +360,36 @@ function App() {
     ),
     [dashboard, selectedProject, selectedRepository],
   );
+  const resolutionHistoryInScope = useMemo(
+    () => resolutionHistory.filter(item =>
+      (selectedProject === 'all' || item.projectId === selectedProject) &&
+      (selectedRepository === 'all' || item.repositoryId === selectedRepository)
+    ),
+    [resolutionHistory, selectedProject, selectedRepository],
+  );
+  const resolutionHistoryByReviewKey = useMemo(() => {
+    const grouped = new Map<string, ResponsibilityResolutionAuditEntry[]>();
+    for (const item of resolutionHistoryInScope) {
+      const current = grouped.get(item.reviewKey) ?? [];
+      current.push(item);
+      grouped.set(item.reviewKey, current);
+    }
+    return grouped;
+  }, [resolutionHistoryInScope]);
+  const visibleResolutionHistory = useMemo(
+    () => resolutionHistoryInScope.filter(item =>
+      (resolutionHistoryFilter === 'all' || item.result === resolutionHistoryFilter) &&
+      (resolutionHistoryReviewKey == null || item.reviewKey === resolutionHistoryReviewKey)
+    ),
+    [resolutionHistoryFilter, resolutionHistoryInScope, resolutionHistoryReviewKey],
+  );
+  const resolutionHistoryCounts = useMemo(() => ({
+    resolved: resolutionHistoryInScope.filter(item => item.result === 'resolved').length,
+    deferred: resolutionHistoryInScope.filter(item => item.result === 'deferred').length,
+    blocked: resolutionHistoryInScope.filter(item => item.result === 'blocked').length,
+    stale_rejected: resolutionHistoryInScope.filter(item => item.result === 'stale_rejected').length,
+    failed: resolutionHistoryInScope.filter(item => item.result === 'failed').length,
+  }), [resolutionHistoryInScope]);
   const responsibilityMapSourceWarnings = responsibilityMapSourcesInScope.filter(item =>
     item.status === 'error' || (item.status === 'not_found' && item.contractCount > 0)
   );
