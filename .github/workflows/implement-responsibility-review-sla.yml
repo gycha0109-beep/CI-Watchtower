@@ -134,11 +134,11 @@ jobs:
               raise SystemExit(f"drift initializers: expected 3, got {lib.count(init_anchor)}")
           lib = lib.replace(
               init_anchor,
-              'first_seen_at: String::new(),\\n'
-              '                sla_status: "within_sla".into(),\\n'
-              '                sla_target_hours: Some(72),\\n'
-              '                sla_remaining_hours: Some(72),\\n'
-              '                escalation_level: "none".into(),\\n'
+              'first_seen_at: String::new(),\n'
+              '                sla_status: "within_sla".into(),\n'
+              '                sla_target_hours: Some(72),\n'
+              '                sla_remaining_hours: Some(72),\n'
+              '                escalation_level: "none".into(),\n'
               '                escalation_reason: None,',
           )
           sort_anchor = "        responsibility_review_priority_rank(&a.review_priority)"
@@ -146,15 +146,15 @@ jobs:
               raise SystemExit(f"drift sort anchor: expected 1, got {lib.count(sort_anchor)}")
           lib = lib.replace(
               sort_anchor,
-              "        responsibility_escalation_rank(&a.escalation_level)\\n"
-              "            .cmp(&responsibility_escalation_rank(&b.escalation_level))\\n"
+              "        responsibility_escalation_rank(&a.escalation_level)\n"
+              "            .cmp(&responsibility_escalation_rank(&b.escalation_level))\n"
               "            .then_with(|| responsibility_review_priority_rank(&a.review_priority)",
               1,
           )
           lib = lib.replace(
-              "            .cmp(&responsibility_review_priority_rank(&b.review_priority))\\n"
+              "            .cmp(&responsibility_review_priority_rank(&b.review_priority))\n"
               "            .then_with(|| b.review_age_hours.cmp(&a.review_age_hours))",
-              "                .cmp(&responsibility_review_priority_rank(&b.review_priority)))\\n"
+              "                .cmp(&responsibility_review_priority_rank(&b.review_priority)))\n"
               "            .then_with(|| b.review_age_hours.cmp(&a.review_age_hours))",
               1,
           )
@@ -315,8 +315,8 @@ jobs:
           app = app.replace(
               ops_anchor,
               ops_anchor
-              + "\\n                    <span>SLA target <b>{item.slaTargetHours == null ? 'exempt' : item.slaTargetHours + 'h'}</b></span>"
-              + "\\n                    <span>SLA state <b>{item.slaStatus.toUpperCase()}</b></span>",
+              + "\n                    <span>SLA target <b>{item.slaTargetHours == null ? 'exempt' : item.slaTargetHours + 'h'}</b></span>"
+              + "\n                    <span>SLA state <b>{item.slaStatus.toUpperCase()}</b></span>",
               1,
           )
           app_path.write_text(app)
