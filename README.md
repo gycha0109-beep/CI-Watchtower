@@ -176,6 +176,19 @@ Responsibility Map Drift가 발생하면 단순 상태 행 대신 검토 가능�
 - **권장 조치 유형**: Project-wide/Dynamic 선언 검토, 재분류 검토, stale 규칙 유지/제거 검토, Track/Map 계약 검토, producer run-name 수정 검토 등을 구분합니다.
 - 권장 조치는 **review hint**일 뿐입니다. Inbox는 Track 생성, 규칙 추가/삭제/재분류, producer YAML 수정, Run assignment 변경을 자동 수행하지 않습니다.
 
+### Manual Responsibility Resolution (v0.3.22)
+
+Review Inbox에서 사용자가 명시적으로 승인한 WatchTower 내부 변경만 실행할 수 있습니다.
+
+- `Missing Project-wide` / `Missing Dynamic`: repository-scoped 규칙 추가를 Preview 후 승인합니다.
+- `Project-wide ↔ Dynamic` kind mismatch: 충돌 규칙이 repository-scoped일 때만 transaction으로 원자적 재분류합니다. Project 전체 범위 규칙이면 다른 Repository 영향 가능성 때문에 차단합니다.
+- `Stale`: repository-scoped 규칙만 제거할 수 있으며, `보류`는 Drift를 숨기지 않고 Deferred 상태로 유지합니다.
+- `Track registry mismatch`, producer run-name mismatch, static 책임 충돌, unsupported map binding은 WatchTower 내부 자동 변경 대상이 아니며 Blocked로 표시합니다.
+- Preview에는 적용될 변경과 불변 조건을 표시하고, 승인 시 fingerprint를 다시 검증합니다. Preview 이후 계약이 달라졌으면 `stale_rejected`로 fail closed 합니다.
+- 실행 후 Responsibility Drift를 다시 계산해서 사라진 경우에만 `resolved`로 기록합니다.
+- `responsibility_resolution_audit`에 before/after binding, action, fingerprint, result를 기록합니다.
+- Resolution은 canonical Track을 생성하지 않고 producer YAML / repository responsibility map을 수정하지 않으며 manual run assignment를 보존합니다.
+
 ## Producer Contract Health
 
 Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.
