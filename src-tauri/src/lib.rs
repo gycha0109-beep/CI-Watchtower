@@ -1991,17 +1991,19 @@ fn responsibility_review_status(
     ) {
         return Ok("blocked".into());
     }
-    let latest: Option<String> = conn
+    let latest: Option<(String, String)> = conn
         .query_row(
-            "SELECT result FROM responsibility_resolution_audit
+            "SELECT action,result FROM responsibility_resolution_audit
              WHERE review_key=? AND fingerprint=?
              ORDER BY id DESC LIMIT 1",
             params![review_key, fingerprint],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    Ok(match latest.as_deref() {
-        Some("deferred") => "deferred",
+    Ok(match latest.as_ref().map(|(action, result)| (action.as_str(), result.as_str())) {
+        Some(("reopen", _)) => "open",
+        Some((_, "deferred")) => "deferred",
+        Some((_, "failed" | "still_open" | "stale_rejected" | "blocked")) => "attention",
         _ => "open",
     }
     .into())
@@ -4419,6 +4421,46 @@ fn defer_responsibility_drift_with_conn(
     })
 }
 
+fn reopen_responsibility_drift_with_conn(
+    conn: &Connection,
+    input: &DeferResponsibilityDriftInput,
+) -> Result<ResponsibilityResolutionResult> {
+    let drift = current_responsibility_drift(conn, &input.review_key)?;
+    let current_binding = current_watchtower_responsibility_binding(conn, &drift)?;
+    if drift.fingerprint != input.fingerprint {
+        let audit_id = insert_resolution_audit(
+            conn,
+            &drift,
+            "reopen",
+            &input.fingerprint,
+            &drift.fingerprint,
+            current_binding.as_deref(),
+            "stale_rejected",
+        )?;
+        return Ok(ResponsibilityResolutionResult {
+            status: "stale_rejected".into(),
+            audit_id,
+            current_drift: Some(drift),
+        });
+    }
+    let audit_id = insert_resolution_audit(
+        conn,
+        &drift,
+        "reopen",
+        &input.fingerprint,
+        &drift.fingerprint,
+        current_binding.as_deref(),
+        "still_open",
+    )?;
+    let mut current = drift.clone();
+    current.review_status = "open".into();
+    Ok(ResponsibilityResolutionResult {
+        status: "open".into(),
+        audit_id,
+        current_drift: Some(current),
+    })
+}
+
 fn resolve_responsibility_drift_with_conn(
     conn: &Connection,
     input: &ResolveResponsibilityDriftInput,
@@ -4526,6 +4568,18 @@ fn defer_responsibility_drift(
     let result = (|| -> Result<ResponsibilityResolutionResult> {
         let conn = db(&state)?;
         defer_responsibility_drift_with_conn(&conn, &input)
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reopen_responsibility_drift(
+    input: DeferResponsibilityDriftInput,
+    state: State<'_, AppState>,
+) -> std::result::Result<ResponsibilityResolutionResult, String> {
+    let result = (|| -> Result<ResponsibilityResolutionResult> {
+        let conn = db(&state)?;
+        reopen_responsibility_drift_with_conn(&conn, &input)
     })();
     result.map_err(|e| e.to_string())
 }
@@ -5248,6 +5302,7 @@ pub fn run() {
             get_responsibility_resolution_preview,
             resolve_responsibility_drift,
             defer_responsibility_drift,
+            reopen_responsibility_drift,
             get_responsibility_resolution_history,
             get_run_attribution,
             poll_now,
