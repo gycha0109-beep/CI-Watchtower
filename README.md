@@ -136,6 +136,7 @@ run-name: "[WT:${{ inputs.watchtower_track }}] ${{ github.workflow }}"
 - 고정 Track-owned는 `[WT:<track-key>]`, Project-wide는 `project_workflow_rules`, 여러 Track이 공유하는 producer는 `dynamic_workflow_rules`로 선언합니다.
 - Dynamic 규칙은 Track을 강제하지 않습니다. 각 Run은 계속 명시 신호로 fail-closed 귀속됩니다.
 - Saju `MESH6J Manual Browser Capture Surface CI`는 repository-scoped Dynamic Workflow입니다.
+- Dynamic Workflow 규칙은 앱의 **Dynamic Workflow 규칙** 관리 영역에서 프로젝트/저장소 범위로 추가·삭제할 수 있습니다. 내장된 MESH6J 계약은 `protected` 기본 규칙으로 표시되어 실수로 삭제되지 않습니다.
 
 ## Producer Contract Health
 

@@ -116,6 +116,8 @@ function App() {
   const [repoProjectId, setRepoProjectId] = useState(0);
   const [ruleName, setRuleName] = useState('');
   const [ruleRepositoryId, setRuleRepositoryId] = useState<ScopeFilter>('all');
+  const [dynamicRuleName, setDynamicRuleName] = useState('');
+  const [dynamicRuleRepositoryId, setDynamicRuleRepositoryId] = useState<ScopeFilter>('all');
   const [token, setToken] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
   const [selectedProject, setSelectedProject] = useState<ScopeFilter>('all');
@@ -376,6 +378,21 @@ function App() {
       setSelectedProject(selectedProjectId);
       setSelectedView('project');
     }, '공용 CI 규칙을 추가했습니다.', true);
+  };
+
+  const submitDynamicRule = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!dynamicRuleName.trim() || !selectedProjectId) return;
+    await act(async () => {
+      await api.saveDynamicWorkflowRule({
+        projectId: selectedProjectId,
+        repositoryId: dynamicRuleRepositoryId === 'all' ? null : dynamicRuleRepositoryId,
+        workflowName: dynamicRuleName.trim(),
+      });
+      setDynamicRuleName('');
+      setDynamicRuleRepositoryId('all');
+      setSelectedProject(selectedProjectId);
+    }, 'Dynamic Workflow 규칙을 추가했습니다.', true);
   };
 
   const editTrack = (item: DashboardTrack) => {
@@ -702,6 +719,38 @@ function App() {
               <div className="rule-item" key={rule.id}>
                 <div><b>{rule.workflowName}</b><span>{rule.repositoryId ? dashboard.repositories.find(repo => repo.id === rule.repositoryId)?.repo : '프로젝트 전체'}</span></div>
                 <button className="danger-ghost tiny" onClick={() => void act(() => api.deleteProjectWorkflowRule(rule.id), '공용 CI 규칙을 삭제했습니다.', true)}>삭제</button>
+              </div>
+            ))}
+          </div>
+
+          <hr />
+          <h2>Dynamic Workflow 규칙</h2>
+          <p className="hint">여러 Track이 같은 Workflow를 의도적으로 공유할 때 등록합니다. 이 규칙은 Track을 강제하지 않으며 각 Run의 명시 신호는 계속 필요합니다.</p>
+          <form onSubmit={submitDynamicRule} className="stack-form">
+            <label>Workflow 이름<input value={dynamicRuleName} onChange={e => setDynamicRuleName(e.target.value)} placeholder="예: MESH6J Manual Browser Capture Surface CI" /></label>
+            <label>저장소 범위
+              <select value={dynamicRuleRepositoryId} onChange={e => setDynamicRuleRepositoryId(e.target.value === 'all' ? 'all' : Number(e.target.value))}>
+                <option value="all">프로젝트 전체</option>
+                {selectedProjectRepos.map(repo => <option key={repo.id} value={repo.id}>{repo.repo}</option>)}
+              </select>
+            </label>
+            <button className="primary" type="submit" disabled={!selectedProjectId}>Dynamic 규칙 추가</button>
+          </form>
+          <div className="rule-list">
+            {dashboard?.dynamicWorkflowRules.filter(rule => selectedProject === 'all' || rule.projectId === selectedProject).map(rule => (
+              <div className="rule-item" key={rule.id}>
+                <div>
+                  <b>{rule.workflowName}</b>
+                  <span>{rule.repositoryId ? dashboard.repositories.find(repo => repo.id === rule.repositoryId)?.repo : '프로젝트 전체'}{rule.protected ? ' · 기본 계약' : ''}</span>
+                </div>
+                <button
+                  className="danger-ghost tiny"
+                  disabled={rule.protected}
+                  title={rule.protected ? '기본 Dynamic Workflow 계약은 삭제할 수 없습니다.' : undefined}
+                  onClick={() => void act(() => api.deleteDynamicWorkflowRule(rule.id), 'Dynamic Workflow 규칙을 삭제했습니다.', true)}
+                >
+                  {rule.protected ? '고정' : '삭제'}
+                </button>
               </div>
             ))}
           </div>

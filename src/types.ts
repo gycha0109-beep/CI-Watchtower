@@ -27,6 +27,21 @@ export interface ProjectWorkflowRuleInput {
   workflowName: string;
 }
 
+export interface DynamicWorkflowRule {
+  id: number;
+  projectId: number;
+  repositoryId: number | null;
+  workflowName: string;
+  active: boolean;
+  protected: boolean;
+}
+
+export interface DynamicWorkflowRuleInput {
+  projectId: number;
+  repositoryId: number | null;
+  workflowName: string;
+}
+
 export interface Track {
   id: number;
   projectId: number;
@@ -207,6 +222,7 @@ export interface Dashboard {
   repositories: MonitoredRepository[];
   tracks: DashboardTrack[];
   projectWorkflowRules: ProjectWorkflowRule[];
+  dynamicWorkflowRules: DynamicWorkflowRule[];
   repositoryScopeStats: RepositoryScopeStats[];
   producerContractStats: ProducerContractStats[];
   producerContractRuns: ProducerContractRun[];
