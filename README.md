@@ -35,7 +35,8 @@ Repository: gycha0109-beep/K_beauty
 Project-wide CI
 ├─ BEJEWELY Current Main Health
 ├─ PIE Prospective Shadow
-└─ BEJEWELY Security Boundary
+├─ BEJEWELY Security Boundary
+└─ BEJEWELY Supply Chain Security
 
 Tracks
 ├─ CI Watchtower / CI 운영 정리        → ops
@@ -49,6 +50,8 @@ Tracks
 기존 producer에서 사용된 `taxonomy&AI`는 Track Key 문자 규칙과 맞지 않으므로 Watchtower가 과거 evidence를 읽을 때 `taxonomy-ai`로 정규화합니다. 신규 producer는 `taxonomy-ai`를 사용합니다.
 
 K_beauty가 기존 Project 아래에 등록되어 있던 경우 Repository를 `비주얼리`로 이동하고, 다른 Project Track에 남아 있는 잘못된 Run 귀속을 정리합니다. 등록된 Project-wide Workflow의 기존 자동 귀속 Run도 공용 CI로 즉시 재분류하며, 수동 귀속은 보존합니다.
+
+`BEJEWELY Security Boundary`와 `BEJEWELY Supply Chain Security`는 특정 Track의 전용 검증기가 아니라 여러 개발축에서 공통으로 실행되는 shared security gate이므로 Project-wide로 유지합니다. PR/branch가 특정 Track에서 이 gate를 촉발하더라도 workflow 책임 자체를 해당 Track으로 바꾸지 않습니다.
 
 ## Project-wide CI
 
