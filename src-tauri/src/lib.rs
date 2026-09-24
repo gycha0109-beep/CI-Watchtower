@@ -4146,22 +4146,64 @@ fn resolution_preview_for_drift(
     })
 }
 
+fn current_watchtower_responsibility_binding(
+    conn: &Connection,
+    drift: &ResponsibilityMapDrift,
+) -> Result<Option<String>> {
+    let project_rules = list_project_workflow_rules(conn)?;
+    let dynamic_rules = list_dynamic_workflow_rules(conn)?;
+    let project_declared = project_rule_matches(
+        &project_rules,
+        drift.project_id,
+        drift.repository_id,
+        &drift.workflow_name,
+    );
+    let dynamic_declared = dynamic_rule_matches(
+        &dynamic_rules,
+        drift.project_id,
+        drift.repository_id,
+        &drift.workflow_name,
+    );
+    if project_declared && dynamic_declared {
+        return Ok(Some("project-wide + dynamic".into()));
+    }
+    if project_declared {
+        return Ok(Some("project-wide".into()));
+    }
+    if dynamic_declared {
+        return Ok(Some("dynamic".into()));
+    }
+    Ok(latest_workflow_run_title(
+        conn,
+        drift.repository_id,
+        &drift.workflow_path,
+        &drift.workflow_name,
+    )?
+    .as_deref()
+    .and_then(extract_marker)
+    .map(|key| format!("static:{key}")))
+}
+
 fn insert_resolution_audit(
     conn: &Connection,
     drift: &ResponsibilityMapDrift,
     action: &str,
-    after: Option<&ResponsibilityMapDrift>,
+    requested_fingerprint: &str,
+    current_fingerprint: &str,
+    resulting_watchtower_binding: Option<&str>,
     result: &str,
 ) -> Result<i64> {
     conn.execute(
         "INSERT INTO responsibility_resolution_audit(
            review_key,fingerprint,project_id,repository_id,workflow_name,drift_type,
            action,before_repository_binding,before_watchtower_binding,
-           after_repository_binding,after_watchtower_binding,result,actor,created_at
-         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+           after_repository_binding,after_watchtower_binding,
+           requested_fingerprint,current_fingerprint,expected_repository_binding,
+           resulting_watchtower_binding,result,actor,created_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         params![
             drift.review_key,
-            drift.fingerprint,
+            current_fingerprint,
             drift.project_id,
             drift.repository_id,
             drift.workflow_name,
@@ -4169,14 +4211,64 @@ fn insert_resolution_audit(
             action,
             drift.repository_binding,
             drift.watchtower_binding,
-            after.map(|item| item.repository_binding.clone()),
-            after.and_then(|item| item.watchtower_binding.clone()),
+            drift.repository_binding,
+            resulting_watchtower_binding,
+            requested_fingerprint,
+            current_fingerprint,
+            drift.repository_binding,
+            resulting_watchtower_binding,
             result,
             "local-user",
             Utc::now().to_rfc3339(),
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+fn responsibility_resolution_history(
+    conn: &Connection,
+    limit: i64,
+) -> Result<Vec<ResponsibilityResolutionAuditEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT rra.id,rra.project_id,p.name,rra.repository_id,mr.repo,
+                rra.workflow_name,rra.review_key,rra.drift_type,rra.action,rra.result,
+                rra.actor,rra.created_at,
+                COALESCE(rra.requested_fingerprint,rra.fingerprint),
+                COALESCE(rra.current_fingerprint,rra.fingerprint),
+                COALESCE(rra.expected_repository_binding,rra.before_repository_binding),
+                rra.before_watchtower_binding,
+                COALESCE(rra.resulting_watchtower_binding,rra.after_watchtower_binding)
+         FROM responsibility_resolution_audit rra
+         JOIN projects p ON p.id=rra.project_id
+         JOIN monitored_repositories mr ON mr.id=rra.repository_id
+         ORDER BY rra.id DESC
+         LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![limit.clamp(1, 500)], |row| {
+        let requested_fingerprint: String = row.get(12)?;
+        let current_fingerprint: String = row.get(13)?;
+        Ok(ResponsibilityResolutionAuditEntry {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            project_name: row.get(2)?,
+            repository_id: row.get(3)?,
+            repository: row.get(4)?,
+            workflow_name: row.get(5)?,
+            review_key: row.get(6)?,
+            drift_type: row.get(7)?,
+            action: row.get(8)?,
+            result: row.get(9)?,
+            actor: row.get(10)?,
+            created_at: row.get(11)?,
+            stale: requested_fingerprint != current_fingerprint,
+            requested_fingerprint,
+            current_fingerprint,
+            repository_contract: row.get(14)?,
+            before_watchtower_contract: row.get(15)?,
+            after_watchtower_contract: row.get(16)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn add_project_rule_for_resolution(conn: &Connection, drift: &ResponsibilityMapDrift) -> Result<()> {
