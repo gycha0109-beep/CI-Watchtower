@@ -1348,7 +1348,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.15")
+        .user_agent("ci-watchtower/0.3.16")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -1846,6 +1846,7 @@ fn unassigned_runs_for_repository(
          WHERE wr.repository_id=?
            AND ra.run_id IS NULL
            AND wr.ignored=0
+           AND COALESCE(wr.workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
            AND wr.resolution_status IN ('unassigned','conflict')
          ORDER BY CASE WHEN wr.status='completed' THEN 1 ELSE 0 END, wr.created_at DESC
          LIMIT ?",
@@ -1862,6 +1863,7 @@ fn repository_scope_stats(conn: &Connection) -> Result<Vec<RepositoryScopeStats>
                 SUM(CASE
                       WHEN wr.run_id IS NOT NULL
                        AND wr.ignored=0
+                       AND COALESCE(wr.workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
                        AND wr.resolution_status IN ('unassigned','conflict')
                        AND ra.run_id IS NULL
                       THEN 1 ELSE 0
@@ -1905,6 +1907,7 @@ fn producer_contract_stats(
            JOIN monitored_repositories mr ON mr.id=wr.repository_id
            LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
            WHERE wr.ignored=0
+             AND COALESCE(wr.workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
          )
          SELECT repository_id,project_id,
                 COUNT(*) AS sampled_runs,
@@ -2001,6 +2004,7 @@ fn producer_contract_runs(
            JOIN monitored_repositories mr ON mr.id=wr.repository_id
            LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
            WHERE wr.ignored=0
+             AND COALESCE(wr.workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
          )
          SELECT run_id,project_id,repository_id,repo,workflow_name,display_title,event,
                 head_branch,head_sha,run_attempt,status,conclusion,html_url,resolution_status,
@@ -2149,6 +2153,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
          LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
          WHERE ra.run_id IS NULL
            AND wr.ignored=0
+           AND COALESCE(wr.workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
            AND wr.resolution_status IN ('unassigned','conflict')",
         [],
         |row| row.get(0),
@@ -2751,6 +2756,7 @@ fn load_stored_unresolved_runs(
          FROM workflow_runs
          WHERE repository_id=?
            AND ignored=0
+           AND COALESCE(workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
            AND resolution_status IN ('unassigned','conflict')
            AND NOT EXISTS(
              SELECT 1 FROM run_assignments ra
