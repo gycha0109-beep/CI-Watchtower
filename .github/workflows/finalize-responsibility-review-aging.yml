@@ -70,10 +70,6 @@ jobs:
 
           tests_path = Path("src-tauri/src/tests.rs")
           tests = tests_path.read_text()
-          test_count = tests.count(old)
-          if test_count != 2:
-              raise SystemExit(f"expected 2 test drift initializers, got {test_count}")
-          tests = tests.replace(old, new)
           test_name = "responsibility_review_priority_and_age_bucket_follow_operational_order"
           if test_name not in tests:
               tests += """
