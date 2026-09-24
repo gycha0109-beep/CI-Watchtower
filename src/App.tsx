@@ -60,6 +60,16 @@ function producerBucketLabel(bucket: string) {
   }
 }
 
+function responsibilityDriftLabel(type: string) {
+  switch (type) {
+    case 'missing_in_watchtower': return 'MISSING';
+    case 'stale_in_watchtower': return 'STALE';
+    case 'responsibility_kind_mismatch': return 'KIND';
+    case 'track_binding_mismatch': return 'TRACK';
+    default: return type.toUpperCase();
+  }
+}
+
 function repositoryState(repo: MonitoredRepository) {
   if (!repo.enabled) return 'OFF';
   if (repo.lastError) return 'ERROR';
@@ -270,6 +280,13 @@ function App() {
   const responsibilityReviewRuns = useMemo(
     () => currentProducerRuns.filter(item => item.contractCompliant && !item.responsibilityDeclared),
     [currentProducerRuns],
+  );
+  const responsibilityMapDriftsInScope = useMemo(
+    () => (dashboard?.responsibilityMapDrifts ?? []).filter(item =>
+      (selectedProject === 'all' || item.projectId === selectedProject) &&
+      (selectedRepository === 'all' || item.repositoryId === selectedRepository)
+    ),
+    [dashboard, selectedProject, selectedRepository],
   );
   const contractCompliantRuns = currentProducerRuns.filter(item => item.contractCompliant).length;
   const contractDriftRuns = currentProducerDriftRuns.length;
@@ -589,6 +606,37 @@ function App() {
                   <span className="producer-drift-source">{item.run.attributionSource ?? item.run.resolutionStatus}</span>
                   <span className="mono producer-drift-branch">{item.run.headBranch ?? '—'}</span>
                 </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="producer-drift responsibility-map-drift">
+          <div className="producer-drift-head">
+            <div><b>Responsibility Map Drift</b><span>detect-only {responsibilityMapDriftsInScope.length}건</span></div>
+            <small>Repository-owned responsibility map과 WatchTower 선언만 비교합니다. Track/규칙/Run 귀속은 자동 변경하지 않습니다.</small>
+          </div>
+          {responsibilityMapDriftsInScope.length === 0 ? (
+            <div className="producer-drift-empty">현재 repository responsibility map과 WatchTower 책임 선언이 일치합니다.</div>
+          ) : (
+            <div className="producer-drift-list">
+              {responsibilityMapDriftsInScope.map(item => (
+                <div
+                  className="producer-drift-row responsibility-map-row"
+                  key={item.repositoryId + ':' + item.workflowPath + ':' + item.driftType}
+                >
+                  <span className="producer-bucket">{responsibilityDriftLabel(item.driftType)}</span>
+                  <span className="producer-drift-main">
+                    <b>{item.workflowName}</b>
+                    <small>{item.workflowPath}</small>
+                  </span>
+                  <span className="producer-drift-repo">{item.repository}</span>
+                  <span className="producer-drift-source">{item.repositoryBinding} → {item.watchtowerBinding ?? 'missing'}</span>
+                  <span className="mono producer-drift-branch">
+                    {item.expectedTrackKey || item.actualTrackKey
+                      ? (item.expectedTrackKey ?? '—') + ' / ' + (item.actualTrackKey ?? '—')
+                      : '—'}
+                  </span>
+                </div>
               ))}
             </div>
           )}

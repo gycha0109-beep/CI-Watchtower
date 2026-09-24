@@ -77,6 +77,9 @@ h2 { font-size: 16px; margin: 0 0 15px; }
 .producer-drift-main b { color: #dce5f6; font-size: 11px; }
 .producer-drift-main small, .producer-drift-repo, .producer-drift-source, .producer-drift-branch { color: #71809c; font-size: 10px; }
 .producer-drift-empty { border: 1px dashed #284638; border-radius: 8px; background: rgba(75,193,139,.04); color: #78b895; padding: 12px; font-size: 11px; text-align: center; }
+.responsibility-map-row { cursor: default; }
+.responsibility-map-row:hover { background: #0b1020; border-color: #252f47; }
+.responsibility-map-drift .producer-bucket { border-color: #3c4863; background: rgba(126,145,184,.08); color: #a9b8d7; }
 
 .layout-grid { display: grid; grid-template-columns: 350px minmax(0,1fr); gap: 18px; align-items: start; }
 .panel { background: rgba(14,19,33,.93); border: 1px solid #202a42; border-radius: 16px; box-shadow: 0 18px 50px rgba(0,0,0,.22); }

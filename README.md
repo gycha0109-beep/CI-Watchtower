@@ -34,9 +34,14 @@ Repository: gycha0109-beep/K_beauty
 
 Project-wide CI
 ├─ BEJEWELY Current Main Health
-├─ PIE Prospective Shadow
+└─ PIE Prospective Shadow
+
+Dynamic shared producer
 ├─ BEJEWELY Security Boundary
-└─ BEJEWELY Supply Chain Security
+├─ BEJEWELY Supply Chain Security
+├─ BEJEWELY AI Provider Runtime
+└─ BEJEWELY Database Integration Authority
+   (+ Admin / Product Offer / Product Data Pipeline / Recommendation Admission)
 
 Tracks
 ├─ CI Watchtower / CI 운영 정리        → ops
@@ -51,7 +56,7 @@ Tracks
 
 K_beauty가 기존 Project 아래에 등록되어 있던 경우 Repository를 `비주얼리`로 이동하고, 다른 Project Track에 남아 있는 잘못된 Run 귀속을 정리합니다. 등록된 Project-wide Workflow의 기존 자동 귀속 Run도 공용 CI로 즉시 재분류하며, 수동 귀속은 보존합니다.
 
-`BEJEWELY Security Boundary`와 `BEJEWELY Supply Chain Security`는 특정 Track의 전용 검증기가 아니라 여러 개발축에서 공통으로 실행되는 shared security gate이므로 Project-wide로 유지합니다. PR/branch가 특정 Track에서 이 gate를 촉발하더라도 workflow 책임 자체를 해당 Track으로 바꾸지 않습니다.
+`BEJEWELY Security Boundary`와 `BEJEWELY Supply Chain Security`는 특정 Track의 전용 검증기가 아니라 여러 개발축에서 공통으로 실행되는 shared producer이므로 repository-scoped Dynamic으로 유지합니다. Dynamic 선언은 Workflow의 공유 책임만 나타내며 개별 Run의 Track을 강제하지 않습니다.
 
 ## Project-wide CI
 
@@ -139,6 +144,17 @@ run-name: "[WT:${{ inputs.watchtower_track }}] ${{ github.workflow }}"
 - MyeongHa `Production Records Current-Subject Smoke`도 repository-scoped Dynamic Workflow입니다. 운영용 Production smoke로 시작했지만 Records/frontend-integration 변경에도 같은 producer가 실행되므로 특정 Track에 고정하지 않습니다. 비표준 `Watchtower-Track: UI` 같은 신호는 alias로 숨기지 않고 계속 fail-closed drift로 남깁니다.
 - Dynamic Workflow 규칙은 앱의 **Dynamic Workflow 규칙** 관리 영역에서 프로젝트/저장소 범위로 추가·삭제할 수 있습니다. repository responsibility map에서 동기화한 기본 Dynamic 계약은 `protected` 규칙으로 표시되어 실수로 삭제되지 않습니다.
 - Visualy는 K_beauty의 `docs/ci/workflow-responsibility-map.json` producer class를 기준으로 동기화합니다. `current-main-health`와 `pie-prospective`만 Project-wide이며, Admin / Product Offer / Product Data Pipeline / Security Boundary / Recommendation Admission / Supply Chain Security / AI Provider Runtime / Database Integration은 canonical Track을 새로 만들지 않고 repository-scoped Dynamic Workflow로 유지합니다.
+
+### Responsibility Map Drift (v0.3.18)
+
+Repository에 `docs/ci/workflow-responsibility-map.json`이 있으면 polling 시 해당 producer contract를 읽어 WatchTower의 책임 선언과 **detect-only**로 비교합니다.
+
+- repository map에는 있는데 WatchTower에 없으면 `MissingInWatchTower`
+- Project-wide / Dynamic 종류가 다르면 `ResponsibilityKindMismatch`
+- `static:<track>` binding과 producer의 `[WT:<track>]` 선언이 다르면 `TrackBindingMismatch`
+- repository map에서 빠졌지만 WatchTower 규칙과 실제 Run 기록이 남아 있으면 `StaleInWatchTower`
+- drift 감지는 Track, Project-wide/Dynamic 규칙, Run assignment를 자동 생성·수정·삭제하지 않습니다.
+- map 조회가 일시 실패하면 기존 CI polling/resolution을 실패시키지 않고 마지막으로 성공한 snapshot을 유지합니다.
 
 ## Producer Contract Health
 

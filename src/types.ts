@@ -211,6 +211,19 @@ export interface ProducerContractRun {
   isCurrentProducerRun: boolean;
 }
 
+export interface ResponsibilityMapDrift {
+  projectId: number;
+  repositoryId: number;
+  repository: string;
+  workflowPath: string;
+  workflowName: string;
+  driftType: 'missing_in_watchtower' | 'stale_in_watchtower' | 'responsibility_kind_mismatch' | 'track_binding_mismatch' | string;
+  repositoryBinding: string;
+  watchtowerBinding: string | null;
+  expectedTrackKey: string | null;
+  actualTrackKey: string | null;
+}
+
 export interface Dashboard {
   runningCount: number;
   queuedCount: number;
@@ -226,6 +239,7 @@ export interface Dashboard {
   repositoryScopeStats: RepositoryScopeStats[];
   producerContractStats: ProducerContractStats[];
   producerContractRuns: ProducerContractRun[];
+  responsibilityMapDrifts: ResponsibilityMapDrift[];
   projectRuns: WorkflowRunSummary[];
   unassignedRuns: WorkflowRunSummary[];
 }
