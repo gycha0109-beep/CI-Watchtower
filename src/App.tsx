@@ -265,6 +265,10 @@ function App() {
     () => producerContractRunsInScope.filter(item => !item.contractCompliant && !item.isCurrentProducerRun),
     [producerContractRunsInScope],
   );
+  const responsibilityReviewRuns = useMemo(
+    () => currentProducerRuns.filter(item => item.contractCompliant && !item.responsibilityDeclared),
+    [currentProducerRuns],
+  );
   const contractCompliantRuns = currentProducerRuns.filter(item => item.contractCompliant).length;
   const contractDriftRuns = currentProducerDriftRuns.length;
   const currentUnresolvedDriftRuns = currentProducerDriftRuns.filter(
@@ -504,7 +508,7 @@ function App() {
             <h2>최근 Run 귀속 계약</h2>
             <p className="muted-copy">Repository별 최근 최대 50개 Run을 보존하되, 동일 GitHub Workflow의 최신 Run만 현재 producer 상태로 판정합니다.</p>
           </div>
-          <div className={`contract-coverage ${contractDriftRuns === 0 ? 'healthy' : currentUnresolvedDriftRuns > 0 ? 'risk' : 'drift'}`}>
+          <div className={`contract-coverage ${contractDriftRuns > 0 ? (currentUnresolvedDriftRuns > 0 ? 'risk' : 'drift') : responsibilityReviewRuns.length > 0 ? 'drift' : 'healthy'}`}>
             <strong>{contractCoverage}%</strong>
             <span>{contractCompliantRuns}/{currentProducerRuns.length}</span>
           </div>
@@ -526,6 +530,34 @@ function App() {
           ) : (
             <div className="producer-drift-list">
               {currentProducerDriftRuns.map(item => (
+                <button
+                  className={`producer-drift-row ${auditRun?.id === item.run.id ? 'selected' : ''}`}
+                  key={item.run.id}
+                  onClick={() => void inspectAttribution(item.run)}
+                >
+                  <span className={`producer-bucket ${item.bucket}`}>{producerBucketLabel(item.bucket)}</span>
+                  <span className="producer-drift-main">
+                    <b>{item.run.workflowName}</b>
+                    <small>{item.run.displayTitle}</small>
+                  </span>
+                  <span className="producer-drift-repo">{item.run.repository}</span>
+                  <span className="producer-drift-source">{item.run.attributionSource ?? item.run.resolutionStatus}</span>
+                  <span className="mono producer-drift-branch">{item.run.headBranch ?? '—'}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="producer-drift responsibility-review">
+          <div className="producer-drift-head">
+            <div><b>Responsibility Review</b><span>현재 producer {responsibilityReviewRuns.length}건</span></div>
+            <small>Run은 명시 귀속됐지만 Workflow 책임이 Track-owned / Project-wide / Dynamic으로 선언되지 않은 경우입니다.</small>
+          </div>
+          {responsibilityReviewRuns.length === 0 ? (
+            <div className="producer-drift-empty">현재 producer의 Workflow 책임 계약이 모두 선언되어 있습니다.</div>
+          ) : (
+            <div className="producer-drift-list">
+              {responsibilityReviewRuns.map(item => (
                 <button
                   className={`producer-drift-row ${auditRun?.id === item.run.id ? 'selected' : ''}`}
                   key={item.run.id}
