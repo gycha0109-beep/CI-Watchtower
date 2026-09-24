@@ -92,8 +92,27 @@ h2 { font-size: 16px; margin: 0 0 15px; }
 .responsibility-review-reason { display: grid; gap: 4px; border-left: 2px solid #4d4229; padding-left: 10px; }
 .responsibility-review-reason p { margin: 0; color: #aeb9d0; font-size: 11px; line-height: 1.5; }
 .responsibility-review-foot { display: flex; justify-content: space-between; gap: 12px; align-items: center; border-top: 1px solid #1a2438; padding-top: 8px; }
-.responsibility-review-foot span { color: #d7bd73; font-size: 10px; font-weight: 800; }
+.responsibility-review-foot > span:first-child { color: #d7bd73; font-size: 10px; font-weight: 800; }
 .responsibility-review-foot small { color: #667593; font-size: 9px; }
+.responsibility-review-head-actions { display: grid; gap: 5px; justify-items: end; }
+.responsibility-review-state { width: fit-content; border: 1px solid #33415d; border-radius: 999px; color: #8fa2c6; padding: 3px 6px; font-size: 8px; font-weight: 900; letter-spacing: .07em; }
+.responsibility-review-state.deferred { border-color: #4d4229; color: #e4c66d; }
+.responsibility-review-state.blocked { border-color: #5b2b38; color: #ff8796; }
+.responsibility-review-buttons { display: flex; gap: 6px; align-items: center; }
+.responsibility-resolution-preview { display: grid; gap: 10px; border: 1px solid #36517f; border-radius: 10px; background: #080e1b; padding: 12px; }
+.responsibility-resolution-preview-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.responsibility-resolution-preview-head > div { display: grid; gap: 4px; }
+.responsibility-resolution-preview-head span, .responsibility-resolution-list > span { color: #6f83aa; font-size: 9px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+.responsibility-resolution-preview-head b { color: #dce6f8; font-size: 12px; }
+.responsibility-resolution-summary { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.responsibility-resolution-summary > div { display: grid; gap: 4px; border: 1px solid #1f2c45; border-radius: 8px; background: #0a1020; padding: 9px 10px; }
+.responsibility-resolution-summary span { color: #667593; font-size: 9px; font-weight: 800; }
+.responsibility-resolution-summary b { color: #d7e2f5; font-size: 11px; }
+.responsibility-resolution-blocked { border: 1px solid #5b2b38; border-radius: 8px; background: rgba(255,83,105,.06); color: #ff9dac; padding: 9px 10px; font-size: 10px; line-height: 1.5; }
+.responsibility-resolution-list { display: grid; gap: 5px; }
+.responsibility-resolution-list code, .responsibility-resolution-list small { border: 1px solid #1d2941; border-radius: 7px; background: #0a1020; color: #9eacc5; padding: 7px 8px; font-size: 9px; line-height: 1.4; }
+.responsibility-resolution-confirm { display: flex; justify-content: space-between; gap: 14px; align-items: center; border-top: 1px solid #1d2941; padding-top: 9px; }
+.responsibility-resolution-confirm small { max-width: 620px; color: #7887a4; font-size: 9px; line-height: 1.45; }
 .responsibility-source-list { display: grid; gap: 6px; margin-bottom: 8px; }
 .responsibility-source-row { display: grid; grid-template-columns: 74px minmax(220px,1.2fr) minmax(110px,.45fr) minmax(180px,.7fr); gap: 10px; align-items: center; border: 1px solid #202a42; border-radius: 8px; background: #090e1b; padding: 8px 9px; }
 .responsibility-source-state { width: fit-content; border: 1px solid #30456f; border-radius: 999px; color: #9db4ff; padding: 3px 6px; font-size: 9px; font-weight: 900; letter-spacing: .04em; }
