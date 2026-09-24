@@ -17,7 +17,7 @@ import type {
 type TrackFormState = Omit<TrackInput, 'longCiMinutes'> & { longCiMinutes: number | '' };
 type ViewFilter = 'all' | 'project' | 'unassigned' | number;
 type ScopeFilter = 'all' | number;
-type ResolutionHistoryFilter = 'all' | 'resolved' | 'deferred' | 'blocked' | 'stale_rejected' | 'failed';
+type ResolutionHistoryFilter = 'all' | 'resolved' | 'deferred' | 'blocked' | 'stale_rejected' | 'still_open' | 'failed';
 
 const emptyTrack = (projectId = 0): TrackFormState => ({
   projectId,
@@ -97,6 +97,7 @@ function resolutionActionLabel(action: string) {
     case 'reclassify_to_dynamic': return 'Project-wide → Dynamic 재분류';
     case 'remove_stale_rule': return 'Stale responsibility 규칙 제거';
     case 'defer': return '검토 보류';
+    case 'reopen': return '재검토 재개';
     case 'blocked': return 'WatchTower 내부 변경 차단';
     default: return 'WatchTower 내부 해결 불가';
   }
@@ -390,8 +391,15 @@ function App() {
     deferred: resolutionHistoryInScope.filter(item => item.result === 'deferred').length,
     blocked: resolutionHistoryInScope.filter(item => item.result === 'blocked').length,
     stale_rejected: resolutionHistoryInScope.filter(item => item.result === 'stale_rejected').length,
+    still_open: resolutionHistoryInScope.filter(item => item.result === 'still_open').length,
     failed: resolutionHistoryInScope.filter(item => item.result === 'failed').length,
   }), [resolutionHistoryInScope]);
+  const responsibilityReviewStatusCounts = useMemo(() => ({
+    open: responsibilityMapDriftsInScope.filter(item => item.reviewStatus === 'open').length,
+    deferred: responsibilityMapDriftsInScope.filter(item => item.reviewStatus === 'deferred').length,
+    attention: responsibilityMapDriftsInScope.filter(item => item.reviewStatus === 'attention').length,
+    blocked: responsibilityMapDriftsInScope.filter(item => item.reviewStatus === 'blocked').length,
+  }), [responsibilityMapDriftsInScope]);
   const responsibilityMapSourceWarnings = responsibilityMapSourcesInScope.filter(item =>
     item.status === 'error' || (item.status === 'not_found' && item.contractCount > 0)
   );
@@ -472,6 +480,30 @@ function App() {
       setNotice(result.status === 'deferred'
         ? 'Responsibility 검토를 보류했습니다. Drift는 숨기지 않고 Deferred 상태로 유지합니다.'
         : 'Responsibility 상태가 변경되어 보류 요청을 적용하지 않았습니다.');
+      await refresh(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setResolutionLoadingKey(null);
+    }
+  };
+
+  const reopenResolution = async (item: ResponsibilityMapDrift) => {
+    try {
+      setError(null);
+      setNotice(null);
+      setResolutionLoadingKey(item.reviewKey);
+      const result = await api.reopenResponsibilityDrift({
+        reviewKey: item.reviewKey,
+        fingerprint: item.fingerprint,
+      });
+      if (result.status === 'open') {
+        setResolutionPreview(await api.getResponsibilityResolutionPreview({ reviewKey: item.reviewKey }));
+        setNotice('보류되었거나 이전 시도가 끝나지 않은 Responsibility 항목을 다시 검토 상태로 열었습니다.');
+      } else {
+        setResolutionPreview(null);
+        setNotice('Responsibility 상태가 변경되어 기존 검토 상태를 재개하지 않았습니다.');
+      }
       await refresh(false);
     } catch (e) {
       setError(String(e));
@@ -788,7 +820,14 @@ function App() {
           <div className="producer-drift-head">
             <div>
               <b>Responsibility Map Drift</b>
-              <span>detect-only {responsibilityMapDriftsInScope.length}건 · source synced {responsibilityMapSynced.length}</span>
+              <span>
+                detect-only {responsibilityMapDriftsInScope.length}건
+                {' · '}open {responsibilityReviewStatusCounts.open}
+                {' · '}deferred {responsibilityReviewStatusCounts.deferred}
+                {' · '}attention {responsibilityReviewStatusCounts.attention}
+                {' · '}blocked {responsibilityReviewStatusCounts.blocked}
+                {' · '}source synced {responsibilityMapSynced.length}
+              </span>
             </div>
             <small>Repository-owned responsibility map과 WatchTower 선언만 비교합니다. Track/규칙/Run 귀속은 자동 변경하지 않습니다.</small>
           </div>
@@ -890,7 +929,7 @@ function App() {
                   <div className="responsibility-review-foot">
                     <span>{responsibilityActionLabel(item.recommendedAction)}</span>
                     <span className="responsibility-review-buttons">
-                      {item.reviewStatus !== 'blocked' && (
+                      {item.reviewStatus === 'open' && (
                         <button
                           type="button"
                           className="ghost tiny"
@@ -900,14 +939,35 @@ function App() {
                           보류
                         </button>
                       )}
-                      <button
-                        type="button"
-                        className="primary tiny"
-                        disabled={resolutionLoadingKey === item.reviewKey}
-                        onClick={() => void openResolutionPreview(item)}
-                      >
-                        {resolutionLoadingKey === item.reviewKey ? '확인 중…' : '변경 내용 검토'}
-                      </button>
+                      {item.reviewStatus === 'attention' && (
+                        <button
+                          type="button"
+                          className="ghost tiny"
+                          disabled={resolutionLoadingKey === item.reviewKey}
+                          onClick={() => void deferResolution(item)}
+                        >
+                          보류
+                        </button>
+                      )}
+                      {item.reviewStatus === 'deferred' || item.reviewStatus === 'attention' ? (
+                        <button
+                          type="button"
+                          className="primary tiny"
+                          disabled={resolutionLoadingKey === item.reviewKey}
+                          onClick={() => void reopenResolution(item)}
+                        >
+                          {resolutionLoadingKey === item.reviewKey ? '재확인 중…' : '재검토'}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="primary tiny"
+                          disabled={resolutionLoadingKey === item.reviewKey}
+                          onClick={() => void openResolutionPreview(item)}
+                        >
+                          {resolutionLoadingKey === item.reviewKey ? '확인 중…' : '변경 내용 검토'}
+                        </button>
+                      )}
                     </span>
                   </div>
                   {resolutionPreview?.reviewKey === item.reviewKey && (
@@ -967,6 +1027,7 @@ function App() {
                   {' · '}Deferred {resolutionHistoryCounts.deferred}
                   {' · '}Blocked {resolutionHistoryCounts.blocked}
                   {' · '}Stale {resolutionHistoryCounts.stale_rejected}
+                  {' · '}Open {resolutionHistoryCounts.still_open}
                   {' · '}Failed {resolutionHistoryCounts.failed}
                 </span>
               </div>
@@ -990,6 +1051,7 @@ function App() {
                 ['deferred', 'Deferred'],
                 ['blocked', 'Blocked'],
                 ['stale_rejected', 'Stale'],
+                ['still_open', 'Open'],
                 ['failed', 'Failed'],
               ] as Array<[ResolutionHistoryFilter, string]>).map(([value, label]) => (
                 <button
