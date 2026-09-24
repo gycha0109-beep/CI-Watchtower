@@ -80,6 +80,20 @@ h2 { font-size: 16px; margin: 0 0 15px; }
 .responsibility-map-row { cursor: default; }
 .responsibility-map-row:hover { background: #0b1020; border-color: #252f47; }
 .responsibility-map-drift .producer-bucket { border-color: #3c4863; background: rgba(126,145,184,.08); color: #a9b8d7; }
+.responsibility-review-inbox { display: grid; gap: 9px; }
+.responsibility-review-card { display: grid; gap: 10px; border: 1px solid #29354f; border-radius: 10px; background: #0a0f1d; padding: 12px; }
+.responsibility-review-card-head { display: grid; grid-template-columns: 76px minmax(220px,1fr) minmax(170px,.55fr); gap: 10px; align-items: center; }
+.responsibility-review-action { justify-self: end; border: 1px solid #4d4229; border-radius: 999px; background: rgba(226,179,55,.07); color: #e4c66d; padding: 4px 7px; font-size: 9px; font-weight: 900; white-space: nowrap; }
+.responsibility-review-contract-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.responsibility-review-contract-grid > div { min-width: 0; display: grid; gap: 4px; border: 1px solid #1d2941; border-radius: 8px; background: #080d19; padding: 9px 10px; }
+.responsibility-review-contract-grid span, .responsibility-review-reason span { color: #667593; font-size: 9px; font-weight: 900; letter-spacing: .07em; text-transform: uppercase; }
+.responsibility-review-contract-grid b { color: #d7e2f5; font-size: 11px; }
+.responsibility-review-contract-grid small { color: #71809c; font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.responsibility-review-reason { display: grid; gap: 4px; border-left: 2px solid #4d4229; padding-left: 10px; }
+.responsibility-review-reason p { margin: 0; color: #aeb9d0; font-size: 11px; line-height: 1.5; }
+.responsibility-review-foot { display: flex; justify-content: space-between; gap: 12px; align-items: center; border-top: 1px solid #1a2438; padding-top: 8px; }
+.responsibility-review-foot span { color: #d7bd73; font-size: 10px; font-weight: 800; }
+.responsibility-review-foot small { color: #667593; font-size: 9px; }
 .responsibility-source-list { display: grid; gap: 6px; margin-bottom: 8px; }
 .responsibility-source-row { display: grid; grid-template-columns: 74px minmax(220px,1.2fr) minmax(110px,.45fr) minmax(180px,.7fr); gap: 10px; align-items: center; border: 1px solid #202a42; border-radius: 8px; background: #090e1b; padding: 8px 9px; }
 .responsibility-source-state { width: fit-content; border: 1px solid #30456f; border-radius: 999px; color: #9db4ff; padding: 3px 6px; font-size: 9px; font-weight: 900; letter-spacing: .04em; }
@@ -164,6 +178,9 @@ input:focus { border-color: #4a73ee; box-shadow: 0 0 0 3px rgba(74,115,238,.12);
   .metrics-row.producer-contract-metrics { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .producer-drift-row { grid-template-columns: 82px minmax(200px,1fr) minmax(140px,.65fr) 95px; }
   .producer-drift-branch { display: none; }
+  .responsibility-review-card-head { grid-template-columns: 72px minmax(200px,1fr); }
+  .responsibility-review-action { grid-column: 2; justify-self: start; }
+  .responsibility-review-contract-grid { grid-template-columns: 1fr; }
   .layout-grid { grid-template-columns: 320px minmax(0,1fr); }
   .run-row.v2 { grid-template-columns: 10px minmax(220px,1fr) 130px 70px; }
   .run-row.v2 .attribution { display: none; }

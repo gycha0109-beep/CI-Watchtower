@@ -166,6 +166,16 @@ Drift 0건이 곧 source 정상이라는 잘못된 결론으로 이어지지 않
 - `pending`: v0.3.19 이후 아직 source poll을 수행하지 않은 상태입니다.
 - source 실패는 Actions run polling이나 attribution을 중단시키지 않지만, UI는 stale/unavailable source가 있을 때 drift 0건을 clean으로 표시하지 않습니다.
 
+### Responsibility Review Inbox (v0.3.21)
+
+Responsibility Map Drift가 발생하면 단순 상태 행 대신 검토 가능한 Inbox 카드로 표시합니다.
+
+- **Repository contract**: responsibility map binding, source path, workflow path를 함께 표시합니다.
+- **WatchTower declaration**: 현재 Project-wide / Dynamic / static Track 관측 상태를 표시합니다.
+- **충돌 이유**: 왜 Missing / Stale / Kind / Track mismatch로 판정됐는지 backend가 판정 근거를 내려줍니다.
+- **권장 조치 유형**: Project-wide/Dynamic 선언 검토, 재분류 검토, stale 규칙 유지/제거 검토, Track/Map 계약 검토, producer run-name 수정 검토 등을 구분합니다.
+- 권장 조치는 **review hint**일 뿐입니다. Inbox는 Track 생성, 규칙 추가/삭제/재분류, producer YAML 수정, Run assignment 변경을 자동 수행하지 않습니다.
+
 ## Producer Contract Health
 
 Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.

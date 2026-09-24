@@ -222,6 +222,9 @@ export interface ResponsibilityMapDrift {
   watchtowerBinding: string | null;
   expectedTrackKey: string | null;
   actualTrackKey: string | null;
+  sourcePath: string;
+  reason: string;
+  recommendedAction: string;
 }
 
 export interface ResponsibilityMapSourceStatus {
