@@ -986,6 +986,7 @@ fn migrate_project_scope(conn: &Connection) -> Result<()> {
                 "DB Runtime Authority Suite",
                 "DB PostgreSQL 17 Authority Suite",
                 "Supabase Production",
+                "Web Browser Smoke",
             ] {
                 conn.execute(
                     "INSERT OR IGNORE INTO project_workflow_rules(
@@ -1221,7 +1222,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.6")
+        .user_agent("ci-watchtower/0.3.7")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -4558,6 +4559,57 @@ mod tests {
             )
             .unwrap();
         }
+
+        for (run_id, repository_id) in [
+            (9_100_004_i64, myeongha_repository_id),
+            (9_100_005_i64, saju_repository_id),
+        ] {
+            conn.execute(
+                "INSERT INTO workflow_runs(
+                   run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
+                   head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
+                   created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored,last_resolution_attempt_at
+                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![
+                    run_id,
+                    repository_id,
+                    911_i64,
+                    "Web Browser Smoke",
+                    ".github/workflows/web-browser-render-smoke.yml",
+                    "web browser smoke",
+                    "push",
+                    "main",
+                    format!("sha-{run_id}"),
+                    run_id,
+                    1_i64,
+                    "completed",
+                    "success",
+                    format!("https://example/{run_id}"),
+                    "2026-09-24T01:00:00Z",
+                    Option::<String>::None,
+                    "2026-09-24T01:01:00Z",
+                    "2026-09-24T01:01:00Z",
+                    "assigned",
+                    0_i64,
+                    Option::<String>::None,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO run_assignments(
+                   run_id,track_id,confidence,source,reason,manual,assigned_at
+                 ) VALUES(?,?,?,?,?,0,?)",
+                params![
+                    run_id,
+                    ops_track_id,
+                    90_i64,
+                    "branch",
+                    "fixture",
+                    "2026-09-24T01:02:00Z",
+                ],
+            )
+            .unwrap();
+        }
         drop(conn);
 
         migrate_project_scope(&Connection::open(&path).unwrap()).unwrap();
@@ -4571,14 +4623,15 @@ mod tests {
                      'DB Content Reading Suite',
                      'DB Runtime Authority Suite',
                      'DB PostgreSQL 17 Authority Suite',
-                     'Supabase Production'
+                     'Supabase Production',
+                     'Web Browser Smoke'
                    )
                    AND active=1",
                 params![project_id, myeongha_repository_id],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(scoped_rules, 4);
+        assert_eq!(scoped_rules, 5);
 
         let automatic_status: String = conn
             .query_row(
@@ -4621,6 +4674,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(saju_row, ("assigned".into(), 1));
+
+        let web_browser_status: String = conn
+            .query_row(
+                "SELECT resolution_status FROM workflow_runs WHERE run_id=9100004",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let web_browser_assignment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9100004",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(web_browser_status, "project");
+        assert_eq!(web_browser_assignment_count, 0);
+
+        let saju_web_browser_row: (String, i64) = conn
+            .query_row(
+                "SELECT wr.resolution_status,COUNT(ra.run_id)
+                 FROM workflow_runs wr
+                 LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
+                 WHERE wr.run_id=9100005
+                 GROUP BY wr.run_id,wr.resolution_status",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(saju_web_browser_row, ("assigned".into(), 1));
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
