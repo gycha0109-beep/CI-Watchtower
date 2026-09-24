@@ -140,17 +140,23 @@ jobs:
           if lib.count(old_init) != 1:
               raise SystemExit(f"production drift initializer: expected 1, got {lib.count(old_init)}")
           lib = lib.replace(old_init, new_init)
-          lib = replace_once(lib, """    drifts.sort_by(|a, b| {
-              responsibility_review_priority_rank(&a.review_priority)
-                  .cmp(&responsibility_review_priority_rank(&b.review_priority))
-                  .then_with(|| b.review_age_hours.cmp(&a.review_age_hours))""", """    drifts.sort_by(|a, b| {
-              responsibility_escalation_rank(&a.escalation_level)
-                  .cmp(&responsibility_escalation_rank(&b.escalation_level))
-                  .then_with(|| {
-                      responsibility_review_priority_rank(&a.review_priority)
-                          .cmp(&responsibility_review_priority_rank(&b.review_priority))
-                  })
-                  .then_with(|| b.review_age_hours.cmp(&a.review_age_hours))""", "drift sort")
+          sort_anchor = "        responsibility_review_priority_rank(&a.review_priority)"
+          if lib.count(sort_anchor) != 1:
+              raise SystemExit(f"drift sort anchor: expected 1, got {lib.count(sort_anchor)}")
+          lib = lib.replace(
+              sort_anchor,
+              "        responsibility_escalation_rank(&a.escalation_level)\\n"
+              "            .cmp(&responsibility_escalation_rank(&b.escalation_level))\\n"
+              "            .then_with(|| responsibility_review_priority_rank(&a.review_priority)",
+              1,
+          )
+          lib = lib.replace(
+              "            .cmp(&responsibility_review_priority_rank(&b.review_priority))\\n"
+              "            .then_with(|| b.review_age_hours.cmp(&a.review_age_hours))",
+              "                .cmp(&responsibility_review_priority_rank(&b.review_priority)))\\n"
+              "            .then_with(|| b.review_age_hours.cmp(&a.review_age_hours))",
+              1,
+          )
           lib = lib.replace('ci-watchtower/0.3.25', 'ci-watchtower/0.3.26')
           lib_path.write_text(lib)
 
