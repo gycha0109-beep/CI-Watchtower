@@ -1224,7 +1224,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.9")
+        .user_agent("ci-watchtower/0.3.10")
         .timeout(Duration::from_secs(20))
         .build()?)
 }

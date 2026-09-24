@@ -273,6 +273,12 @@ function App() {
   const contractCoverage = currentProducerRuns.length === 0
     ? 100
     : Math.round((contractCompliantRuns / currentProducerRuns.length) * 100);
+  const auditProducerContext = useMemo(
+    () => auditRun
+      ? (dashboard?.producerContractRuns ?? []).find(item => item.run.id === auditRun.id) ?? null
+      : null,
+    [auditRun, dashboard],
+  );
 
   const runningCount = repositoriesInScope.reduce((sum, repo) => sum + repo.runningCount, 0);
   const queuedCount = repositoriesInScope.reduce((sum, repo) => sum + repo.queuedCount, 0);
@@ -721,6 +727,11 @@ function App() {
                   <p className="eyebrow">ATTRIBUTION AUDIT</p>
                   <h2>{auditRun.workflowName}</h2>
                   <p className="muted-copy">{auditRun.repository} · Run #{auditRun.id} · <span className="mono">{auditRun.headSha.slice(0, 8)}</span></p>
+                  {auditProducerContext && (
+                    <span className={`audit-producer-context ${auditProducerContext.isCurrentProducerRun ? 'current' : 'historical'}`}>
+                      {auditProducerContext.isCurrentProducerRun ? 'CURRENT PRODUCER' : 'HISTORICAL EVIDENCE'} · {producerBucketLabel(auditProducerContext.bucket)}
+                    </span>
+                  )}
                 </div>
                 <div className="row-actions">
                   <button className="ghost small" onClick={() => void api.openExternal(auditRun.htmlUrl)}>Actions</button>
@@ -756,7 +767,7 @@ function App() {
                     ))}
                   </div>
                   <div className="reconciliation-history">
-                    <div className="audit-evidence-head"><b>Historical Reconciliation</b><span>{auditDetail.reconciliationHistory.length}건</span></div>
+                    <div className="audit-evidence-head"><b>Assignment Reconciliation History</b><span>{auditDetail.reconciliationHistory.length}건</span></div>
                     {auditDetail.reconciliationHistory.length === 0 ? (
                       <p className="muted-copy">과거 미귀속/충돌 Run의 최종 판정이 변경된 이력이 없습니다.</p>
                     ) : auditDetail.reconciliationHistory.map(entry => (
