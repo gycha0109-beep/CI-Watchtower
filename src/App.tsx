@@ -89,6 +89,26 @@ function responsibilityActionLabel(action: string) {
   }
 }
 
+function responsibilityPriorityRank(priority: string) {
+  switch (priority) {
+    case 'p0': return 0;
+    case 'p1': return 1;
+    case 'p2': return 2;
+    case 'p3': return 3;
+    case 'blocked': return 4;
+    default: return 5;
+  }
+}
+
+function responsibilityPriorityLabel(priority: string) {
+  return priority === 'blocked' ? 'BLOCKED' : priority.toUpperCase();
+}
+
+function responsibilityAgeLabel(hours: number) {
+  if (hours >= 48) return Math.floor(hours / 24) + 'd ' + (hours % 24) + 'h';
+  return hours + 'h';
+}
+
 function resolutionActionLabel(action: string) {
   switch (action) {
     case 'add_project_wide_rule': return 'Repository-scoped Project-wide 규칙 추가';
@@ -350,10 +370,18 @@ function App() {
     [currentProducerRuns],
   );
   const responsibilityMapDriftsInScope = useMemo(
-    () => (dashboard?.responsibilityMapDrifts ?? []).filter(item =>
-      (selectedProject === 'all' || item.projectId === selectedProject) &&
-      (selectedRepository === 'all' || item.repositoryId === selectedRepository)
-    ),
+    () => (dashboard?.responsibilityMapDrifts ?? [])
+      .filter(item =>
+        (selectedProject === 'all' || item.projectId === selectedProject) &&
+        (selectedRepository === 'all' || item.repositoryId === selectedRepository)
+      )
+      .sort((a, b) =>
+        responsibilityPriorityRank(a.reviewPriority) - responsibilityPriorityRank(b.reviewPriority) ||
+        b.reviewAgeHours - a.reviewAgeHours ||
+        b.failedAttemptCount - a.failedAttemptCount ||
+        a.repository.localeCompare(b.repository) ||
+        a.workflowName.localeCompare(b.workflowName)
+      ),
     [dashboard, selectedProject, selectedRepository],
   );
   const responsibilityMapSourcesInScope = useMemo(
@@ -399,6 +427,11 @@ function App() {
     deferred: responsibilityMapDriftsInScope.filter(item => item.reviewStatus === 'deferred').length,
     attention: responsibilityMapDriftsInScope.filter(item => item.reviewStatus === 'attention').length,
     blocked: responsibilityMapDriftsInScope.filter(item => item.reviewStatus === 'blocked').length,
+  }), [responsibilityMapDriftsInScope]);
+  const responsibilityReviewPriorityCounts = useMemo(() => ({
+    p0: responsibilityMapDriftsInScope.filter(item => item.reviewPriority === 'p0').length,
+    p1: responsibilityMapDriftsInScope.filter(item => item.reviewPriority === 'p1').length,
+    overdue: responsibilityMapDriftsInScope.filter(item => item.reviewAgeBucket === 'overdue').length,
   }), [responsibilityMapDriftsInScope]);
   const responsibilityMapSourceWarnings = responsibilityMapSourcesInScope.filter(item =>
     item.status === 'error' || (item.status === 'not_found' && item.contractCount > 0)
@@ -826,6 +859,9 @@ function App() {
                 {' · '}deferred {responsibilityReviewStatusCounts.deferred}
                 {' · '}attention {responsibilityReviewStatusCounts.attention}
                 {' · '}blocked {responsibilityReviewStatusCounts.blocked}
+                {' · '}P0 {responsibilityReviewPriorityCounts.p0}
+                {' · '}P1 {responsibilityReviewPriorityCounts.p1}
+                {' · '}overdue {responsibilityReviewPriorityCounts.overdue}
                 {' · '}source synced {responsibilityMapSynced.length}
               </span>
             </div>
@@ -884,6 +920,10 @@ function App() {
                       <small>{item.repository}</small>
                     </span>
                     <span className="responsibility-review-head-actions">
+                      <span className={`responsibility-review-priority ${item.reviewPriority}`}>{responsibilityPriorityLabel(item.reviewPriority)}</span>
+                      <span className={`responsibility-review-age ${item.reviewAgeBucket}`}>
+                        {item.reviewAgeBucket.toUpperCase()} · {responsibilityAgeLabel(item.reviewAgeHours)}
+                      </span>
                       <span className={`responsibility-review-state ${item.reviewStatus}`}>{item.reviewStatus.toUpperCase()}</span>
                       <span className="responsibility-review-action">{responsibilityActionLabel(item.recommendedAction)}</span>
                     </span>
@@ -907,6 +947,12 @@ function App() {
                   <div className="responsibility-review-reason">
                     <span>충돌 이유</span>
                     <p>{item.reason}</p>
+                  </div>
+                  <div className="responsibility-review-ops">
+                    <span>First seen <b>{formatAuditTime(item.firstSeenAt)}</b></span>
+                    <span>Review events <b>{item.reviewEventCount}</b></span>
+                    <span>Failed attempts <b>{item.failedAttemptCount}</b></span>
+                    <span>Last reviewed <b>{item.lastReviewedAt ? formatAuditTime(item.lastReviewedAt) : '없음'}</b></span>
                   </div>
                   {(resolutionHistoryByReviewKey.get(item.reviewKey)?.length ?? 0) > 0 && (
                     <button
