@@ -8258,6 +8258,16 @@ mod tests {
         let blocked_preview = resolution_preview_for_drift(&conn, &wrong_static_current).unwrap();
         assert!(!blocked_preview.executable);
         assert_eq!(blocked_preview.action, "blocked");
+        let blocked_result = resolve_responsibility_drift_with_conn(
+            &conn,
+            &ResolveResponsibilityDriftInput {
+                review_key: wrong_static_current.review_key.clone(),
+                fingerprint: wrong_static_current.fingerprint.clone(),
+                action: "blocked".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(blocked_result.status, "blocked");
 
         let scoped_dynamic = responsibility_map_drifts(&conn)
             .unwrap()
@@ -8300,7 +8310,100 @@ mod tests {
         };
         assert!(audit_results.contains(&"deferred".to_string()));
         assert!(audit_results.contains(&"resolved".to_string()));
+        assert!(audit_results.contains(&"blocked".to_string()));
         assert!(audit_results.contains(&"stale_rejected".to_string()));
+
+        let history = responsibility_resolution_history(&conn, 200).unwrap();
+        let deferred_history = history
+            .iter()
+            .find(|item| item.id == deferred.audit_id)
+            .unwrap();
+        assert_eq!(deferred_history.result, "deferred");
+        assert_eq!(deferred_history.before_watchtower_contract, None);
+        assert_eq!(deferred_history.after_watchtower_contract, None);
+        assert!(!deferred_history.stale);
+
+        let missing_dynamic_history: Vec<&ResponsibilityResolutionAuditEntry> = history
+            .iter()
+            .filter(|item| item.review_key == missing_dynamic.review_key)
+            .collect();
+        assert_eq!(missing_dynamic_history.len(), 2);
+        assert!(missing_dynamic_history.iter().any(|item| item.result == "deferred"));
+        let resolved_dynamic_history = missing_dynamic_history
+            .iter()
+            .find(|item| item.result == "resolved")
+            .unwrap();
+        assert_eq!(
+            resolved_dynamic_history.after_watchtower_contract.as_deref(),
+            Some("dynamic")
+        );
+        assert_eq!(resolved_dynamic_history.repository_contract, "dynamic");
+
+        let resolved_project_history = history
+            .iter()
+            .find(|item| item.id == resolved_missing_project.audit_id)
+            .unwrap();
+        assert_eq!(
+            resolved_project_history.after_watchtower_contract.as_deref(),
+            Some("project-wide")
+        );
+        let reclassified_dynamic_history = history
+            .iter()
+            .find(|item| item.id == kind_dynamic_result.audit_id)
+            .unwrap();
+        assert_eq!(
+            reclassified_dynamic_history.before_watchtower_contract.as_deref(),
+            Some("project-wide")
+        );
+        assert_eq!(
+            reclassified_dynamic_history.after_watchtower_contract.as_deref(),
+            Some("dynamic")
+        );
+        let reclassified_project_history = history
+            .iter()
+            .find(|item| item.id == kind_project_result.audit_id)
+            .unwrap();
+        assert_eq!(
+            reclassified_project_history.before_watchtower_contract.as_deref(),
+            Some("dynamic")
+        );
+        assert_eq!(
+            reclassified_project_history.after_watchtower_contract.as_deref(),
+            Some("project-wide")
+        );
+        let stale_history = history
+            .iter()
+            .find(|item| item.id == stale_rejected.audit_id)
+            .unwrap();
+        assert_eq!(stale_history.result, "stale_rejected");
+        assert!(stale_history.stale);
+        assert_ne!(
+            stale_history.requested_fingerprint,
+            stale_history.current_fingerprint
+        );
+        let blocked_history = history
+            .iter()
+            .find(|item| item.id == blocked_result.audit_id)
+            .unwrap();
+        assert_eq!(blocked_history.result, "blocked");
+        assert_eq!(blocked_history.repository_id, repository_id);
+
+        let deferred_row_unchanged: String = conn
+            .query_row(
+                "SELECT result FROM responsibility_resolution_audit WHERE id=?",
+                params![deferred.audit_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(deferred_row_unchanged, "deferred");
+        let manual_assignment_final: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_assignments WHERE run_id=9_800_005 AND manual=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(manual_assignment_final, 1);
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
