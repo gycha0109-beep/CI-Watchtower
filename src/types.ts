@@ -192,6 +192,7 @@ export interface ProducerContractRun {
   run: WorkflowRunSummary;
   bucket: 'project' | 'run_name' | 'pr_marker' | 'commit_marker' | 'branch' | 'inference' | 'manual' | 'track_alias' | 'unassigned' | 'conflict' | 'other' | string;
   contractCompliant: boolean;
+  isCurrentProducerRun: boolean;
 }
 
 export interface Dashboard {

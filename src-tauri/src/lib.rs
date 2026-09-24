@@ -263,6 +263,7 @@ struct ProducerContractRun {
     run: WorkflowRunSummary,
     bucket: String,
     contract_compliant: bool,
+    is_current_producer_run: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1223,7 +1224,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.8")
+        .user_agent("ci-watchtower/0.3.9")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -1819,7 +1820,7 @@ fn producer_contract_runs(
     let now = Utc::now();
     let mut stmt = conn.prepare(
         "WITH recent AS (
-           SELECT wr.run_id,mr.project_id,mr.id AS repository_id,mr.repo,
+           SELECT wr.run_id,wr.workflow_id,mr.project_id,mr.id AS repository_id,mr.repo,
                   wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,
                   wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,
                   wr.created_at,wr.run_started_at,wr.updated_at,
@@ -1849,7 +1850,11 @@ fn producer_contract_runs(
                   ROW_NUMBER() OVER (
                     PARTITION BY wr.repository_id
                     ORDER BY wr.created_at DESC,wr.run_id DESC
-                  ) AS repository_rank
+                  ) AS repository_rank,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY wr.repository_id,wr.workflow_id
+                    ORDER BY wr.created_at DESC,wr.run_id DESC
+                  ) AS workflow_rank
            FROM workflow_runs wr
            JOIN monitored_repositories mr ON mr.id=wr.repository_id
            LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
@@ -1877,7 +1882,8 @@ fn producer_contract_runs(
                        AND attribution_source IN ('run_name','pr_marker','commit_marker','branch')
                     THEN 1
                   ELSE 0
-                END AS contract_compliant
+                END AS contract_compliant,
+                CASE WHEN workflow_rank=1 THEN 1 ELSE 0 END AS is_current_producer_run
          FROM recent
          WHERE repository_rank<=?
          ORDER BY created_at DESC,run_id DESC",
@@ -1887,6 +1893,7 @@ fn producer_contract_runs(
             run: run_summary_from_row(row, now)?,
             bucket: row.get(20)?,
             contract_compliant: row.get::<_, i64>(21)? != 0,
+            is_current_producer_run: row.get::<_, i64>(22)? != 0,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -5059,6 +5066,7 @@ mod tests {
             repository_runs.iter().filter(|item| item.contract_compliant).count(),
             4
         );
+        assert!(repository_runs.iter().all(|item| item.is_current_producer_run));
         let drift_buckets: Vec<&str> = repository_runs
             .iter()
             .filter(|item| !item.contract_compliant)
@@ -5069,6 +5077,129 @@ mod tests {
         assert!(drift_buckets.contains(&"track_alias"));
         assert!(drift_buckets.contains(&"unassigned"));
         assert!(!repository_runs.iter().any(|item| item.run.id == 9_100_009));
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn producer_contract_runs_separate_current_from_historical_drift_by_workflow_identity() {
+        let path = legacy_v02_db_path("producer-contract-current");
+        init_db(&path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
+
+        let repository_id: i64 = conn
+            .query_row(
+                "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let project_id: i64 = conn
+            .query_row(
+                "SELECT project_id FROM monitored_repositories WHERE id=?",
+                params![repository_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let track_id: i64 = conn
+            .query_row(
+                "SELECT id FROM watch_tracks
+                 WHERE project_id=? AND track_key='ops'",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        for (run_id, workflow_id, workflow_name, created_at, resolution_status) in [
+            (
+                9_300_001_i64,
+                8_301_i64,
+                "Recovered Producer",
+                "2026-09-24T00:01:00Z",
+                "unassigned",
+            ),
+            (
+                9_300_002_i64,
+                8_301_i64,
+                "Recovered Producer",
+                "2026-09-24T00:02:00Z",
+                "assigned",
+            ),
+            (
+                9_300_003_i64,
+                8_302_i64,
+                "Still Drifting Producer",
+                "2026-09-24T00:03:00Z",
+                "unassigned",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO workflow_runs(
+                   run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
+                   head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
+                   created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored,last_resolution_attempt_at
+                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![
+                    run_id,
+                    repository_id,
+                    workflow_id,
+                    workflow_name,
+                    Option::<String>::None,
+                    workflow_name,
+                    "push",
+                    "main",
+                    format!("sha-{run_id}"),
+                    run_id,
+                    1_i64,
+                    "completed",
+                    "success",
+                    format!("https://example/{run_id}"),
+                    created_at,
+                    Option::<String>::None,
+                    created_at,
+                    created_at,
+                    resolution_status,
+                    0_i64,
+                    Option::<String>::None,
+                ],
+            )
+            .unwrap();
+        }
+
+        conn.execute(
+            "INSERT INTO run_assignments(
+               run_id,track_id,confidence,source,reason,manual,assigned_at
+             ) VALUES(?,?,?,?,?,?,?)",
+            params![
+                9_300_002_i64,
+                track_id,
+                100_i64,
+                "run_name",
+                "fixture",
+                0_i64,
+                "2026-09-24T00:02:30Z",
+            ],
+        )
+        .unwrap();
+
+        let contract_runs = producer_contract_runs(&conn, 50).unwrap();
+        let older = contract_runs.iter().find(|item| item.run.id == 9_300_001).unwrap();
+        let recovered = contract_runs.iter().find(|item| item.run.id == 9_300_002).unwrap();
+        let active_drift = contract_runs.iter().find(|item| item.run.id == 9_300_003).unwrap();
+
+        assert!(!older.contract_compliant);
+        assert!(!older.is_current_producer_run);
+
+        assert!(recovered.contract_compliant);
+        assert!(recovered.is_current_producer_run);
+
+        assert!(!active_drift.contract_compliant);
+        assert!(active_drift.is_current_producer_run);
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
