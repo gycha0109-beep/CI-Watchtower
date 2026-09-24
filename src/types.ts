@@ -227,7 +227,7 @@ export interface ResponsibilityMapDrift {
   recommendedAction: string;
   reviewKey: string;
   fingerprint: string;
-  reviewStatus: 'open' | 'deferred' | 'blocked' | string;
+  reviewStatus: 'open' | 'deferred' | 'attention' | 'blocked' | string;
 }
 
 export interface ResponsibilityResolutionPreviewInput {
