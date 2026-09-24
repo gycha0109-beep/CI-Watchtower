@@ -7847,8 +7847,6 @@ mod tests {
 
         let track_count_before: i64 =
             conn.query_row("SELECT COUNT(*) FROM watch_tracks", [], |row| row.get(0)).unwrap();
-        let assignment_count_before: i64 =
-            conn.query_row("SELECT COUNT(*) FROM run_assignments", [], |row| row.get(0)).unwrap();
 
         let mobile_track_id: i64 = conn
             .query_row(
@@ -7864,6 +7862,8 @@ mod tests {
             params![mobile_track_id, now],
         )
         .unwrap();
+        let assignment_count_before: i64 =
+            conn.query_row("SELECT COUNT(*) FROM run_assignments", [], |row| row.get(0)).unwrap();
 
         let drifts = responsibility_map_drifts(&conn).unwrap();
 
