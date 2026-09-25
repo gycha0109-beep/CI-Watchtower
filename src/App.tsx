@@ -406,6 +406,21 @@ function App() {
     ),
     [dashboard, selectedProject, selectedRepository],
   );
+  const responsibilityEscalationDeliveriesInScope = useMemo(
+    () => (dashboard?.responsibilityEscalationDeliveries ?? []).filter(item =>
+      (selectedProject === 'all' || item.projectId === selectedProject) &&
+      (selectedRepository === 'all' || item.repositoryId === selectedRepository)
+    ),
+    [dashboard, selectedProject, selectedRepository],
+  );
+  const responsibilityEscalationDeliveryByEvent = useMemo(() => {
+    const map = new Map<string, typeof responsibilityEscalationDeliveriesInScope[number]>();
+    for (const item of responsibilityEscalationDeliveriesInScope) {
+      const key = item.reviewKey + ':' + item.fingerprint + ':' + item.eventType;
+      if (!map.has(key)) map.set(key, item);
+    }
+    return map;
+  }, [responsibilityEscalationDeliveriesInScope]);
   const resolutionHistoryInScope = useMemo(
     () => resolutionHistory.filter(item =>
       (selectedProject === 'all' || item.projectId === selectedProject) &&
@@ -936,12 +951,47 @@ function App() {
                     <span className={'responsibility-sla-badge ' + item.slaStatus}>
                       {responsibilitySlaLabel(item.slaStatus, item.slaRemainingHours)}
                     </span>
+                    {(() => {
+                      const delivery = responsibilityEscalationDeliveryByEvent.get(
+                        item.reviewKey + ':' + item.fingerprint + ':' + item.escalationLevel
+                      );
+                      return (
+                        <small className={'responsibility-delivery-state ' + (delivery?.status ?? 'pending')}>
+                          {delivery == null
+                            ? 'desktop pending'
+                            : delivery.status === 'emitted'
+                              ? 'desktop emitted · ' + formatAuditTime(delivery.emittedAt ?? delivery.lastAttemptAt)
+                              : 'desktop failed · attempt ' + delivery.attempts + '/3'}
+                        </small>
+                      );
+                    })()}
                     <small>{item.escalationReason ?? 'Review SLA escalation'}</small>
                   </div>
                 ))}
               </div>
             </div>
           )}
+{responsibilityEscalationDeliveriesInScope.length > 0 && (
+  <div className="responsibility-delivery-history">
+    <div className="responsibility-delivery-history-head">
+      <b>Desktop Escalation Delivery</b>
+      <small>fingerprint + event level 기준 중복 방지 · 실패 시 최대 3회 시도</small>
+    </div>
+    <div className="responsibility-delivery-history-list">
+      {responsibilityEscalationDeliveriesInScope.slice(0, 8).map(item => (
+        <div className="responsibility-delivery-history-row" key={'delivery:' + item.id}>
+<span className={'responsibility-delivery-state ' + item.status}>{item.status.toUpperCase()}</span>
+<span>
+  <b>{item.workflowName}</b>
+  <small>{item.repository} · {item.eventType.toUpperCase()} · attempt {item.attempts}</small>
+</span>
+<small>{formatAuditTime(item.emittedAt ?? item.lastAttemptAt)}</small>
+<small>{item.lastError ?? item.reason ?? 'desktop notification accepted'}</small>
+        </div>
+      ))}
+    </div>
+  </div>
+)}
           {responsibilityMapSourceWarnings.length > 0 ? (
             <div className="producer-drift-source-warning">
               responsibility map source가 현재 신뢰 가능하지 않습니다. 마지막 정상 snapshot은 유지되지만 0건을 clean으로 판정하지 않습니다.

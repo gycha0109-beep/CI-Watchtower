@@ -129,6 +129,19 @@ h2 { font-size: 16px; margin: 0 0 15px; }
 .responsibility-escalation-main { min-width: 0; display: grid; gap: 2px; }
 .responsibility-escalation-main b { color: #dce5f6; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .responsibility-escalation-main small, .responsibility-escalation-row > small { color: #71809c; font-size: 9px; }
+.responsibility-delivery-state { width: fit-content; font-size: 8px; font-weight: 900; letter-spacing: .04em; }
+.responsibility-delivery-state.emitted { color: #78d9aa; }
+.responsibility-delivery-state.failed { color: #ff8796; }
+.responsibility-delivery-state.pending { color: #f2c66b; }
+.responsibility-delivery-history { display: grid; gap: 7px; border: 1px solid #26344d; border-radius: 10px; background: #080e1a; padding: 10px; margin-bottom: 10px; }
+.responsibility-delivery-history-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.responsibility-delivery-history-head b { color: #cdd8ec; font-size: 10px; }
+.responsibility-delivery-history-head small { color: #697994; font-size: 9px; }
+.responsibility-delivery-history-list { display: grid; gap: 4px; }
+.responsibility-delivery-history-row { display: grid; grid-template-columns: 72px minmax(180px,1fr) 120px minmax(220px,1.3fr); gap: 8px; align-items: center; border-top: 1px solid #18233a; padding: 6px 2px 2px; }
+.responsibility-delivery-history-row > span:nth-child(2) { display: grid; gap: 2px; min-width: 0; }
+.responsibility-delivery-history-row b { color: #cdd8ec; font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.responsibility-delivery-history-row small { color: #71809c; font-size: 8px; }
 .responsibility-review-buttons { display: flex; gap: 6px; align-items: center; }
 .responsibility-resolution-preview { display: grid; gap: 10px; border: 1px solid #36517f; border-radius: 10px; background: #080e1b; padding: 12px; }
 .responsibility-resolution-preview-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
