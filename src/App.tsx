@@ -415,6 +415,13 @@ function App() {
     ),
     [dashboard, selectedProject, selectedRepository],
   );
+  const responsibilityEscalationOperatorActionsInScope = useMemo(
+    () => (dashboard?.responsibilityEscalationOperatorActions ?? []).filter(item =>
+      (selectedProject === 'all' || item.projectId === selectedProject) &&
+      (selectedRepository === 'all' || item.repositoryId === selectedRepository)
+    ),
+    [dashboard, selectedProject, selectedRepository],
+  );
   const responsibilityEscalationDeliveryByEvent = useMemo(() => {
     const map = new Map<string, typeof responsibilityEscalationDeliveriesInScope[number]>();
     for (const item of responsibilityEscalationDeliveriesInScope) {
@@ -1065,6 +1072,27 @@ function App() {
 </span>
 <small>{formatAuditTime(item.emittedAt ?? item.lastAttemptAt)}</small>
 <small>{item.lastError ?? item.reason ?? 'desktop notification accepted'}</small>
+        </div>
+      ))}
+    </div>
+  </div>
+)}
+{responsibilityEscalationOperatorActionsInScope.length > 0 && (
+  <div className="responsibility-operator-history">
+    <div className="responsibility-delivery-history-head">
+      <b>Escalation Operator History</b>
+      <small>review key + fingerprint 단위 immutable operator action audit</small>
+    </div>
+    <div className="responsibility-operator-history-list">
+      {responsibilityEscalationOperatorActionsInScope.slice(0, 8).map(item => (
+        <div className="responsibility-operator-history-row" key={'operator-audit:' + item.id}>
+          <span className={'responsibility-operator-state ' + item.afterState}>{item.afterState.toUpperCase()}</span>
+          <span>
+            <b>{item.workflowName}</b>
+            <small>{item.repository} · {item.action} · {item.beforeState} → {item.afterState}</small>
+          </span>
+          <small>{item.actor}</small>
+          <small>{formatAuditTime(item.createdAt)}</small>
         </div>
       ))}
     </div>
