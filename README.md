@@ -298,6 +298,19 @@ v0.3.30까지 누적된 Responsibility 운영 기능을 삭제하지 않고 UI�
 - backend schema, resolver, responsibility lifecycle, audit history, migration 데이터는 삭제하거나 재해석하지 않습니다.
 - v0.3.31부터 Responsibility/SLA 계층은 신규 제품 축으로 확장하지 않고 고급 진단/운영 기능으로 유지합니다.
 
+
+### Core Decoupling (v0.3.32)
+
+WatchTower runtime core에서 특정 사용자 프로젝트의 초기화 지식을 분리합니다.
+
+- 신규 설치는 Project / Repository / Track / Rule이 0개인 빈 registry로 시작합니다.
+- `K_beauty`, `MyeongHa`, `Saju`와 해당 프로젝트의 Workflow 이름은 일반 startup 경로에서 더 이상 seed하지 않습니다.
+- 과거 v0.2 계열 DB를 현재 schema로 올리기 위해 필요한 프로젝트별 지식은 `src-tauri/src/legacy_compat.rs`의 one-shot compatibility migration으로 격리합니다.
+- `schema_migrations`가 legacy migration과 core-decoupling 적용 여부를 기록하므로 restart가 사용자 registry를 다시 덮거나 seed를 되살리지 않습니다.
+- 기존 Project / Repository / Track / Alias / Fingerprint / Workflow rule / Run / Manual assignment / Audit / Notification 데이터는 삭제하거나 재해석하지 않습니다.
+- 새 프로젝트는 범용 Project → Repository → Track registry와 Repository Responsibility Map으로 등록하며 WatchTower source 수정이 필요하지 않습니다.
+- fresh install에서는 Dashboard/Issues에 빈 상태를 표시하고 Advanced에서 첫 프로젝트를 등록하도록 안내합니다.
+
 ## Producer Contract Health
 
 Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.
