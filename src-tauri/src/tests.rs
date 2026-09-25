@@ -2315,7 +2315,7 @@ fn fresh_install_real_use_acceptance_smoke() {
         db_path: path.clone(),
         poll_in_flight: AtomicBool::new(false),
     };
-    let dashboard = build_dashboard(&state).unwrap();
+    let dashboard = build_dashboard_with_token_status(&state, false).unwrap();
 
     assert_eq!(dashboard.projects.len(), 1);
     assert_eq!(dashboard.repositories.len(), 1);
