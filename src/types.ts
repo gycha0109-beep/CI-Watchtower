@@ -197,6 +197,7 @@ export interface RepositoryScopeStats {
   projectId: number;
   unassignedCount: number;
   projectRunCount: number;
+  projectActiveRunCount: number;
 }
 
 export interface ProducerContractStats {
