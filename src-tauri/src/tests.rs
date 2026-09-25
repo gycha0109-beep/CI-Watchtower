@@ -232,19 +232,26 @@ fn extracts_run_name_marker() {
 }
 
 #[test]
-fn normalizes_legacy_bejewely_taxonomy_key() {
+fn generic_alias_tokens_are_preserved_until_project_scoped_resolution() {
     assert_eq!(
-        extract_marker("[WT:taxonomy&AI] Product Query Quality"),
-        Some("taxonomy-ai".into())
+        extract_marker("[WT:legacy&ops] Shared Validation"),
+        Some("legacy&ops".into())
     );
     assert_eq!(
-        extract_track_trailer("feat: x\n\nWatchtower-Track: taxonomy&AI"),
-        Some("taxonomy-ai".into())
+        extract_track_trailer("feat: x\n\nWatchtower-Track: legacy&ops"),
+        Some("legacy&ops".into())
     );
-    assert!(branch_has_key(
-        "feat/taxonomy&AI/provider-quality",
-        "taxonomy-ai"
-    ));
+    assert!(branch_has_key("feat/legacy&ops/provider-quality", "legacy&ops"));
+
+    let tracks = vec![track(1, "ops")];
+    let aliases = HashMap::from([("legacy&ops".into(), "ops".into())]);
+    let resolution = resolve_evidence(
+        &tracks,
+        &aliases,
+        vec![evidence("legacy&ops", "run_name", 100)],
+    );
+    assert_eq!(resolution.status, "assigned");
+    assert_eq!(resolution.track_id, Some(1));
 }
 
 #[test]
@@ -3452,8 +3459,12 @@ fn repository_responsibility_binding_normalizes_supported_contracts() {
         ("dynamic".into(), None)
     );
     assert_eq!(
-        normalize_repository_binding("static:taxonomy&AI"),
-        ("static".into(), Some("taxonomy-ai".into()))
+        normalize_repository_binding("static:ops"),
+        ("static".into(), Some("ops".into()))
+    );
+    assert_eq!(
+        normalize_repository_binding("static:legacy&ops"),
+        ("unknown".into(), None)
     );
     assert_eq!(
         normalize_repository_binding("future-contract"),
