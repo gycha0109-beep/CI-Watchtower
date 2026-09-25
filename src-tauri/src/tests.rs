@@ -2137,6 +2137,226 @@ fn fresh_database_starts_without_project_specific_seed_data() {
 }
 
 #[test]
+fn fresh_install_real_use_acceptance_smoke() {
+    let path = legacy_v02_db_path("real-use-acceptance-smoke");
+    init_db(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let now = "2026-09-25T04:30:00Z";
+
+    let project_id = save_project_in_conn(
+        &conn,
+        &ProjectInput {
+            id: None,
+            name: "Example Product".into(),
+            project_key: "example-product".into(),
+        },
+        now,
+    )
+    .unwrap();
+    let repository_id = save_repository_in_conn(
+        &conn,
+        &RepositoryInput {
+            id: None,
+            project_id,
+            repo: "example-org/example-repo".into(),
+            enabled: true,
+        },
+        now,
+    )
+    .unwrap();
+    let track_id = save_track_in_conn(
+        &conn,
+        &TrackInput {
+            id: None,
+            project_id,
+            name: "Operations".into(),
+            track_key: "ops".into(),
+            long_ci_minutes: 8,
+        },
+        now,
+    )
+    .unwrap();
+
+    let tracks = list_tracks(&conn, true).unwrap();
+    let aliases = load_project_aliases(&conn, project_id).unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert!(aliases.is_empty());
+
+    let runs = vec![
+        GithubRun {
+            id: 91_001,
+            workflow_id: 501,
+            name: "Build".into(),
+            path: Some(".github/workflows/build.yml".into()),
+            display_title: Some("[WT:ops] Build".into()),
+            event: "push".into(),
+            head_branch: Some("feat/ops/acceptance".into()),
+            head_sha: "sha-running".into(),
+            run_number: 1,
+            run_attempt: 1,
+            status: "in_progress".into(),
+            conclusion: None,
+            html_url: "https://github.com/example-org/example-repo/actions/runs/91001".into(),
+            created_at: "2026-09-25T04:10:00Z".into(),
+            run_started_at: Some("2026-09-25T04:10:00Z".into()),
+            updated_at: "2026-09-25T04:30:00Z".into(),
+            pull_requests: Vec::new(),
+        },
+        GithubRun {
+            id: 91_002,
+            workflow_id: 502,
+            name: "Tests".into(),
+            path: Some(".github/workflows/tests.yml".into()),
+            display_title: Some("[WT:ops] Tests".into()),
+            event: "push".into(),
+            head_branch: Some("feat/ops/acceptance".into()),
+            head_sha: "sha-failed".into(),
+            run_number: 2,
+            run_attempt: 1,
+            status: "completed".into(),
+            conclusion: Some("failure".into()),
+            html_url: "https://github.com/example-org/example-repo/actions/runs/91002".into(),
+            created_at: "2026-09-25T04:20:00Z".into(),
+            run_started_at: Some("2026-09-25T04:20:00Z".into()),
+            updated_at: "2026-09-25T04:25:00Z".into(),
+            pull_requests: Vec::new(),
+        },
+        GithubRun {
+            id: 91_003,
+            workflow_id: 503,
+            name: "Unknown Gate".into(),
+            path: Some(".github/workflows/unknown.yml".into()),
+            display_title: Some("[WT:unknown-track] Unknown Gate".into()),
+            event: "push".into(),
+            head_branch: Some("feat/unknown-track/acceptance".into()),
+            head_sha: "sha-unassigned".into(),
+            run_number: 3,
+            run_attempt: 1,
+            status: "queued".into(),
+            conclusion: None,
+            html_url: "https://github.com/example-org/example-repo/actions/runs/91003".into(),
+            created_at: "2026-09-25T04:29:00Z".into(),
+            run_started_at: None,
+            updated_at: "2026-09-25T04:29:00Z".into(),
+            pull_requests: Vec::new(),
+        },
+    ];
+
+    for run in &runs {
+        upsert_run(&conn, repository_id, run, now).unwrap();
+        let marker = run
+            .display_title
+            .as_deref()
+            .and_then(extract_marker)
+            .expect("acceptance run marker");
+        let resolution = resolve_evidence(
+            &tracks,
+            &aliases,
+            vec![Evidence {
+                track_key: marker,
+                signal_type: "run_name".into(),
+                score: 100,
+                value: run.display_title.clone().unwrap(),
+            }],
+        );
+        persist_resolution(&conn, run.id, &resolution, now).unwrap();
+    }
+
+    let assigned_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM run_assignments WHERE track_id=?",
+            params![track_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(assigned_count, 2);
+
+    let unknown_status: String = conn
+        .query_row(
+            "SELECT resolution_status FROM workflow_runs WHERE run_id=91003",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unknown_status, "unassigned");
+
+    conn.execute(
+        "UPDATE monitored_repositories
+         SET running_count=1,queued_count=1,last_polled_at=?,last_successful_poll_at=?,updated_at=?
+         WHERE id=?",
+        params![now, now, now, repository_id],
+    )
+    .unwrap();
+
+    assert!(mark_notified(&conn, track_id, 91_001, 1, "long", now).unwrap());
+    assert!(!mark_notified(&conn, track_id, 91_001, 1, "long", now).unwrap());
+    assert!(mark_notified(&conn, track_id, 91_002, 1, "red", now).unwrap());
+    assert!(!mark_notified(&conn, track_id, 91_002, 1, "red", now).unwrap());
+
+    replace_repository_responsibility_contracts(
+        &conn,
+        repository_id,
+        &[RepositoryResponsibilityContract {
+            workflow_path: ".github/workflows/shared-gate.yml".into(),
+            workflow_name: "Shared Gate".into(),
+            binding_kind: "dynamic".into(),
+            track_key: None,
+            source_binding: "dynamic-by-run".into(),
+            source_path: RESPONSIBILITY_MAP_PATH.into(),
+        }],
+        now,
+    )
+    .unwrap();
+    update_repository_responsibility_source(&conn, repository_id, "synced", now, None).unwrap();
+
+    drop(conn);
+
+    let state = AppState {
+        db_path: path.clone(),
+        poll_in_flight: AtomicBool::new(false),
+    };
+    let dashboard = build_dashboard(&state).unwrap();
+
+    assert_eq!(dashboard.projects.len(), 1);
+    assert_eq!(dashboard.repositories.len(), 1);
+    assert_eq!(dashboard.tracks.len(), 1);
+    assert_eq!(dashboard.running_count, 1);
+    assert_eq!(dashboard.queued_count, 1);
+    assert_eq!(dashboard.unassigned_count, 1);
+    assert_eq!(dashboard.tracks[0].track.track_key, "ops");
+    assert_eq!(dashboard.tracks[0].health, "red");
+    assert!(dashboard.tracks[0].runs.iter().any(|run| run.id == 91_001));
+    assert!(dashboard.tracks[0].runs.iter().any(|run| run.id == 91_002));
+    assert!(dashboard.unassigned_runs.iter().any(|run| run.id == 91_003));
+
+    let drift = dashboard
+        .responsibility_map_drifts
+        .iter()
+        .find(|item| item.workflow_name == "Shared Gate")
+        .expect("responsibility drift should be visible");
+    assert_eq!(drift.drift_type, "missing_in_watchtower");
+    assert_eq!(drift.repository_binding, "dynamic-by-run");
+
+    let source = dashboard
+        .responsibility_map_sources
+        .iter()
+        .find(|item| item.repository_id == repository_id)
+        .expect("responsibility source should be visible");
+    assert_eq!(source.status, "synced");
+
+    let conn = Connection::open(&path).unwrap();
+    let notification_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM notifications_v2", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(notification_count, 2);
+    drop(conn);
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
 fn generic_registry_survives_restart_without_project_seed_reinjection() {
     let path = legacy_v02_db_path("generic-registry-restart");
     init_db(&path).unwrap();
