@@ -376,6 +376,10 @@ Release installer:
 npm run tauri build
 ```
 
+## Real-use Acceptance Smoke
+
+현재 core의 최소 실사용 경로는 [docs/acceptance-smoke.md](docs/acceptance-smoke.md)에 고정합니다. 자동 gate는 fresh DB에서 Project → Repository → Track → Run 저장 → 명시 귀속 → 실패/장기 CI 알림 dedupe → Unassigned/Responsibility Drift → Dashboard 노출까지 검증합니다. OS 알림 표시와 로컬 PAT/실제 GitHub 연결은 desktop live-smoke 경계로 분리합니다.
+
 ## v0.3 Acceptance
 
 - Project 생성/삭제 및 Repository/Track Project 귀속
