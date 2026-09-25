@@ -3722,6 +3722,9 @@ fn responsibility_escalation_delivery_is_deduplicated_and_retry_bounded() {
         sla_remaining_hours: Some(24),
         escalation_level: "warning".into(),
         escalation_reason: Some("test warning".into()),
+        operator_state: "active".into(),
+        operator_actor: None,
+        operator_updated_at: None,
     };
     assert_eq!(
         responsibility_escalation_event_type("warning"),
@@ -3797,6 +3800,158 @@ fn responsibility_escalation_delivery_is_deduplicated_and_retry_bounded() {
         .unwrap();
     assert_eq!(critical.status, "failed");
     assert_eq!(critical.attempts, 3);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
+fn responsibility_escalation_operator_lifecycle_is_audited_and_fingerprint_scoped() {
+    let path = legacy_v02_db_path("responsibility-escalation-operator-lifecycle");
+    init_db(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let project_id: i64 = conn
+        .query_row(
+            "SELECT project_id FROM monitored_repositories WHERE id=?",
+            params![repository_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO repository_responsibility_contracts(
+           repository_id,workflow_path,workflow_name,binding_kind,track_key,
+           source_binding,source_path,last_seen_at
+         ) VALUES(?,?,?,?,?,?,?,?)",
+        params![
+            repository_id,
+            ".github/workflows/operator-test.yml",
+            "Operator Lifecycle Test",
+            "dynamic",
+            Option::<String>::None,
+            "dynamic-by-run",
+            RESPONSIBILITY_MAP_PATH,
+            Utc::now().to_rfc3339(),
+        ],
+    )
+    .unwrap();
+
+    let initial = responsibility_map_drifts(&conn)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.workflow_name == "Operator Lifecycle Test")
+        .unwrap();
+    assert_eq!(initial.operator_state, "active");
+
+    let aged = (Utc::now() - chrono::Duration::hours(80)).to_rfc3339();
+    conn.execute(
+        "UPDATE responsibility_review_state SET first_seen_at=?
+         WHERE review_key=? AND fingerprint=?",
+        params![aged, initial.review_key, initial.fingerprint],
+    )
+    .unwrap();
+    let escalated = current_responsibility_drift(&conn, &initial.review_key).unwrap();
+    assert_eq!(escalated.review_priority, "p1");
+    assert_eq!(escalated.escalation_level, "warning");
+
+    let input = ResponsibilityEscalationOperatorInput {
+        review_key: escalated.review_key.clone(),
+        fingerprint: escalated.fingerprint.clone(),
+    };
+    let acknowledged = set_responsibility_escalation_operator_state_with_conn(
+        &conn,
+        &input,
+        "acknowledged",
+        "acknowledge",
+    )
+    .unwrap();
+    assert_eq!(acknowledged.status, "acknowledged");
+    assert!(acknowledged.audit_id.is_some());
+
+    let suppressed = set_responsibility_escalation_operator_state_with_conn(
+        &conn,
+        &input,
+        "suppressed",
+        "suppress",
+    )
+    .unwrap();
+    assert_eq!(suppressed.operator_state, "suppressed");
+
+    let active = set_responsibility_escalation_operator_state_with_conn(
+        &conn,
+        &input,
+        "active",
+        "activate",
+    )
+    .unwrap();
+    assert_eq!(active.operator_state, "active");
+
+    let suppressed_again = set_responsibility_escalation_operator_state_with_conn(
+        &conn,
+        &input,
+        "suppressed",
+        "suppress",
+    )
+    .unwrap();
+    assert_eq!(suppressed_again.operator_state, "suppressed");
+
+    let audit_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM responsibility_escalation_operator_audit
+             WHERE review_key=? AND fingerprint=?",
+            params![input.review_key, input.fingerprint],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(audit_count, 4);
+
+    conn.execute(
+        "UPDATE repository_responsibility_contracts
+         SET binding_kind='project-wide',source_binding='unassigned-by-design'
+         WHERE repository_id=? AND workflow_name='Operator Lifecycle Test'",
+        params![repository_id],
+    )
+    .unwrap();
+    let changed = current_responsibility_drift(&conn, &input.review_key).unwrap();
+    assert_ne!(changed.fingerprint, input.fingerprint);
+    assert_eq!(changed.operator_state, "active");
+    assert!(changed.operator_actor.is_none());
+    let previous_state: String = conn
+        .query_row(
+            "SELECT state FROM responsibility_escalation_operator_state
+             WHERE review_key=? AND fingerprint=?",
+            params![input.review_key, input.fingerprint],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(previous_state, "suppressed");
+
+    let stale = set_responsibility_escalation_operator_state_with_conn(
+        &conn,
+        &input,
+        "acknowledged",
+        "acknowledge",
+    )
+    .unwrap();
+    assert_eq!(stale.status, "stale_rejected");
+    assert_eq!(stale.operator_state, "active");
+    let audit_count_after_stale: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM responsibility_escalation_operator_audit
+             WHERE review_key=? AND fingerprint=?",
+            params![input.review_key, input.fingerprint],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(audit_count_after_stale, 4);
 
     drop(conn);
     let _ = std::fs::remove_file(&path);
