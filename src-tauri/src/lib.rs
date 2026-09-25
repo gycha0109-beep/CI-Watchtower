@@ -25,6 +25,7 @@ const DEFAULT_QUEUE_THRESHOLD: i64 = 6;
 const HISTORICAL_RECONCILE_BATCH: i64 = 12;
 const PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY: i64 = 50;
 const RESPONSIBILITY_MAP_PATH: &str = "docs/ci/workflow-responsibility-map.json";
+const RESPONSIBILITY_ESCALATION_MAX_ATTEMPTS: i64 = 3;
 
 struct AppState {
     db_path: PathBuf,
@@ -128,6 +129,28 @@ struct ResponsibilityMapDrift {
     sla_remaining_hours: Option<i64>,
     escalation_level: String,
     escalation_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponsibilityEscalationDelivery {
+    id: i64,
+    project_id: i64,
+    repository_id: i64,
+    repository: String,
+    workflow_name: String,
+    review_key: String,
+    fingerprint: String,
+    event_type: String,
+    escalation_level: String,
+    sla_status: String,
+    reason: Option<String>,
+    status: String,
+    attempts: i64,
+    last_error: Option<String>,
+    first_attempt_at: String,
+    last_attempt_at: String,
+    emitted_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -396,6 +419,7 @@ struct Dashboard {
     producer_contract_runs: Vec<ProducerContractRun>,
     responsibility_map_drifts: Vec<ResponsibilityMapDrift>,
     responsibility_map_sources: Vec<ResponsibilityMapSourceStatus>,
+    responsibility_escalation_deliveries: Vec<ResponsibilityEscalationDelivery>,
     project_runs: Vec<WorkflowRunSummary>,
     unassigned_runs: Vec<WorkflowRunSummary>,
 }
@@ -818,6 +842,29 @@ fn init_db(path: &Path) -> Result<()> {
           notified_at TEXT NOT NULL,
           PRIMARY KEY(track_id, run_id, run_attempt, event_type)
         );
+
+        CREATE TABLE IF NOT EXISTS responsibility_escalation_deliveries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          review_key TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          repository_id INTEGER NOT NULL REFERENCES monitored_repositories(id) ON DELETE CASCADE,
+          workflow_name TEXT NOT NULL,
+          event_type TEXT NOT NULL CHECK(event_type IN ('warning','critical')),
+          escalation_level TEXT NOT NULL,
+          sla_status TEXT NOT NULL,
+          reason TEXT,
+          status TEXT NOT NULL CHECK(status IN ('pending','emitted','failed')),
+          attempts INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT,
+          first_attempt_at TEXT NOT NULL,
+          last_attempt_at TEXT NOT NULL,
+          emitted_at TEXT,
+          UNIQUE(review_key, fingerprint, event_type)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_responsibility_escalation_delivery_scope
+          ON responsibility_escalation_deliveries(project_id, repository_id, last_attempt_at DESC);
 
         CREATE TABLE IF NOT EXISTS app_settings (
           id INTEGER PRIMARY KEY CHECK(id=1),
@@ -1600,7 +1647,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.26")
+        .user_agent("ci-watchtower/0.3.27")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -3206,6 +3253,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         producer_contract_runs(&conn, PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY)?;
     let responsibility_map_drifts = responsibility_map_drifts(&conn)?;
     let responsibility_map_sources = responsibility_map_source_statuses(&conn)?;
+    let responsibility_escalation_deliveries = responsibility_escalation_deliveries(&conn, 50)?;
     let mut project_runs = Vec::new();
     let mut unassigned_runs = Vec::new();
     for repository in &repositories {
@@ -3255,6 +3303,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         producer_contract_runs,
         responsibility_map_drifts,
         responsibility_map_sources,
+        responsibility_escalation_deliveries,
         project_runs,
         unassigned_runs,
     })
@@ -3967,6 +4016,184 @@ fn send_notification(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
 }
 
+fn responsibility_escalation_event_type(level: &str) -> Option<&'static str> {
+    match level {
+        "warning" => Some("warning"),
+        "critical" => Some("critical"),
+        _ => None,
+    }
+}
+
+fn responsibility_source_synced(conn: &Connection, repository_id: i64) -> Result<bool> {
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM repository_responsibility_sources WHERE repository_id=?",
+            params![repository_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(status.as_deref() == Some("synced"))
+}
+
+fn reserve_responsibility_escalation_delivery(
+    conn: &Connection,
+    drift: &ResponsibilityMapDrift,
+    event_type: &str,
+    now: &str,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "INSERT INTO responsibility_escalation_deliveries(
+           review_key,fingerprint,project_id,repository_id,workflow_name,event_type,
+           escalation_level,sla_status,reason,status,attempts,last_error,
+           first_attempt_at,last_attempt_at,emitted_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,'pending',1,NULL,?,?,NULL)
+         ON CONFLICT(review_key,fingerprint,event_type) DO UPDATE SET
+           project_id=excluded.project_id,
+           repository_id=excluded.repository_id,
+           workflow_name=excluded.workflow_name,
+           escalation_level=excluded.escalation_level,
+           sla_status=excluded.sla_status,
+           reason=excluded.reason,
+           status='pending',
+           attempts=responsibility_escalation_deliveries.attempts+1,
+           last_error=NULL,
+           last_attempt_at=excluded.last_attempt_at
+         WHERE responsibility_escalation_deliveries.status!='emitted'
+           AND responsibility_escalation_deliveries.attempts < ?",
+        params![
+            drift.review_key,
+            drift.fingerprint,
+            drift.project_id,
+            drift.repository_id,
+            drift.workflow_name,
+            event_type,
+            drift.escalation_level,
+            drift.sla_status,
+            drift.escalation_reason,
+            now,
+            now,
+            RESPONSIBILITY_ESCALATION_MAX_ATTEMPTS,
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
+fn finish_responsibility_escalation_delivery(
+    conn: &Connection,
+    review_key: &str,
+    fingerprint: &str,
+    event_type: &str,
+    now: &str,
+    result: std::result::Result<(), String>,
+) -> Result<()> {
+    match result {
+        Ok(()) => {
+            conn.execute(
+                "UPDATE responsibility_escalation_deliveries
+                 SET status='emitted',last_error=NULL,emitted_at=?,last_attempt_at=?
+                 WHERE review_key=? AND fingerprint=? AND event_type=?",
+                params![now, now, review_key, fingerprint, event_type],
+            )?;
+        }
+        Err(error) => {
+            conn.execute(
+                "UPDATE responsibility_escalation_deliveries
+                 SET status='failed',last_error=?,last_attempt_at=?
+                 WHERE review_key=? AND fingerprint=? AND event_type=?",
+                params![error, now, review_key, fingerprint, event_type],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn responsibility_escalation_deliveries(
+    conn: &Connection,
+    limit: i64,
+) -> Result<Vec<ResponsibilityEscalationDelivery>> {
+    let mut stmt = conn.prepare(
+        "SELECT d.id,d.project_id,d.repository_id,mr.repo,d.workflow_name,
+                d.review_key,d.fingerprint,d.event_type,d.escalation_level,d.sla_status,
+                d.reason,d.status,d.attempts,d.last_error,d.first_attempt_at,
+                d.last_attempt_at,d.emitted_at
+         FROM responsibility_escalation_deliveries d
+         JOIN monitored_repositories mr ON mr.id=d.repository_id
+         ORDER BY COALESCE(d.emitted_at,d.last_attempt_at) DESC,d.id DESC
+         LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok(ResponsibilityEscalationDelivery {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            repository_id: row.get(2)?,
+            repository: row.get(3)?,
+            workflow_name: row.get(4)?,
+            review_key: row.get(5)?,
+            fingerprint: row.get(6)?,
+            event_type: row.get(7)?,
+            escalation_level: row.get(8)?,
+            sla_status: row.get(9)?,
+            reason: row.get(10)?,
+            status: row.get(11)?,
+            attempts: row.get(12)?,
+            last_error: row.get(13)?,
+            first_attempt_at: row.get(14)?,
+            last_attempt_at: row.get(15)?,
+            emitted_at: row.get(16)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn notify_responsibility_escalations(
+    app: &AppHandle,
+    conn: &Connection,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let now_text = now.to_rfc3339();
+    for drift in responsibility_map_drifts(conn)? {
+        let Some(event_type) = responsibility_escalation_event_type(&drift.escalation_level) else {
+            continue;
+        };
+        if !responsibility_source_synced(conn, drift.repository_id)? {
+            continue;
+        }
+        if !reserve_responsibility_escalation_delivery(conn, &drift, event_type, &now_text)? {
+            continue;
+        }
+        let title = format!(
+            "[Responsibility] {} — {}",
+            drift.escalation_level.to_uppercase(),
+            drift.workflow_name
+        );
+        let body = format!(
+            "{} · {} · {}",
+            drift.repository,
+            drift.review_priority.to_uppercase(),
+            drift
+                .escalation_reason
+                .as_deref()
+                .unwrap_or("Responsibility review escalation")
+        );
+        let result = app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+            .map_err(|error| error.to_string());
+        finish_responsibility_escalation_delivery(
+            conn,
+            &drift.review_key,
+            &drift.fingerprint,
+            event_type,
+            &now_text,
+            result,
+        )?;
+    }
+    Ok(())
+}
+
 fn notify_runs(
     app: &AppHandle,
     conn: &Connection,
@@ -4216,6 +4443,7 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
 
     let conn = db(state)?;
     notify_runs(app, &conn, &tracks, now)?;
+    notify_responsibility_escalations(app, &conn, now)?;
     let dashboard = build_dashboard(state)?;
     let was_congested: bool = conn.query_row(
         "SELECT queue_congested FROM app_settings WHERE id=1",

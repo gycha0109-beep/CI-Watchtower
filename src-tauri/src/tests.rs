@@ -3662,3 +3662,133 @@ fn responsibility_review_sla_escalates_p0_and_p1_without_escalating_p2() {
     assert!(responsibility_escalation_rank("critical") < responsibility_escalation_rank("warning"));
     assert!(responsibility_escalation_rank("warning") < responsibility_escalation_rank("none"));
 }
+
+#[test]
+fn responsibility_escalation_delivery_is_deduplicated_and_retry_bounded() {
+    let path = legacy_v02_db_path("responsibility-escalation-delivery");
+    init_db(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let project_id: i64 = conn
+        .query_row(
+            "SELECT project_id FROM monitored_repositories WHERE id=?",
+            params![repository_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let drift = ResponsibilityMapDrift {
+        project_id,
+        repository_id,
+        repository: "gycha0109-beep/K_beauty".into(),
+        workflow_path: ".github/workflows/test.yml".into(),
+        workflow_name: "Test Responsibility".into(),
+        drift_type: "missing_in_watchtower".into(),
+        repository_binding: "dynamic".into(),
+        watchtower_binding: None,
+        expected_track_key: None,
+        actual_track_key: None,
+        source_path: RESPONSIBILITY_MAP_PATH.into(),
+        reason: "test".into(),
+        recommended_action: "review_add_dynamic_rule".into(),
+        review_key: "review-key".into(),
+        fingerprint: "fingerprint".into(),
+        review_status: "attention".into(),
+        review_priority: "p0".into(),
+        review_age_bucket: "fresh".into(),
+        review_age_hours: 0,
+        review_event_count: 0,
+        failed_attempt_count: 0,
+        last_reviewed_at: None,
+        first_seen_at: "2026-09-25T00:00:00Z".into(),
+        sla_status: "within_sla".into(),
+        sla_target_hours: Some(24),
+        sla_remaining_hours: Some(24),
+        escalation_level: "warning".into(),
+        escalation_reason: Some("test warning".into()),
+    };
+    assert_eq!(
+        responsibility_escalation_event_type("warning"),
+        Some("warning")
+    );
+    assert_eq!(
+        responsibility_escalation_event_type("critical"),
+        Some("critical")
+    );
+    assert_eq!(responsibility_escalation_event_type("none"), None);
+
+    assert!(reserve_responsibility_escalation_delivery(
+        &conn,
+        &drift,
+        "warning",
+        "2026-09-25T00:00:00Z"
+    )
+    .unwrap());
+    finish_responsibility_escalation_delivery(
+        &conn,
+        &drift.review_key,
+        &drift.fingerprint,
+        "warning",
+        "2026-09-25T00:00:00Z",
+        Ok(()),
+    )
+    .unwrap();
+    assert!(!reserve_responsibility_escalation_delivery(
+        &conn,
+        &drift,
+        "warning",
+        "2026-09-25T00:01:00Z"
+    )
+    .unwrap());
+
+    for minute in 2..=4 {
+        assert!(reserve_responsibility_escalation_delivery(
+            &conn,
+            &drift,
+            "critical",
+            &format!("2026-09-25T00:0{minute}:00Z"),
+        )
+        .unwrap());
+        finish_responsibility_escalation_delivery(
+            &conn,
+            &drift.review_key,
+            &drift.fingerprint,
+            "critical",
+            &format!("2026-09-25T00:0{minute}:00Z"),
+            Err("delivery failed".into()),
+        )
+        .unwrap();
+    }
+    assert!(!reserve_responsibility_escalation_delivery(
+        &conn,
+        &drift,
+        "critical",
+        "2026-09-25T00:05:00Z"
+    )
+    .unwrap());
+
+    let deliveries = responsibility_escalation_deliveries(&conn, 10).unwrap();
+    assert_eq!(deliveries.len(), 2);
+    let warning = deliveries
+        .iter()
+        .find(|item| item.event_type == "warning")
+        .unwrap();
+    assert_eq!(warning.status, "emitted");
+    assert_eq!(warning.attempts, 1);
+    let critical = deliveries
+        .iter()
+        .find(|item| item.event_type == "critical")
+        .unwrap();
+    assert_eq!(critical.status, "failed");
+    assert_eq!(critical.attempts, 3);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}

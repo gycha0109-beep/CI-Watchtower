@@ -242,6 +242,26 @@ export interface ResponsibilityMapDrift {
   escalationReason: string | null;
 }
 
+export interface ResponsibilityEscalationDelivery {
+  id: number;
+  projectId: number;
+  repositoryId: number;
+  repository: string;
+  workflowName: string;
+  reviewKey: string;
+  fingerprint: string;
+  eventType: 'warning' | 'critical' | string;
+  escalationLevel: 'warning' | 'critical' | string;
+  slaStatus: string;
+  reason: string | null;
+  status: 'pending' | 'emitted' | 'failed' | string;
+  attempts: number;
+  lastError: string | null;
+  firstAttemptAt: string;
+  lastAttemptAt: string;
+  emittedAt: string | null;
+}
+
 export interface ResponsibilityResolutionPreviewInput {
   reviewKey: string;
 }
@@ -327,6 +347,7 @@ export interface Dashboard {
   producerContractRuns: ProducerContractRun[];
   responsibilityMapDrifts: ResponsibilityMapDrift[];
   responsibilityMapSources: ResponsibilityMapSourceStatus[];
+  responsibilityEscalationDeliveries: ResponsibilityEscalationDelivery[];
   projectRuns: WorkflowRunSummary[];
   unassignedRuns: WorkflowRunSummary[];
 }

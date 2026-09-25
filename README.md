@@ -240,6 +240,17 @@ Aging/Priority 위에 review SLA와 escalation 계층을 추가합니다.
 - Inbox 정렬은 CRITICAL → WARNING → 일반을 먼저 적용한 뒤 기존 Priority/Aging/실패 시도 순서를 유지합니다.
 - SLA는 자동 mutation, 자동 Track 생성, producer YAML 수정, repository map 수정, run assignment 변경을 수행하지 않습니다. 기존 fail-closed 경계를 그대로 유지합니다.
 
+### Responsibility Escalation Delivery (v0.3.27)
+
+SLA escalation을 WatchTower 내부 표시에서 데스크톱 알림 delivery까지 연결합니다.
+
+- 현재 repository responsibility source가 synced인 drift만 알림 대상으로 사용합니다. stale/error/pending source에서는 새 escalation 알림을 내보내지 않습니다.
+- WARNING과 CRITICAL을 별도 event level로 취급하며 review_key + fingerprint + event_type으로 영속 중복 방지합니다.
+- 같은 drift가 poll마다 반복되어도 이미 EMITTED된 event는 다시 보내지 않습니다. fingerprint가 바뀌면 새로운 review state이므로 새 알림이 가능합니다.
+- notification API 호출 실패는 FAILED로 기록하고 최대 3회까지 재시도합니다. 성공은 EMITTED로 기록합니다.
+- Dashboard의 Desktop Escalation Delivery에서 최근 delivery 상태, attempt 수, 오류/사유를 확인할 수 있습니다.
+- 이 계층은 관측/알림만 수행하며 Track, workflow rule, producer YAML, repository map, run assignment를 자동 변경하지 않습니다.
+
 ## Producer Contract Health
 
 Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.
