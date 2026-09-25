@@ -270,6 +270,21 @@ export interface ResponsibilityEscalationOperatorResult {
   currentDrift: ResponsibilityMapDrift | null;
 }
 
+export interface ResponsibilityEscalationOperatorAuditEntry {
+  id: number;
+  projectId: number;
+  repositoryId: number;
+  repository: string;
+  workflowName: string;
+  reviewKey: string;
+  fingerprint: string;
+  action: 'acknowledge' | 'suppress' | 'activate' | string;
+  actor: string;
+  beforeState: string;
+  afterState: string;
+  createdAt: string;
+}
+
 export interface ResponsibilityEscalationDelivery {
   id: number;
   projectId: number;
@@ -377,6 +392,7 @@ export interface Dashboard {
   responsibilityMapDrifts: ResponsibilityMapDrift[];
   responsibilityMapSources: ResponsibilityMapSourceStatus[];
   responsibilityEscalationDeliveries: ResponsibilityEscalationDelivery[];
+  responsibilityEscalationOperatorActions: ResponsibilityEscalationOperatorAuditEntry[];
   projectRuns: WorkflowRunSummary[];
   unassignedRuns: WorkflowRunSummary[];
 }
