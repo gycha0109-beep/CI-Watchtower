@@ -269,9 +269,9 @@ fn track_key_validation_is_bounded() {
 
 #[test]
 fn legacy_known_tracks_keep_stable_keys() {
-    assert_eq!(legacy_track_key("프론트 연동 4", 1), "frontend-integration");
-    assert_eq!(legacy_track_key("운영 32", 2), "ops");
-    assert_eq!(legacy_track_key("관상 연구 및 검증 2", 3), "face-research");
+    assert_eq!(legacy_compat::legacy_track_key("프론트 연동 4", 1), "frontend-integration");
+    assert_eq!(legacy_compat::legacy_track_key("운영 32", 2), "ops");
+    assert_eq!(legacy_compat::legacy_track_key("관상 연구 및 검증 2", 3), "face-research");
 }
 
 fn evidence(key: &str, signal_type: &str, score: i64) -> Evidence {
@@ -959,7 +959,7 @@ fn project_move_archives_manual_assignment_before_invalidating_it() {
     )
     .unwrap();
 
-    invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
+    legacy_compat::invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
         .unwrap();
 
     let remaining: i64 = conn
@@ -1070,9 +1070,9 @@ fn project_move_audit_is_idempotent_and_keeps_same_project_manual_assignment() {
     )
     .unwrap();
 
-    invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
+    legacy_compat::invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
         .unwrap();
-    invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
+    legacy_compat::invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
         .unwrap();
 
     let audit_count: i64 = conn
