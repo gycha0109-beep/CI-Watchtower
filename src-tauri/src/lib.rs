@@ -1059,6 +1059,7 @@ fn init_db(path: &Path) -> Result<()> {
     if legacy_project_scope {
         legacy_compat::finish_project_scope_migration(&conn)?;
     }
+    legacy_compat::refresh_existing_track_registry(&conn)?;
     legacy_compat::mark_core_decoupling(&conn)?;
     reconcile_alias_assignments(&conn)?;
     Ok(())

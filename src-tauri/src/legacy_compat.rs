@@ -4,6 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 const LEGACY_PROJECT_SCOPE_MIGRATION: &str = "legacy-project-scope-v032";
 const CORE_DECOUPLING_MIGRATION: &str = "core-decoupling-v032";
+const CURRENT_TRACK_REGISTRY_REFRESH: &str = "current-track-registry-20260926-v1";
 
 fn migration_applied(conn: &Connection, key: &str) -> Result<bool> {
     Ok(conn.query_row(
@@ -58,6 +59,137 @@ pub(super) fn finish_project_scope_migration(conn: &Connection) -> Result<()> {
 
 pub(super) fn mark_core_decoupling(conn: &Connection) -> Result<()> {
     mark_migration(conn, CORE_DECOUPLING_MIGRATION)
+}
+
+fn upsert_track(
+    conn: &Connection,
+    project_id: i64,
+    name: &str,
+    track_key: &str,
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO watch_tracks(
+           project_id,name,track_key,long_ci_minutes,active,created_at,updated_at
+         ) VALUES(?,?,?,8,1,?,?)
+         ON CONFLICT(project_id,track_key)
+         DO UPDATE SET name=excluded.name,active=1,updated_at=excluded.updated_at",
+        params![project_id, name, track_key, now, now],
+    )?;
+    Ok(())
+}
+
+fn refresh_project_tracks(
+    conn: &Connection,
+    project_key: &str,
+    tracks: &[(&str, &str)],
+    renamed_key: Option<(&str, &str)>,
+    now: &str,
+) -> Result<()> {
+    let project_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM projects WHERE project_key=? LIMIT 1",
+            params![project_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(project_id) = project_id else {
+        return Ok(());
+    };
+
+    if let Some((from_key, to_key)) = renamed_key {
+        let target_exists: bool = conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM watch_tracks WHERE project_id=? AND track_key=?
+             )",
+            params![project_id, to_key],
+            |row| Ok(row.get::<_, i64>(0)? != 0),
+        )?;
+        if !target_exists {
+            conn.execute(
+                "UPDATE watch_tracks
+                 SET track_key=?,updated_at=?
+                 WHERE project_id=? AND track_key=?",
+                params![to_key, now, project_id, from_key],
+            )?;
+        }
+    }
+
+    for (name, track_key) in tracks {
+        upsert_track(conn, project_id, name, track_key, now)?;
+    }
+
+    let placeholders = std::iter::repeat("?")
+        .take(tracks.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "UPDATE watch_tracks
+         SET active=0,updated_at=?
+         WHERE project_id=? AND track_key NOT IN ({placeholders})"
+    );
+    let mut values: Vec<rusqlite::types::Value> = vec![
+        rusqlite::types::Value::Text(now.to_string()),
+        project_id.into(),
+    ];
+    values.extend(
+        tracks
+            .iter()
+            .map(|(_, track_key)| rusqlite::types::Value::Text((*track_key).to_string())),
+    );
+    conn.execute(&sql, rusqlite::params_from_iter(values))?;
+    Ok(())
+}
+
+pub(super) fn refresh_existing_track_registry(conn: &Connection) -> Result<()> {
+    if migration_applied(conn, CURRENT_TRACK_REGISTRY_REFRESH)? {
+        return Ok(());
+    }
+
+    // This is an upgrade-only data migration. Fresh installs and v0.2 legacy imports
+    // remain generic because they have not yet crossed the core-decoupling boundary.
+    if migration_applied(conn, CORE_DECOUPLING_MIGRATION)? {
+        let now = Utc::now().to_rfc3339();
+        let tx = conn.unchecked_transaction()?;
+
+        refresh_project_tracks(
+            &tx,
+            "myeongha",
+            &[
+                ("캐릭터 설계", "character-design"),
+                ("운영", "ops"),
+                ("챗봇 & 메모리 관계 엔진", "character-memory"),
+                ("관상 엔진", "face-engine"),
+                ("관상 브릿지", "face-bridge"),
+                ("전통 관상 연구", "face-research"),
+                ("사주 엔진", "saju"),
+                ("사주 브릿지", "saju-bridge"),
+                ("전통 사주 연구", "saju-research"),
+                ("프론트", "frontend-integration"),
+            ],
+            Some(("face-reading", "face-engine")),
+            &now,
+        )?;
+
+        refresh_project_tracks(
+            &tx,
+            "visualy",
+            &[
+                ("Face Lab", "face-research"),
+                ("파이프라인 신뢰도", "trust"),
+                ("데이터 정렬 AI", "taxonomy-ai"),
+                ("CI 책임 분리", "ops"),
+            ],
+            None,
+            &now,
+        )?;
+
+        mark_migration(&tx, CURRENT_TRACK_REGISTRY_REFRESH)?;
+        tx.commit()?;
+        return Ok(());
+    }
+
+    mark_migration(conn, CURRENT_TRACK_REGISTRY_REFRESH)
 }
 
 pub(super) fn legacy_track_key(name: &str, id: i64) -> String {
