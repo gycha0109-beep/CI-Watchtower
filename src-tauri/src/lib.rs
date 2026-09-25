@@ -162,6 +162,23 @@ struct ResponsibilityEscalationDelivery {
     emitted_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponsibilityEscalationOperatorAuditEntry {
+    id: i64,
+    project_id: i64,
+    repository_id: i64,
+    repository: String,
+    workflow_name: String,
+    review_key: String,
+    fingerprint: String,
+    action: String,
+    actor: String,
+    before_state: String,
+    after_state: String,
+    created_at: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ResponsibilityEscalationOperatorInput {
@@ -461,6 +478,7 @@ struct Dashboard {
     responsibility_map_drifts: Vec<ResponsibilityMapDrift>,
     responsibility_map_sources: Vec<ResponsibilityMapSourceStatus>,
     responsibility_escalation_deliveries: Vec<ResponsibilityEscalationDelivery>,
+    responsibility_escalation_operator_actions: Vec<ResponsibilityEscalationOperatorAuditEntry>,
     project_runs: Vec<WorkflowRunSummary>,
     unassigned_runs: Vec<WorkflowRunSummary>,
 }
@@ -3445,6 +3463,8 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
     let responsibility_map_drifts = responsibility_map_drifts(&conn)?;
     let responsibility_map_sources = responsibility_map_source_statuses(&conn)?;
     let responsibility_escalation_deliveries = responsibility_escalation_deliveries(&conn, 50)?;
+    let responsibility_escalation_operator_actions =
+        responsibility_escalation_operator_actions(&conn, 50)?;
     let mut project_runs = Vec::new();
     let mut unassigned_runs = Vec::new();
     for repository in &repositories {
@@ -3496,6 +3516,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         responsibility_map_drifts,
         responsibility_map_sources,
         responsibility_escalation_deliveries,
+        responsibility_escalation_operator_actions,
         project_runs,
         unassigned_runs,
     })
@@ -4332,6 +4353,38 @@ fn responsibility_escalation_deliveries(
             first_attempt_at: row.get(14)?,
             last_attempt_at: row.get(15)?,
             emitted_at: row.get(16)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn responsibility_escalation_operator_actions(
+    conn: &Connection,
+    limit: i64,
+) -> Result<Vec<ResponsibilityEscalationOperatorAuditEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id,a.project_id,a.repository_id,mr.repo,a.workflow_name,
+                a.review_key,a.fingerprint,a.action,a.actor,
+                a.before_state,a.after_state,a.created_at
+         FROM responsibility_escalation_operator_audit a
+         JOIN monitored_repositories mr ON mr.id=a.repository_id
+         ORDER BY a.id DESC
+         LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![limit.clamp(1, 500)], |row| {
+        Ok(ResponsibilityEscalationOperatorAuditEntry {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            repository_id: row.get(2)?,
+            repository: row.get(3)?,
+            workflow_name: row.get(4)?,
+            review_key: row.get(5)?,
+            fingerprint: row.get(6)?,
+            action: row.get(7)?,
+            actor: row.get(8)?,
+            before_state: row.get(9)?,
+            after_state: row.get(10)?,
+            created_at: row.get(11)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
