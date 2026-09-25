@@ -138,6 +138,7 @@ struct ResponsibilityMapDrift {
     operator_state: String,
     operator_actor: Option<String>,
     operator_updated_at: Option<String>,
+    operator_suppressed_until: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -176,6 +177,8 @@ struct ResponsibilityEscalationOperatorAuditEntry {
     actor: String,
     before_state: String,
     after_state: String,
+    before_suppressed_until: Option<String>,
+    after_suppressed_until: Option<String>,
     created_at: String,
 }
 
@@ -184,6 +187,7 @@ struct ResponsibilityEscalationOperatorAuditEntry {
 struct ResponsibilityEscalationOperatorInput {
     review_key: String,
     fingerprint: String,
+    suppress_hours: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -947,6 +951,7 @@ fn init_db(path: &Path) -> Result<()> {
           state TEXT NOT NULL CHECK(state IN ('active','acknowledged','suppressed')),
           actor TEXT,
           updated_at TEXT NOT NULL,
+          suppressed_until TEXT,
           PRIMARY KEY(review_key, fingerprint)
         );
 
@@ -964,6 +969,8 @@ fn init_db(path: &Path) -> Result<()> {
           actor TEXT NOT NULL,
           before_state TEXT NOT NULL,
           after_state TEXT NOT NULL,
+          before_suppressed_until TEXT,
+          after_suppressed_until TEXT,
           created_at TEXT NOT NULL
         );
 
@@ -982,6 +989,24 @@ fn init_db(path: &Path) -> Result<()> {
     )?;
     ensure_column(&conn, "watch_tracks", "project_id", "INTEGER")?;
     ensure_column(&conn, "monitored_repositories", "project_id", "INTEGER")?;
+    ensure_column(
+        &conn,
+        "responsibility_escalation_operator_state",
+        "suppressed_until",
+        "TEXT",
+    )?;
+    ensure_column(
+        &conn,
+        "responsibility_escalation_operator_audit",
+        "before_suppressed_until",
+        "TEXT",
+    )?;
+    ensure_column(
+        &conn,
+        "responsibility_escalation_operator_audit",
+        "after_suppressed_until",
+        "TEXT",
+    )?;
     ensure_column(&conn, "workflow_runs", "last_resolution_attempt_at", "TEXT")?;
     ensure_column(
         &conn,
@@ -2405,11 +2430,11 @@ fn responsibility_escalation_operator_state(
     conn: &Connection,
     drift: &ResponsibilityMapDrift,
     now: &str,
-) -> Result<(String, Option<String>, Option<String>)> {
+) -> Result<(String, Option<String>, Option<String>, Option<String>)> {
     conn.execute(
         "INSERT OR IGNORE INTO responsibility_escalation_operator_state(
-           review_key,fingerprint,project_id,repository_id,workflow_name,state,actor,updated_at
-         ) VALUES(?,?,?,?,?,'active',NULL,?)",
+           review_key,fingerprint,project_id,repository_id,workflow_name,state,actor,updated_at,suppressed_until
+         ) VALUES(?,?,?,?,?,'active',NULL,?,NULL)",
         params![
             drift.review_key,
             drift.fingerprint,
@@ -2419,15 +2444,66 @@ fn responsibility_escalation_operator_state(
             now,
         ],
     )?;
-    let (state, actor, updated_at): (String, Option<String>, String) = conn.query_row(
-        "SELECT state,actor,updated_at
+    let (mut state, mut actor, mut updated_at, mut suppressed_until): (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+    ) = conn.query_row(
+        "SELECT state,actor,updated_at,suppressed_until
          FROM responsibility_escalation_operator_state
          WHERE review_key=? AND fingerprint=?",
         params![drift.review_key, drift.fingerprint],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
+    let now_value = DateTime::parse_from_rfc3339(now)
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    let expired = state == "suppressed"
+        && suppressed_until
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc) <= now_value)
+            .unwrap_or(false);
+    if expired {
+        let previous_until = suppressed_until.clone();
+        conn.execute(
+            "UPDATE responsibility_escalation_operator_state
+             SET state='active',actor='system-expiry',updated_at=?,suppressed_until=NULL,
+                 project_id=?,repository_id=?,workflow_name=?
+             WHERE review_key=? AND fingerprint=?",
+            params![
+                now,
+                drift.project_id,
+                drift.repository_id,
+                drift.workflow_name,
+                drift.review_key,
+                drift.fingerprint,
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO responsibility_escalation_operator_audit(
+               review_key,fingerprint,project_id,repository_id,workflow_name,
+               action,actor,before_state,after_state,
+               before_suppressed_until,after_suppressed_until,created_at
+             ) VALUES(?,?,?,?,?,'activate','system-expiry','suppressed','active',?,NULL,?)",
+            params![
+                drift.review_key,
+                drift.fingerprint,
+                drift.project_id,
+                drift.repository_id,
+                drift.workflow_name,
+                previous_until,
+                now,
+            ],
+        )?;
+        state = "active".into();
+        actor = Some("system-expiry".into());
+        updated_at = now.into();
+        suppressed_until = None;
+    }
     let operator_updated_at = actor.as_ref().map(|_| updated_at);
-    Ok((state, actor, operator_updated_at))
+    Ok((state, actor, operator_updated_at, suppressed_until))
 }
 
 fn populate_responsibility_review_operations(
@@ -2499,11 +2575,16 @@ fn populate_responsibility_review_operations(
     drift.sla_remaining_hours = sla_remaining_hours;
     drift.escalation_level = escalation_level;
     drift.escalation_reason = escalation_reason;
-    let (operator_state, operator_actor, operator_updated_at) =
-        responsibility_escalation_operator_state(conn, drift, &now_text)?;
+    let (
+        operator_state,
+        operator_actor,
+        operator_updated_at,
+        operator_suppressed_until,
+    ) = responsibility_escalation_operator_state(conn, drift, &now_text)?;
     drift.operator_state = operator_state;
     drift.operator_actor = operator_actor;
     drift.operator_updated_at = operator_updated_at;
+    drift.operator_suppressed_until = operator_suppressed_until;
     Ok(())
 }
 
@@ -2745,6 +2826,7 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                 operator_state: "active".into(),
                 operator_actor: None,
                 operator_updated_at: None,
+                operator_suppressed_until: None,
             });
         }
     }
@@ -2798,6 +2880,7 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                 operator_state: "active".into(),
                 operator_actor: None,
                 operator_updated_at: None,
+                operator_suppressed_until: None,
                 });
             }
         }
@@ -2841,6 +2924,7 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                 operator_state: "active".into(),
                 operator_actor: None,
                 operator_updated_at: None,
+                operator_suppressed_until: None,
                 });
             }
         }
@@ -4365,7 +4449,8 @@ fn responsibility_escalation_operator_actions(
     let mut stmt = conn.prepare(
         "SELECT a.id,a.project_id,a.repository_id,mr.repo,a.workflow_name,
                 a.review_key,a.fingerprint,a.action,a.actor,
-                a.before_state,a.after_state,a.created_at
+                a.before_state,a.after_state,
+                a.before_suppressed_until,a.after_suppressed_until,a.created_at
          FROM responsibility_escalation_operator_audit a
          JOIN monitored_repositories mr ON mr.id=a.repository_id
          ORDER BY a.id DESC
@@ -4384,7 +4469,9 @@ fn responsibility_escalation_operator_actions(
             actor: row.get(8)?,
             before_state: row.get(9)?,
             after_state: row.get(10)?,
-            created_at: row.get(11)?,
+            before_suppressed_until: row.get(11)?,
+            after_suppressed_until: row.get(12)?,
+            created_at: row.get(13)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -4748,6 +4835,22 @@ fn set_responsibility_escalation_operator_state_with_conn(
     target_state: &str,
     action: &str,
 ) -> Result<ResponsibilityEscalationOperatorResult> {
+    set_responsibility_escalation_operator_state_with_conn_until(
+        conn,
+        input,
+        target_state,
+        action,
+        None,
+    )
+}
+
+fn set_responsibility_escalation_operator_state_with_conn_until(
+    conn: &Connection,
+    input: &ResponsibilityEscalationOperatorInput,
+    target_state: &str,
+    action: &str,
+    suppressed_until: Option<&str>,
+) -> Result<ResponsibilityEscalationOperatorResult> {
     let drift = current_responsibility_drift(conn, &input.review_key)?;
     if drift.fingerprint != input.fingerprint {
         return Ok(ResponsibilityEscalationOperatorResult {
@@ -4766,7 +4869,16 @@ fn set_responsibility_escalation_operator_state_with_conn(
         });
     }
     let before_state = drift.operator_state.clone();
-    if before_state == target_state {
+    let before_suppressed_until = drift.operator_suppressed_until.clone();
+    let desired_suppressed_until = if target_state == "suppressed" {
+        suppressed_until.map(str::to_owned)
+    } else {
+        None
+    };
+    if before_state == target_state
+        && (target_state != "suppressed"
+            || before_suppressed_until == desired_suppressed_until)
+    {
         return Ok(ResponsibilityEscalationOperatorResult {
             status: target_state.into(),
             operator_state: target_state.into(),
@@ -4779,12 +4891,14 @@ fn set_responsibility_escalation_operator_state_with_conn(
     let tx = conn.unchecked_transaction()?;
     let changed = tx.execute(
         "UPDATE responsibility_escalation_operator_state
-         SET state=?,actor=?,updated_at=?,project_id=?,repository_id=?,workflow_name=?
+         SET state=?,actor=?,updated_at=?,suppressed_until=?,
+             project_id=?,repository_id=?,workflow_name=?
          WHERE review_key=? AND fingerprint=?",
         params![
             target_state,
             actor,
             now,
+            desired_suppressed_until,
             drift.project_id,
             drift.repository_id,
             drift.workflow_name,
@@ -4798,8 +4912,9 @@ fn set_responsibility_escalation_operator_state_with_conn(
     tx.execute(
         "INSERT INTO responsibility_escalation_operator_audit(
            review_key,fingerprint,project_id,repository_id,workflow_name,
-           action,actor,before_state,after_state,created_at
-         ) VALUES(?,?,?,?,?,?,?,?,?,?)",
+           action,actor,before_state,after_state,
+           before_suppressed_until,after_suppressed_until,created_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         params![
             drift.review_key,
             drift.fingerprint,
@@ -4810,6 +4925,8 @@ fn set_responsibility_escalation_operator_state_with_conn(
             actor,
             before_state,
             target_state,
+            before_suppressed_until,
+            desired_suppressed_until,
             now,
         ],
     )?;
@@ -4819,6 +4936,7 @@ fn set_responsibility_escalation_operator_state_with_conn(
     current.operator_state = target_state.into();
     current.operator_actor = Some(actor.into());
     current.operator_updated_at = Some(now);
+    current.operator_suppressed_until = desired_suppressed_until;
     Ok(ResponsibilityEscalationOperatorResult {
         status: target_state.into(),
         operator_state: target_state.into(),
@@ -4851,11 +4969,23 @@ fn suppress_responsibility_escalation(
 ) -> std::result::Result<ResponsibilityEscalationOperatorResult, String> {
     let result = (|| -> Result<ResponsibilityEscalationOperatorResult> {
         let conn = db(&state)?;
-        set_responsibility_escalation_operator_state_with_conn(
+        let suppressed_until = match input.suppress_hours {
+            Some(hours) if (1..=720).contains(&hours) => {
+                Some((Utc::now() + chrono::Duration::hours(hours)).to_rfc3339())
+            }
+            Some(_) => {
+                return Err(anyhow!(
+                    "Escalation snooze는 1~720시간 사이여야 합니다."
+                ))
+            }
+            None => None,
+        };
+        set_responsibility_escalation_operator_state_with_conn_until(
             &conn,
             &input,
             "suppressed",
             "suppress",
+            suppressed_until.as_deref(),
         )
     })();
     result.map_err(|e| e.to_string())

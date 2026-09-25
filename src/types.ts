@@ -256,11 +256,13 @@ export interface ResponsibilityMapDrift {
   operatorState: 'active' | 'acknowledged' | 'suppressed' | string;
   operatorActor: string | null;
   operatorUpdatedAt: string | null;
+  operatorSuppressedUntil: string | null;
 }
 
 export interface ResponsibilityEscalationOperatorInput {
   reviewKey: string;
   fingerprint: string;
+  suppressHours?: number | null;
 }
 
 export interface ResponsibilityEscalationOperatorResult {
@@ -282,6 +284,8 @@ export interface ResponsibilityEscalationOperatorAuditEntry {
   actor: string;
   beforeState: string;
   afterState: string;
+  beforeSuppressedUntil: string | null;
+  afterSuppressedUntil: string | null;
   createdAt: string;
 }
 

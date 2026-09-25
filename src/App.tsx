@@ -552,13 +552,18 @@ function App() {
   const updateEscalationOperatorState = async (
     item: ResponsibilityMapDrift,
     action: 'acknowledge' | 'suppress' | 'activate',
+    suppressHours?: number,
   ) => {
     const loadingKey = item.reviewKey + ':' + item.fingerprint;
     try {
       setError(null);
       setNotice(null);
       setEscalationOperatorLoadingKey(loadingKey);
-      const input = { reviewKey: item.reviewKey, fingerprint: item.fingerprint };
+      const input = {
+        reviewKey: item.reviewKey,
+        fingerprint: item.fingerprint,
+        suppressHours: action === 'suppress' ? suppressHours : undefined,
+      };
       const result = action === 'acknowledge'
         ? await api.acknowledgeResponsibilityEscalation(input)
         : action === 'suppress'
@@ -572,7 +577,9 @@ function App() {
             : result.operatorState === 'acknowledged'
               ? '현재 escalation을 확인 처리했습니다. Responsibility Drift는 그대로 유지됩니다.'
               : result.operatorState === 'suppressed'
-                ? '현재 fingerprint의 escalation surface와 desktop delivery를 숨김 처리했습니다. Drift는 그대로 유지됩니다.'
+                ? suppressHours == null
+                  ? '현재 fingerprint의 escalation을 계속 숨김 처리했습니다. Drift는 그대로 유지됩니다.'
+                  : `현재 fingerprint의 escalation을 ${suppressHours}시간 snooze했습니다. 만료 후 ACTIVE로 자동 복귀합니다.`
                 : '현재 fingerprint의 escalation을 다시 ACTIVE 상태로 열었습니다.',
       );
       await refresh(false);
@@ -1004,7 +1011,7 @@ function App() {
               <div className="responsibility-escalation-head">
                 <div>
                   <b>SLA Escalation</b>
-                  <span>ACTIVE/ACKNOWLEDGED 항목만 surface합니다. SUPPRESSED는 Review Inbox에서 추적됩니다.</span>
+                  <span>ACTIVE/ACKNOWLEDGED 항목만 surface합니다. Timed SUPPRESSED는 만료되면 자동 ACTIVE로 복귀합니다.</span>
                 </div>
                 <small>
                   critical {responsibilityEscalationCounts.critical} · warning {responsibilityEscalationCounts.warning}
@@ -1046,7 +1053,10 @@ function App() {
                             ) : (
                               <button type="button" className="ghost tiny" disabled={operatorLoading} onClick={() => void updateEscalationOperatorState(item, 'activate')}>다시 활성</button>
                             )}
-                            <button type="button" className="ghost tiny" disabled={operatorLoading} onClick={() => void updateEscalationOperatorState(item, 'suppress')}>숨김</button>
+                            <button type="button" className="ghost tiny" disabled={operatorLoading} onClick={() => void updateEscalationOperatorState(item, 'suppress', 1)}>1h</button>
+                            <button type="button" className="ghost tiny" disabled={operatorLoading} onClick={() => void updateEscalationOperatorState(item, 'suppress', 4)}>4h</button>
+                            <button type="button" className="ghost tiny" disabled={operatorLoading} onClick={() => void updateEscalationOperatorState(item, 'suppress', 24)}>24h</button>
+                            <button type="button" className="ghost tiny" disabled={operatorLoading} onClick={() => void updateEscalationOperatorState(item, 'suppress')}>계속 숨김</button>
                           </span>
                         </span>
                       </div>
@@ -1091,7 +1101,14 @@ function App() {
             <b>{item.workflowName}</b>
             <small>{item.repository} · {item.action} · {item.beforeState} → {item.afterState}</small>
           </span>
-          <small>{item.actor}</small>
+          <small>
+            {item.actor}
+            {item.afterSuppressedUntil
+              ? ' · until ' + formatAuditTime(item.afterSuppressedUntil)
+              : item.beforeSuppressedUntil && item.afterState === 'active'
+                ? ' · cleared ' + formatAuditTime(item.beforeSuppressedUntil)
+                : ''}
+          </small>
           <small>{formatAuditTime(item.createdAt)}</small>
         </div>
       ))}
@@ -1175,6 +1192,13 @@ function App() {
                     <span>SLA state <b>{item.slaStatus.toUpperCase()}</b></span>
                     <span>Operator <b>{item.operatorState.toUpperCase()}</b></span>
                     <span>Operator action <b>{item.operatorUpdatedAt ? formatAuditTime(item.operatorUpdatedAt) : '없음'}</b></span>
+                    <span>Suppress until <b>{
+                      item.operatorState !== 'suppressed'
+                        ? '—'
+                        : item.operatorSuppressedUntil
+                          ? formatAuditTime(item.operatorSuppressedUntil)
+                          : 'manual'
+                    }</b></span>
                   </div>
                   {(resolutionHistoryByReviewKey.get(item.reviewKey)?.length ?? 0) > 0 && (
                     <button
@@ -1207,13 +1231,16 @@ function App() {
                           >
                             Escalation 확인
                           </button>
+                          <button type="button" className="ghost tiny" disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint} onClick={() => void updateEscalationOperatorState(item, 'suppress', 1)}>Snooze 1h</button>
+                          <button type="button" className="ghost tiny" disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint} onClick={() => void updateEscalationOperatorState(item, 'suppress', 4)}>4h</button>
+                          <button type="button" className="ghost tiny" disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint} onClick={() => void updateEscalationOperatorState(item, 'suppress', 24)}>24h</button>
                           <button
                             type="button"
                             className="ghost tiny"
                             disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint}
                             onClick={() => void updateEscalationOperatorState(item, 'suppress')}
                           >
-                            Escalation 숨김
+                            계속 숨김
                           </button>
                         </>
                       )}
@@ -1227,13 +1254,16 @@ function App() {
                           >
                             다시 활성
                           </button>
+                          <button type="button" className="ghost tiny" disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint} onClick={() => void updateEscalationOperatorState(item, 'suppress', 1)}>Snooze 1h</button>
+                          <button type="button" className="ghost tiny" disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint} onClick={() => void updateEscalationOperatorState(item, 'suppress', 4)}>4h</button>
+                          <button type="button" className="ghost tiny" disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint} onClick={() => void updateEscalationOperatorState(item, 'suppress', 24)}>24h</button>
                           <button
                             type="button"
                             className="ghost tiny"
                             disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint}
                             onClick={() => void updateEscalationOperatorState(item, 'suppress')}
                           >
-                            Escalation 숨김
+                            계속 숨김
                           </button>
                         </>
                       )}
