@@ -499,14 +499,14 @@ jobs:
           if app.count(panel_anchor) != 1:
               raise SystemExit(f"delivery history panel: expected 1 anchor, got {app.count(panel_anchor)}")
           history = """{responsibilityEscalationDeliveriesInScope.length > 0 && (
-  <div className="responsibility-delivery-history">
-    <div className="responsibility-delivery-history-head">
-      <b>Desktop Escalation Delivery</b>
-      <small>fingerprint + event level 기준 중복 방지 · 실패 시 최대 3회 시도</small>
-    </div>
-    <div className="responsibility-delivery-history-list">
-      {responsibilityEscalationDeliveriesInScope.slice(0, 8).map(item => (
-        <div className="responsibility-delivery-history-row" key={'delivery:' + item.id}>
+            <div className="responsibility-delivery-history">
+              <div className="responsibility-delivery-history-head">
+                <b>Desktop Escalation Delivery</b>
+                <small>fingerprint + event level 기준 중복 방지 · 실패 시 최대 3회 시도</small>
+              </div>
+              <div className="responsibility-delivery-history-list">
+                {responsibilityEscalationDeliveriesInScope.slice(0, 8).map(item => (
+                  <div className="responsibility-delivery-history-row" key={'delivery:' + item.id}>
           <span className={'responsibility-delivery-state ' + item.status}>{item.status.toUpperCase()}</span>
           <span>
             <b>{item.workflowName}</b>
@@ -514,11 +514,11 @@ jobs:
           </span>
           <small>{formatAuditTime(item.emittedAt ?? item.lastAttemptAt)}</small>
           <small>{item.lastError ?? item.reason ?? 'desktop notification accepted'}</small>
-        </div>
-      ))}
-    </div>
-  </div>
-)}"""
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}"""
           app = app.replace(
               panel_anchor,
               "          )}" + chr(10) + history + chr(10) + "          {responsibilityMapSourceWarnings.length > 0 ? (",
