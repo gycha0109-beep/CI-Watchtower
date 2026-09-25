@@ -253,6 +253,21 @@ export interface ResponsibilityMapDrift {
   slaRemainingHours: number | null;
   escalationLevel: 'critical' | 'warning' | 'none' | string;
   escalationReason: string | null;
+  operatorState: 'active' | 'acknowledged' | 'suppressed' | string;
+  operatorActor: string | null;
+  operatorUpdatedAt: string | null;
+}
+
+export interface ResponsibilityEscalationOperatorInput {
+  reviewKey: string;
+  fingerprint: string;
+}
+
+export interface ResponsibilityEscalationOperatorResult {
+  status: 'active' | 'acknowledged' | 'suppressed' | 'stale_rejected' | 'not_escalated' | string;
+  operatorState: 'active' | 'acknowledged' | 'suppressed' | string;
+  auditId: number | null;
+  currentDrift: ResponsibilityMapDrift | null;
 }
 
 export interface ResponsibilityEscalationDelivery {
