@@ -8,6 +8,7 @@ import type {
   ResponsibilityMapDrift,
   ResponsibilityResolutionAuditEntry,
   ResponsibilityResolutionPreview,
+  ResponsibilityReviewPolicy,
   RunAttributionDetail,
   Settings,
   TrackInput,
@@ -508,6 +509,12 @@ function App() {
   const selectedProjectId = typeof selectedProject === 'number'
     ? selectedProject
     : dashboard?.projects[0]?.id ?? 0;
+  const selectedResponsibilityPolicy = useMemo(
+    () => typeof selectedProject === 'number'
+      ? (dashboard?.responsibilityReviewPolicies ?? []).find(item => item.projectId === selectedProject) ?? null
+      : null,
+    [dashboard, selectedProject],
+  );
 
   const selectedProjectRepos = useMemo(
     () => (dashboard?.repositories ?? []).filter(repo => selectedProject === 'all' || repo.projectId === selectedProject),
@@ -734,6 +741,17 @@ function App() {
     if (!dashboard) return;
     const next = { ...dashboard.settings, ...patch };
     await act(() => api.saveSettings(next));
+  };
+
+  const updateResponsibilityPolicy = async (
+    policy: ResponsibilityReviewPolicy,
+    patch: Partial<ResponsibilityReviewPolicy>,
+  ) => {
+    const next = { ...policy, ...patch };
+    await act(
+      () => api.saveResponsibilityReviewPolicy(next),
+      'Responsibility Review SLA 정책을 저장했습니다.',
+    );
   };
 
   const selectProject = (project: ScopeFilter) => {
@@ -1465,6 +1483,25 @@ function App() {
             <label>활성 Polling(초)<input type="number" min="10" value={dashboard.settings.activePollSeconds} onBlur={e => void updateSettings({ activePollSeconds: Number(e.target.value) })} onChange={e => setDashboard({ ...dashboard, settings: { ...dashboard.settings, activePollSeconds: Number(e.target.value) } })} /></label>
             <label>유휴 Polling(초)<input type="number" min="30" value={dashboard.settings.idlePollSeconds} onBlur={e => void updateSettings({ idlePollSeconds: Number(e.target.value) })} onChange={e => setDashboard({ ...dashboard, settings: { ...dashboard.settings, idlePollSeconds: Number(e.target.value) } })} /></label>
           </div>}
+          <hr />
+          <h2>Responsibility Review SLA</h2>
+          {selectedResponsibilityPolicy ? (
+            <div className="stack-form responsibility-policy-editor" key={'policy:' + selectedResponsibilityPolicy.projectId + ':' + (selectedResponsibilityPolicy.updatedAt ?? 'default')}>
+              <small className="muted-copy">선택 Project에만 적용됩니다. 미설정 Project는 v0.3.27 기본값을 그대로 사용합니다.</small>
+              <div className="responsibility-policy-grid">
+                <label>P0 target(h)<input type="number" min="1" max="720" defaultValue={selectedResponsibilityPolicy.p0TargetHours} onBlur={e => void updateResponsibilityPolicy(selectedResponsibilityPolicy, { p0TargetHours: Number(e.target.value) })} /></label>
+                <label>P0 due-soon(h)<input type="number" min="1" max="720" defaultValue={selectedResponsibilityPolicy.p0DueSoonHours} onBlur={e => void updateResponsibilityPolicy(selectedResponsibilityPolicy, { p0DueSoonHours: Number(e.target.value) })} /></label>
+                <label>P1 target(h)<input type="number" min="1" max="720" defaultValue={selectedResponsibilityPolicy.p1TargetHours} onBlur={e => void updateResponsibilityPolicy(selectedResponsibilityPolicy, { p1TargetHours: Number(e.target.value) })} /></label>
+                <label>P1 due-soon(h)<input type="number" min="1" max="720" defaultValue={selectedResponsibilityPolicy.p1DueSoonHours} onBlur={e => void updateResponsibilityPolicy(selectedResponsibilityPolicy, { p1DueSoonHours: Number(e.target.value) })} /></label>
+                <label>P2 target(h)<input type="number" min="1" max="720" defaultValue={selectedResponsibilityPolicy.p2TargetHours} onBlur={e => void updateResponsibilityPolicy(selectedResponsibilityPolicy, { p2TargetHours: Number(e.target.value) })} /></label>
+                <label>P2 due-soon(h)<input type="number" min="1" max="720" defaultValue={selectedResponsibilityPolicy.p2DueSoonHours} onBlur={e => void updateResponsibilityPolicy(selectedResponsibilityPolicy, { p2DueSoonHours: Number(e.target.value) })} /></label>
+              </div>
+              <label className="responsibility-policy-toggle"><input type="checkbox" defaultChecked={selectedResponsibilityPolicy.notifyWarning} onChange={e => void updateResponsibilityPolicy(selectedResponsibilityPolicy, { notifyWarning: e.target.checked })} /> WARNING desktop 알림</label>
+              <label className="responsibility-policy-toggle"><input type="checkbox" defaultChecked={selectedResponsibilityPolicy.notifyCritical} onChange={e => void updateResponsibilityPolicy(selectedResponsibilityPolicy, { notifyCritical: e.target.checked })} /> CRITICAL desktop 알림</label>
+            </div>
+          ) : (
+            <small className="muted-copy">Project를 하나 선택하면 해당 Project의 SLA/알림 정책을 편집할 수 있습니다.</small>
+          )}
         </section>
 
         <section className="tracks-column">

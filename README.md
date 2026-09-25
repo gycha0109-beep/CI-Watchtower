@@ -251,6 +251,17 @@ SLA escalation을 WatchTower 내부 표시에서 데스크톱 알림 delivery까
 - Dashboard의 Desktop Escalation Delivery에서 최근 delivery 상태, attempt 수, 오류/사유를 확인할 수 있습니다.
 - 이 계층은 관측/알림만 수행하며 Track, workflow rule, producer YAML, repository map, run assignment를 자동 변경하지 않습니다.
 
+### Project-scoped Responsibility Review Policy (v0.3.28)
+
+Responsibility Review SLA와 desktop escalation delivery 정책을 Project 단위로 분리합니다.
+
+- 기본값은 v0.3.27과 동일한 P0 24h, P1 96h, P2 72h 및 due-soon 12h/24h/24h입니다.
+- Project별로 P0/P1/P2 target과 due-soon window를 저장할 수 있으며 다른 Project에는 전파되지 않습니다.
+- Open drift의 P1 승격 시점은 해당 Project의 P2 target을 사용합니다. P1 target은 P2 target보다 커야 합니다.
+- WARNING/CRITICAL desktop delivery를 Project별로 각각 켜고 끌 수 있습니다.
+- 정책이 저장되지 않은 Project는 default policy를 read-time fallback으로 사용하므로 기존 설치/DB migration에서 동작이 바뀌지 않습니다.
+- 정책 변경은 SLA 계산과 알림 delivery에만 영향을 주며 Track/Rule/producer/map/run assignment를 변경하지 않습니다.
+
 ## Producer Contract Health
 
 Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.

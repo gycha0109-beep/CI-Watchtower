@@ -179,6 +179,19 @@ export interface Settings {
   autoArchiveCompleted: boolean;
 }
 
+export interface ResponsibilityReviewPolicy {
+  projectId: number;
+  p0TargetHours: number;
+  p1TargetHours: number;
+  p2TargetHours: number;
+  p0DueSoonHours: number;
+  p1DueSoonHours: number;
+  p2DueSoonHours: number;
+  notifyWarning: boolean;
+  notifyCritical: boolean;
+  updatedAt: string | null;
+}
+
 export interface RepositoryScopeStats {
   repositoryId: number;
   projectId: number;
@@ -338,6 +351,7 @@ export interface Dashboard {
   tokenConfigured: boolean;
   settings: Settings;
   projects: Project[];
+  responsibilityReviewPolicies: ResponsibilityReviewPolicy[];
   repositories: MonitoredRepository[];
   tracks: DashboardTrack[];
   projectWorkflowRules: ProjectWorkflowRule[];
