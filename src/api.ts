@@ -7,6 +7,8 @@ import type {
   ProjectWorkflowRuleInput,
   RepositoryInput,
   ResolveResponsibilityDriftInput,
+  ResponsibilityEscalationOperatorInput,
+  ResponsibilityEscalationOperatorResult,
   ResponsibilityResolutionAuditEntry,
   ResponsibilityResolutionPreview,
   ResponsibilityResolutionPreviewInput,
@@ -19,6 +21,12 @@ import type {
 
 export const api = {
   getDashboard: () => invoke<Dashboard>('get_dashboard'),
+  acknowledgeResponsibilityEscalation: (input: ResponsibilityEscalationOperatorInput) =>
+    invoke<ResponsibilityEscalationOperatorResult>('acknowledge_responsibility_escalation', { input }),
+  suppressResponsibilityEscalation: (input: ResponsibilityEscalationOperatorInput) =>
+    invoke<ResponsibilityEscalationOperatorResult>('suppress_responsibility_escalation', { input }),
+  activateResponsibilityEscalation: (input: ResponsibilityEscalationOperatorInput) =>
+    invoke<ResponsibilityEscalationOperatorResult>('activate_responsibility_escalation', { input }),
   getResponsibilityResolutionPreview: (input: ResponsibilityResolutionPreviewInput) =>
     invoke<ResponsibilityResolutionPreview>('get_responsibility_resolution_preview', { input }),
   resolveResponsibilityDrift: (input: ResolveResponsibilityDriftInput) =>
