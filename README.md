@@ -286,6 +286,18 @@ SLA escalation의 delivery transport와 운영자 처리 상태를 분리합니�
 - 자동 ACTIVE 복귀는 SLA Escalation surface를 다시 노출하지만 기존 `EMITTED / FAILED` desktop delivery 이력과 dedupe key를 리셋하지 않습니다. 즉 이미 전달된 동일 fingerprint/event 알림을 snooze 만료만으로 반복 발송하지 않습니다.
 - timed suppression 역시 Responsibility Drift 자체나 Track/Rule/producer/map/run assignment/resolution 결과를 변경하지 않습니다.
 
+### Scope Consolidation (v0.3.31)
+
+v0.3.30까지 누적된 Responsibility 운영 기능을 삭제하지 않고 UI에서 역할별 작업면으로 분리합니다.
+
+- **Dashboard**: Running / Queued / Project-wide / Track별 Run과 queue 상태를 중심으로 일상 CI 관측만 표시합니다.
+- **Issues**: Producer Contract drift, Responsibility Map drift, SLA/escalation, attribution evidence, 미귀속 CI를 한 곳에서 검토합니다.
+- **Advanced**: Project/Track/Repository registry, Project-wide/Dynamic rule, GitHub PAT, polling 및 Responsibility SLA 정책을 관리합니다.
+- Dashboard의 미귀속 요약이나 Run 귀속 근거에서 Issues로 직접 이동합니다.
+- Track 수정은 Advanced로 이동해 registry 편집과 일상 CI 관측을 분리합니다.
+- backend schema, resolver, responsibility lifecycle, audit history, migration 데이터는 삭제하거나 재해석하지 않습니다.
+- v0.3.31부터 Responsibility/SLA 계층은 신규 제품 축으로 확장하지 않고 고급 진단/운영 기능으로 유지합니다.
+
 ## Producer Contract Health
 
 Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.
