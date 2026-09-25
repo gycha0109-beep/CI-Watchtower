@@ -233,6 +233,7 @@ function App() {
   const [auditLoadingId, setAuditLoadingId] = useState<number | null>(null);
   const [resolutionPreview, setResolutionPreview] = useState<ResponsibilityResolutionPreview | null>(null);
   const [resolutionLoadingKey, setResolutionLoadingKey] = useState<string | null>(null);
+  const [escalationOperatorLoadingKey, setEscalationOperatorLoadingKey] = useState<string | null>(null);
   const [resolutionHistory, setResolutionHistory] = useState<ResponsibilityResolutionAuditEntry[]>([]);
   const [resolutionHistoryFilter, setResolutionHistoryFilter] = useState<ResolutionHistoryFilter>('all');
   const [resolutionHistoryReviewKey, setResolutionHistoryReviewKey] = useState<string | null>(null);
@@ -465,7 +466,15 @@ function App() {
     overdue: responsibilityMapDriftsInScope.filter(item => item.reviewAgeBucket === 'overdue').length,
   }), [responsibilityMapDriftsInScope]);
   const responsibilityEscalations = useMemo(
-    () => responsibilityMapDriftsInScope.filter(item => item.escalationLevel !== 'none'),
+    () => responsibilityMapDriftsInScope.filter(
+      item => item.escalationLevel !== 'none' && item.operatorState !== 'suppressed',
+    ),
+    [responsibilityMapDriftsInScope],
+  );
+  const suppressedResponsibilityEscalationCount = useMemo(
+    () => responsibilityMapDriftsInScope.filter(
+      item => item.escalationLevel !== 'none' && item.operatorState === 'suppressed',
+    ).length,
     [responsibilityMapDriftsInScope],
   );
   const responsibilityEscalationCounts = useMemo(() => ({
@@ -530,6 +539,40 @@ function App() {
       await refresh(poll);
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const updateEscalationOperatorState = async (
+    item: ResponsibilityMapDrift,
+    action: 'acknowledge' | 'suppress' | 'activate',
+  ) => {
+    const loadingKey = item.reviewKey + ':' + item.fingerprint;
+    try {
+      setError(null);
+      setNotice(null);
+      setEscalationOperatorLoadingKey(loadingKey);
+      const input = { reviewKey: item.reviewKey, fingerprint: item.fingerprint };
+      const result = action === 'acknowledge'
+        ? await api.acknowledgeResponsibilityEscalation(input)
+        : action === 'suppress'
+          ? await api.suppressResponsibilityEscalation(input)
+          : await api.activateResponsibilityEscalation(input);
+      setNotice(
+        result.status === 'stale_rejected'
+          ? 'Escalation fingerprint가 변경되어 이전 상태 변경 요청을 적용하지 않았습니다.'
+          : result.status === 'not_escalated'
+            ? '이 항목은 더 이상 SLA escalation 상태가 아니어서 상태를 변경하지 않았습니다.'
+            : result.operatorState === 'acknowledged'
+              ? '현재 escalation을 확인 처리했습니다. Responsibility Drift는 그대로 유지됩니다.'
+              : result.operatorState === 'suppressed'
+                ? '현재 fingerprint의 escalation surface와 desktop delivery를 숨김 처리했습니다. Drift는 그대로 유지됩니다.'
+                : '현재 fingerprint의 escalation을 다시 ACTIVE 상태로 열었습니다.',
+      );
+      await refresh(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setEscalationOperatorLoadingKey(null);
     }
   };
 
@@ -949,44 +992,61 @@ function App() {
               ))}
             </div>
           )}
-          {responsibilityEscalations.length > 0 && (
+          {(responsibilityEscalations.length > 0 || suppressedResponsibilityEscalationCount > 0) && (
             <div className="responsibility-escalation-queue">
               <div className="responsibility-escalation-head">
                 <div>
                   <b>SLA Escalation</b>
-                  <span>P0/P1 review SLA가 임박했거나 초과된 항목만 별도로 표시합니다.</span>
+                  <span>ACTIVE/ACKNOWLEDGED 항목만 surface합니다. SUPPRESSED는 Review Inbox에서 추적됩니다.</span>
                 </div>
-                <small>critical {responsibilityEscalationCounts.critical} · warning {responsibilityEscalationCounts.warning}</small>
+                <small>
+                  critical {responsibilityEscalationCounts.critical} · warning {responsibilityEscalationCounts.warning}
+                  {suppressedResponsibilityEscalationCount > 0 ? ' · suppressed ' + suppressedResponsibilityEscalationCount : ''}
+                </small>
               </div>
-              <div className="responsibility-escalation-list">
-                {responsibilityEscalations.map(item => (
-                  <div className={'responsibility-escalation-row ' + item.escalationLevel} key={'escalation:' + item.reviewKey}>
-                    <span className={'responsibility-escalation-level ' + item.escalationLevel}>{item.escalationLevel.toUpperCase()}</span>
-                    <span className="responsibility-escalation-main">
-                      <b>{item.workflowName}</b>
-                      <small>{item.repository} · {responsibilityPriorityLabel(item.reviewPriority)}</small>
-                    </span>
-                    <span className={'responsibility-sla-badge ' + item.slaStatus}>
-                      {responsibilitySlaLabel(item.slaStatus, item.slaRemainingHours)}
-                    </span>
-                    {(() => {
-                      const delivery = responsibilityEscalationDeliveryByEvent.get(
-                        item.reviewKey + ':' + item.fingerprint + ':' + item.escalationLevel
-                      );
-                      return (
-                        <small className={'responsibility-delivery-state ' + (delivery?.status ?? 'pending')}>
-                          {delivery == null
-                            ? 'desktop pending'
-                            : delivery.status === 'emitted'
-                              ? 'desktop emitted · ' + formatAuditTime(delivery.emittedAt ?? delivery.lastAttemptAt)
-                              : 'desktop failed · attempt ' + delivery.attempts + '/3'}
-                        </small>
-                      );
-                    })()}
-                    <small>{item.escalationReason ?? 'Review SLA escalation'}</small>
-                  </div>
-                ))}
-              </div>
+              {responsibilityEscalations.length === 0 ? (
+                <div className="producer-drift-empty">현재 surface되는 escalation은 없습니다. 숨김 상태는 아래 Review Inbox에서 다시 활성화할 수 있습니다.</div>
+              ) : (
+                <div className="responsibility-escalation-list">
+                  {responsibilityEscalations.map(item => {
+                    const delivery = responsibilityEscalationDeliveryByEvent.get(
+                      item.reviewKey + ':' + item.fingerprint + ':' + item.escalationLevel
+                    );
+                    const operatorLoading = escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint;
+                    return (
+                      <div className={'responsibility-escalation-row ' + item.escalationLevel} key={'escalation:' + item.reviewKey + ':' + item.fingerprint}>
+                        <span className={'responsibility-escalation-level ' + item.escalationLevel}>{item.escalationLevel.toUpperCase()}</span>
+                        <span className="responsibility-escalation-main">
+                          <b>{item.workflowName}</b>
+                          <small>{item.repository} · {responsibilityPriorityLabel(item.reviewPriority)}</small>
+                        </span>
+                        <span className={'responsibility-sla-badge ' + item.slaStatus}>
+                          {responsibilitySlaLabel(item.slaStatus, item.slaRemainingHours)}
+                        </span>
+                        <span className="responsibility-escalation-detail">
+                          <span className={'responsibility-operator-state ' + item.operatorState}>{item.operatorState.toUpperCase()}</span>
+                          <small className={'responsibility-delivery-state ' + (delivery?.status ?? 'pending')}>
+                            {delivery == null
+                              ? 'desktop pending'
+                              : delivery.status === 'emitted'
+                                ? 'desktop emitted · ' + formatAuditTime(delivery.emittedAt ?? delivery.lastAttemptAt)
+                                : 'desktop failed · attempt ' + delivery.attempts + '/3'}
+                          </small>
+                          <small>{item.escalationReason ?? 'Review SLA escalation'}</small>
+                          <span className="responsibility-escalation-actions">
+                            {item.operatorState === 'active' ? (
+                              <button type="button" className="ghost tiny" disabled={operatorLoading} onClick={() => void updateEscalationOperatorState(item, 'acknowledge')}>확인</button>
+                            ) : (
+                              <button type="button" className="ghost tiny" disabled={operatorLoading} onClick={() => void updateEscalationOperatorState(item, 'activate')}>다시 활성</button>
+                            )}
+                            <button type="button" className="ghost tiny" disabled={operatorLoading} onClick={() => void updateEscalationOperatorState(item, 'suppress')}>숨김</button>
+                          </span>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 {responsibilityEscalationDeliveriesInScope.length > 0 && (
@@ -1049,6 +1109,9 @@ function App() {
                       {item.escalationLevel !== 'none' && (
                         <span className={`responsibility-escalation-level ${item.escalationLevel}`}>{item.escalationLevel.toUpperCase()}</span>
                       )}
+                      {(item.escalationLevel !== 'none' || item.operatorState !== 'active') && (
+                        <span className={`responsibility-operator-state ${item.operatorState}`}>{item.operatorState.toUpperCase()}</span>
+                      )}
                       <span className={`responsibility-sla-badge ${item.slaStatus}`}>
                         {responsibilitySlaLabel(item.slaStatus, item.slaRemainingHours)}
                       </span>
@@ -1082,6 +1145,8 @@ function App() {
                     <span>Last reviewed <b>{item.lastReviewedAt ? formatAuditTime(item.lastReviewedAt) : '없음'}</b></span>
                     <span>SLA target <b>{item.slaTargetHours == null ? 'exempt' : item.slaTargetHours + 'h'}</b></span>
                     <span>SLA state <b>{item.slaStatus.toUpperCase()}</b></span>
+                    <span>Operator <b>{item.operatorState.toUpperCase()}</b></span>
+                    <span>Operator action <b>{item.operatorUpdatedAt ? formatAuditTime(item.operatorUpdatedAt) : '없음'}</b></span>
                   </div>
                   {(resolutionHistoryByReviewKey.get(item.reviewKey)?.length ?? 0) > 0 && (
                     <button
@@ -1104,6 +1169,56 @@ function App() {
                   <div className="responsibility-review-foot">
                     <span>{responsibilityActionLabel(item.recommendedAction)}</span>
                     <span className="responsibility-review-buttons">
+                      {item.escalationLevel !== 'none' && item.operatorState === 'active' && (
+                        <>
+                          <button
+                            type="button"
+                            className="ghost tiny"
+                            disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint}
+                            onClick={() => void updateEscalationOperatorState(item, 'acknowledge')}
+                          >
+                            Escalation 확인
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost tiny"
+                            disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint}
+                            onClick={() => void updateEscalationOperatorState(item, 'suppress')}
+                          >
+                            Escalation 숨김
+                          </button>
+                        </>
+                      )}
+                      {item.escalationLevel !== 'none' && item.operatorState === 'acknowledged' && (
+                        <>
+                          <button
+                            type="button"
+                            className="ghost tiny"
+                            disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint}
+                            onClick={() => void updateEscalationOperatorState(item, 'activate')}
+                          >
+                            다시 활성
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost tiny"
+                            disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint}
+                            onClick={() => void updateEscalationOperatorState(item, 'suppress')}
+                          >
+                            Escalation 숨김
+                          </button>
+                        </>
+                      )}
+                      {item.operatorState === 'suppressed' && (
+                        <button
+                          type="button"
+                          className="ghost tiny"
+                          disabled={escalationOperatorLoadingKey === item.reviewKey + ':' + item.fingerprint}
+                          onClick={() => void updateEscalationOperatorState(item, 'activate')}
+                        >
+                          Escalation 다시 활성
+                        </button>
+                      )}
                       {item.reviewStatus === 'open' && (
                         <button
                           type="button"
