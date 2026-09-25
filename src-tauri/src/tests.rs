@@ -2104,6 +2104,182 @@ fn normal_runtime_sources_do_not_embed_historical_project_knowledge() {
 }
 
 #[test]
+fn existing_registry_refreshes_once_without_becoming_runtime_seed_data() {
+    let path = legacy_v02_db_path("current-track-registry-refresh");
+    init_db(&path).unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "DELETE FROM schema_migrations WHERE migration_key='current-track-registry-20260926-v1'",
+        [],
+    )
+    .unwrap();
+    let now = "2026-09-26T00:00:00Z";
+    conn.execute(
+        "INSERT INTO projects(name,project_key,active,created_at,updated_at)
+         VALUES('명하','myeongha',1,?,?)",
+        params![now, now],
+    )
+    .unwrap();
+    let myeongha_project_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO projects(name,project_key,active,created_at,updated_at)
+         VALUES('비주얼리','visualy',1,?,?)",
+        params![now, now],
+    )
+    .unwrap();
+    let visualy_project_id = conn.last_insert_rowid();
+
+    for (name, track_key) in [
+        ("관상", "face-reading"),
+        ("운영 37", "ops"),
+        ("관상 연구", "face-research"),
+        ("사주", "saju"),
+        ("프론트 연동", "frontend-integration"),
+        ("상품 제작 및 결제", "product-commerce"),
+    ] {
+        conn.execute(
+            "INSERT INTO watch_tracks(
+               project_id,name,track_key,long_ci_minutes,active,created_at,updated_at
+             ) VALUES(?,?,?,8,1,?,?)",
+            params![myeongha_project_id, name, track_key, now, now],
+        )
+        .unwrap();
+    }
+    let legacy_face_track_id: i64 = conn
+        .query_row(
+            "SELECT id FROM watch_tracks
+             WHERE project_id=? AND track_key='face-reading'",
+            params![myeongha_project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    for (name, track_key) in [
+        ("Face Lab 연구", "face-research"),
+        ("신규 상품 신뢰도 운영 파이프라인", "trust"),
+        ("데이터 정렬 & AI", "taxonomy-ai"),
+        ("CI Watchtower / CI 운영 정리", "ops"),
+        ("Premium Full Report", "full-report"),
+        ("Mobile", "mobile"),
+    ] {
+        conn.execute(
+            "INSERT INTO watch_tracks(
+               project_id,name,track_key,long_ci_minutes,active,created_at,updated_at
+             ) VALUES(?,?,?,8,1,?,?)",
+            params![visualy_project_id, name, track_key, now, now],
+        )
+        .unwrap();
+    }
+    drop(conn);
+
+    init_db(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+
+    let myeongha_tracks: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT track_key,name FROM watch_tracks
+                 WHERE project_id=? AND active=1 ORDER BY track_key",
+            )
+            .unwrap();
+        stmt.query_map(params![myeongha_project_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    };
+    assert_eq!(
+        myeongha_tracks,
+        vec![
+            ("character-design".into(), "캐릭터 설계".into()),
+            ("character-memory".into(), "챗봇 & 메모리 관계 엔진".into()),
+            ("face-bridge".into(), "관상 브릿지".into()),
+            ("face-engine".into(), "관상 엔진".into()),
+            ("face-research".into(), "전통 관상 연구".into()),
+            ("frontend-integration".into(), "프론트".into()),
+            ("ops".into(), "운영".into()),
+            ("saju".into(), "사주 엔진".into()),
+            ("saju-bridge".into(), "사주 브릿지".into()),
+            ("saju-research".into(), "전통 사주 연구".into()),
+        ]
+    );
+
+    let visualy_tracks: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT track_key,name FROM watch_tracks
+                 WHERE project_id=? AND active=1 ORDER BY track_key",
+            )
+            .unwrap();
+        stmt.query_map(params![visualy_project_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    };
+    assert_eq!(
+        visualy_tracks,
+        vec![
+            ("face-research".into(), "Face Lab".into()),
+            ("ops".into(), "CI 책임 분리".into()),
+            ("taxonomy-ai".into(), "데이터 정렬 AI".into()),
+            ("trust".into(), "파이프라인 신뢰도".into()),
+        ]
+    );
+
+    let face_engine_track_id: i64 = conn
+        .query_row(
+            "SELECT id FROM watch_tracks
+             WHERE project_id=? AND track_key='face-engine'",
+            params![myeongha_project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(face_engine_track_id, legacy_face_track_id);
+
+    let retired_tracks: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM watch_tracks
+             WHERE active=0 AND (
+               (project_id=? AND track_key='product-commerce')
+               OR (project_id=? AND track_key IN ('full-report','mobile'))
+             )",
+            params![myeongha_project_id, visualy_project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retired_tracks, 3);
+
+    conn.execute(
+        "UPDATE watch_tracks SET name='운영 사용자 수정'
+         WHERE project_id=? AND track_key='ops'",
+        params![myeongha_project_id],
+    )
+    .unwrap();
+    drop(conn);
+
+    init_db(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let ops_name: String = conn
+        .query_row(
+            "SELECT name FROM watch_tracks
+             WHERE project_id=? AND track_key='ops'",
+            params![myeongha_project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ops_name, "운영 사용자 수정");
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
 fn fresh_database_starts_without_project_specific_seed_data() {
     let path = legacy_v02_db_path("fresh-core-decoupled");
     init_db(&path).unwrap();
