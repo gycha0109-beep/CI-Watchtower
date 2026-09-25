@@ -3725,6 +3725,7 @@ fn responsibility_escalation_delivery_is_deduplicated_and_retry_bounded() {
         operator_state: "active".into(),
         operator_actor: None,
         operator_updated_at: None,
+        operator_suppressed_until: None,
     };
     assert_eq!(
         responsibility_escalation_event_type("warning"),
@@ -3865,6 +3866,7 @@ fn responsibility_escalation_operator_lifecycle_is_audited_and_fingerprint_scope
     let input = ResponsibilityEscalationOperatorInput {
         review_key: escalated.review_key.clone(),
         fingerprint: escalated.fingerprint.clone(),
+        suppress_hours: None,
     };
     let acknowledged = set_responsibility_escalation_operator_state_with_conn(
         &conn,
@@ -3952,6 +3954,140 @@ fn responsibility_escalation_operator_lifecycle_is_audited_and_fingerprint_scope
         )
         .unwrap();
     assert_eq!(audit_count_after_stale, 4);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
+fn responsibility_timed_suppression_expires_and_can_be_resnoozed() {
+    let path = legacy_v02_db_path("responsibility-timed-suppression");
+    init_db(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let repository_id: i64 = conn
+        .query_row(
+            "SELECT id FROM monitored_repositories WHERE repo='gycha0109-beep/K_beauty'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO repository_responsibility_contracts(
+           repository_id,workflow_path,workflow_name,binding_kind,track_key,
+           source_binding,source_path,last_seen_at
+         ) VALUES(?,?,?,?,?,?,?,?)",
+        params![
+            repository_id,
+            ".github/workflows/timed-operator-test.yml",
+            "Timed Operator Lifecycle Test",
+            "dynamic",
+            Option::<String>::None,
+            "dynamic-by-run",
+            RESPONSIBILITY_MAP_PATH,
+            Utc::now().to_rfc3339(),
+        ],
+    )
+    .unwrap();
+
+    let initial = responsibility_map_drifts(&conn)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.workflow_name == "Timed Operator Lifecycle Test")
+        .unwrap();
+    let aged = (Utc::now() - chrono::Duration::hours(80)).to_rfc3339();
+    conn.execute(
+        "UPDATE responsibility_review_state SET first_seen_at=?
+         WHERE review_key=? AND fingerprint=?",
+        params![aged, initial.review_key, initial.fingerprint],
+    )
+    .unwrap();
+    let escalated = current_responsibility_drift(&conn, &initial.review_key).unwrap();
+    assert_eq!(escalated.escalation_level, "warning");
+
+    let input = ResponsibilityEscalationOperatorInput {
+        review_key: escalated.review_key.clone(),
+        fingerprint: escalated.fingerprint.clone(),
+        suppress_hours: Some(4),
+    };
+    let first_until = (Utc::now() + chrono::Duration::hours(4)).to_rfc3339();
+    let suppressed = set_responsibility_escalation_operator_state_with_conn_until(
+        &conn,
+        &input,
+        "suppressed",
+        "suppress",
+        Some(&first_until),
+    )
+    .unwrap();
+    assert_eq!(suppressed.operator_state, "suppressed");
+    assert_eq!(
+        suppressed.current_drift.unwrap().operator_suppressed_until,
+        Some(first_until.clone())
+    );
+
+    let second_until = (Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
+    let resnoozed = set_responsibility_escalation_operator_state_with_conn_until(
+        &conn,
+        &input,
+        "suppressed",
+        "suppress",
+        Some(&second_until),
+    )
+    .unwrap();
+    assert_eq!(resnoozed.operator_state, "suppressed");
+    assert_eq!(
+        resnoozed.current_drift.unwrap().operator_suppressed_until,
+        Some(second_until.clone())
+    );
+
+    let past_until = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    set_responsibility_escalation_operator_state_with_conn_until(
+        &conn,
+        &input,
+        "suppressed",
+        "suppress",
+        Some(&past_until),
+    )
+    .unwrap();
+    let expired = current_responsibility_drift(&conn, &input.review_key).unwrap();
+    assert_eq!(expired.operator_state, "active");
+    assert_eq!(expired.operator_actor.as_deref(), Some("system-expiry"));
+    assert!(expired.operator_suppressed_until.is_none());
+
+    let (action, actor, before_state, after_state, before_until, after_until): (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT action,actor,before_state,after_state,
+                    before_suppressed_until,after_suppressed_until
+             FROM responsibility_escalation_operator_audit
+             WHERE review_key=? AND fingerprint=?
+             ORDER BY id DESC LIMIT 1",
+            params![input.review_key, input.fingerprint],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(action, "activate");
+    assert_eq!(actor, "system-expiry");
+    assert_eq!(before_state, "suppressed");
+    assert_eq!(after_state, "active");
+    assert_eq!(before_until, Some(past_until));
+    assert!(after_until.is_none());
 
     drop(conn);
     let _ = std::fs::remove_file(&path);
