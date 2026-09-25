@@ -725,3 +725,8 @@ select:focus { border-color: #4a73ee; box-shadow: 0 0 0 3px rgba(74,115,238,.12)
 .responsibility-policy-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; }
 .responsibility-policy-toggle { display: flex !important; flex-direction: row !important; align-items: center; gap: 7px; color: #9cabc4; }
 .responsibility-policy-toggle input { width: auto; }
+
+
+.empty-onboarding { display: grid; justify-items: start; gap: 10px; padding: 34px; margin-bottom: 18px; }
+.empty-onboarding h2 { margin: 0; font-size: 20px; }
+.empty-onboarding p:not(.eyebrow) { margin: 0 0 6px; color: #8390ab; font-size: 12px; }

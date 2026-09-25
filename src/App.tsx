@@ -891,6 +891,7 @@ function App() {
       {error && <div className="error-banner">{error}</div>}
       {notice && <div className="notice-banner">{notice}</div>}
 
+      {(dashboard?.projects.length ?? 0) > 0 && (
       <section className="panel project-switcher">
         <div className="section-head compact-head">
           <div><p className="eyebrow">PROJECT</p><h2>프로젝트</h2></div>
@@ -907,8 +908,18 @@ function App() {
           ))}
         </div>
       </section>
+      )}
 
-      {activeSurface === 'dashboard' && (
+      {dashboard && dashboard.projects.length === 0 && activeSurface !== 'advanced' && (
+        <section className="panel empty-onboarding">
+          <p className="eyebrow">EMPTY WATCHTOWER</p>
+          <h2>아직 감시 중인 프로젝트가 없습니다.</h2>
+          <p>프로젝트와 Repository, Track을 등록하면 GitHub Actions 관측을 시작할 수 있습니다.</p>
+          <button type="button" className="primary" onClick={() => setActiveSurface('advanced')}>프로젝트 설정 시작</button>
+        </section>
+      )}
+
+      {activeSurface === 'dashboard' && (dashboard?.projects.length ?? 0) > 0 && (
       <section className="summary-grid five">
         <div className="summary-card"><span>Running</span><strong>{runningCount}</strong></div>
         <div className="summary-card"><span>Queued</span><strong>{queuedCount}</strong></div>
@@ -925,7 +936,7 @@ function App() {
       </section>
       )}
 
-      {activeSurface === 'issues' && (
+      {activeSurface === 'issues' && (dashboard?.projects.length ?? 0) > 0 && (
       <section className="panel producer-contract-panel">
         <div className="producer-contract-head">
           <div>
@@ -1549,7 +1560,7 @@ function App() {
         <section className="panel controls-panel">
           <h2>프로젝트 등록</h2>
           <form onSubmit={submitProject} className="stack-form">
-            <label>프로젝트 이름<input value={projectName} onChange={e => setProjectName(e.target.value)} placeholder="예: 비주얼리" /></label>
+            <label>프로젝트 이름<input value={projectName} onChange={e => setProjectName(e.target.value)} placeholder="예: 제품 운영" /></label>
             <label>Project Key<input value={projectKey} onChange={e => setProjectKey(e.target.value)} placeholder="visualy" /></label>
             <button className="primary" type="submit">프로젝트 추가</button>
           </form>
@@ -1610,7 +1621,7 @@ function App() {
                 {dashboard?.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
             </label>
-            <label>Repository<input value={repoInput} onChange={e => setRepoInput(e.target.value)} placeholder="gycha0109-beep/MyeongHa" /></label>
+            <label>Repository<input value={repoInput} onChange={e => setRepoInput(e.target.value)} placeholder="owner/repository" /></label>
             <button className="primary" type="submit">저장소 추가</button>
           </form>
           <div className="repo-list">
@@ -1718,7 +1729,7 @@ function App() {
         </section>
         )}
 
-        {activeSurface !== 'advanced' && (
+        {activeSurface !== 'advanced' && (dashboard?.projects.length ?? 0) > 0 && (
         <section className="tracks-column">
           <section className="panel track-filter-panel">
             <div className="filter-head">

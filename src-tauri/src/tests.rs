@@ -11,6 +11,11 @@ fn legacy_v02_db_path(label: &str) -> std::path::PathBuf {
     ))
 }
 
+fn init_visualy_test_fixture(path: &Path) {
+    init_db(path).unwrap();
+    legacy_compat::seed_bejewely_project_scope(&Connection::open(path).unwrap()).unwrap();
+}
+
 fn seed_legacy_v02_database(path: &Path) {
     let conn = Connection::open(path).unwrap();
     conn.execute_batch(
@@ -269,9 +274,9 @@ fn track_key_validation_is_bounded() {
 
 #[test]
 fn legacy_known_tracks_keep_stable_keys() {
-    assert_eq!(legacy_track_key("프론트 연동 4", 1), "frontend-integration");
-    assert_eq!(legacy_track_key("운영 32", 2), "ops");
-    assert_eq!(legacy_track_key("관상 연구 및 검증 2", 3), "face-research");
+    assert_eq!(legacy_compat::legacy_track_key("프론트 연동 4", 1), "frontend-integration");
+    assert_eq!(legacy_compat::legacy_track_key("운영 32", 2), "ops");
+    assert_eq!(legacy_compat::legacy_track_key("관상 연구 및 검증 2", 3), "face-research");
 }
 
 fn evidence(key: &str, signal_type: &str, score: i64) -> Evidence {
@@ -434,7 +439,7 @@ fn repository_scope_stats_keep_project_and_repository_counts_exact() {
 #[test]
 fn dependabot_dynamic_workflows_do_not_pollute_attribution_surfaces() {
     let path = legacy_v02_db_path("dependabot-dynamic-noise");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
 
     let conn = Connection::open(&path).unwrap();
     let repository_id: i64 = conn
@@ -959,7 +964,7 @@ fn project_move_archives_manual_assignment_before_invalidating_it() {
     )
     .unwrap();
 
-    invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
+    legacy_compat::invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
         .unwrap();
 
     let remaining: i64 = conn
@@ -1070,9 +1075,9 @@ fn project_move_audit_is_idempotent_and_keeps_same_project_manual_assignment() {
     )
     .unwrap();
 
-    invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
+    legacy_compat::invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
         .unwrap();
-    invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
+    legacy_compat::invalidate_cross_project_assignments(&conn, 100, Some(1), 2, "visualy-project-scope-v1")
         .unwrap();
 
     let audit_count: i64 = conn
@@ -1297,7 +1302,7 @@ fn myeongha_repository_scoped_project_wide_rules_preserve_manual_and_repo_isolat
     }
     drop(conn);
 
-    migrate_project_scope(&Connection::open(&path).unwrap()).unwrap();
+    legacy_compat::migrate_project_scope_legacy(&Connection::open(&path).unwrap()).unwrap();
 
     let conn = Connection::open(&path).unwrap();
     let scoped_rules: i64 = conn
@@ -1482,6 +1487,7 @@ fn myeongha_records_production_smoke_is_dynamic_without_forcing_track_assignment
 fn visualy_repository_responsibility_map_uses_dynamic_rules_and_retires_stale_project_wide_security(
 ) {
     let path = legacy_v02_db_path("visualy-responsibility-map");
+    seed_legacy_v02_database(&path);
     init_db(&path).unwrap();
 
     let conn = Connection::open(&path).unwrap();
@@ -1595,7 +1601,7 @@ fn visualy_repository_responsibility_map_uses_dynamic_rules_and_retires_stale_pr
         .unwrap();
     drop(conn);
 
-    seed_bejewely_project_scope(&Connection::open(&path).unwrap()).unwrap();
+    legacy_compat::seed_bejewely_project_scope(&Connection::open(&path).unwrap()).unwrap();
 
     let conn = Connection::open(&path).unwrap();
     let stale_rule_count: i64 = conn
@@ -1766,7 +1772,7 @@ fn dynamic_workflow_rule_declares_responsibility_without_forcing_track_ownership
 #[test]
 fn producer_contract_stats_classify_recent_runs_without_overlapping_buckets() {
     let path = legacy_v02_db_path("producer-contract");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
 
     let conn = Connection::open(&path).unwrap();
     conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
@@ -1928,7 +1934,7 @@ fn producer_contract_stats_classify_recent_runs_without_overlapping_buckets() {
 #[test]
 fn producer_contract_runs_separate_current_from_historical_drift_by_workflow_identity() {
     let path = legacy_v02_db_path("producer-contract-current");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
 
     let conn = Connection::open(&path).unwrap();
     conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
@@ -2050,6 +2056,137 @@ fn producer_contract_runs_separate_current_from_historical_drift_by_workflow_ide
 
     assert!(!active_drift.contract_compliant);
     assert!(active_drift.is_current_producer_run);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
+fn fresh_database_starts_without_project_specific_seed_data() {
+    let path = legacy_v02_db_path("fresh-core-decoupled");
+    init_db(&path).unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    for table in [
+        "projects",
+        "monitored_repositories",
+        "watch_tracks",
+        "project_workflow_rules",
+        "dynamic_workflow_rules",
+        "track_aliases",
+    ] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "{table} should be empty on a fresh install");
+    }
+
+    let migration_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE migration_key='core-decoupling-v032'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(migration_count, 1);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
+fn generic_registry_survives_restart_without_project_seed_reinjection() {
+    let path = legacy_v02_db_path("generic-registry-restart");
+    init_db(&path).unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    let now = "2026-09-25T00:00:00Z";
+    conn.execute(
+        "INSERT INTO projects(name,project_key,active,created_at,updated_at) VALUES('Example Product','example-product',1,?,?)",
+        params![now, now],
+    )
+    .unwrap();
+    let first_project_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO projects(name,project_key,active,created_at,updated_at) VALUES('Second Product','second-product',1,?,?)",
+        params![now, now],
+    )
+    .unwrap();
+    let second_project_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO monitored_repositories(project_id,repo,enabled,created_at,updated_at) VALUES(?,'example/service',1,?,?)",
+        params![first_project_id, now, now],
+    )
+    .unwrap();
+    let repository_id = conn.last_insert_rowid();
+
+    for project_id in [first_project_id, second_project_id] {
+        conn.execute(
+            "INSERT INTO watch_tracks(project_id,name,track_key,long_ci_minutes,active,created_at,updated_at) VALUES(?,'Operations','ops',8,1,?,?)",
+            params![project_id, now, now],
+        )
+        .unwrap();
+    }
+
+    conn.execute(
+        "INSERT INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at) VALUES(?,?,'CI',1,?)",
+        params![first_project_id, repository_id, now],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO dynamic_workflow_rules(project_id,repository_id,workflow_name,active,protected,created_at) VALUES(?,?,'Shared Validation',1,0,?)",
+        params![first_project_id, repository_id, now],
+    )
+    .unwrap();
+    drop(conn);
+
+    init_db(&path).unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    let projects: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT project_key FROM projects ORDER BY project_key").unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    assert_eq!(projects, vec!["example-product".to_string(), "second-product".to_string()]);
+
+    let ops_tracks: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM watch_tracks WHERE track_key='ops'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ops_tracks, 2);
+
+    let repository_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM monitored_repositories", [], |row| row.get(0))
+        .unwrap();
+    let project_rule_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM project_workflow_rules", [], |row| row.get(0))
+        .unwrap();
+    let dynamic_rule_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM dynamic_workflow_rules", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(repository_count, 1);
+    assert_eq!(project_rule_count, 1);
+    assert_eq!(dynamic_rule_count, 1);
+
+    let forbidden_projects: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE project_key IN ('visualy','myeongha','default')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(forbidden_projects, 0);
 
     drop(conn);
     let _ = std::fs::remove_file(&path);
@@ -2485,7 +2622,7 @@ fn attribution_detail_exposes_final_decision_and_ordered_evidence() {
 #[test]
 fn responsibility_map_source_health_preserves_last_good_snapshot_on_failure() {
     let path = legacy_v02_db_path("responsibility-map-source-health");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
     let conn = Connection::open(&path).unwrap();
     conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
 
@@ -2585,7 +2722,7 @@ fn responsibility_map_source_health_preserves_last_good_snapshot_on_failure() {
 #[test]
 fn responsibility_map_drift_is_detect_only_and_repository_scoped() {
     let path = legacy_v02_db_path("responsibility-map-drift");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
     let conn = Connection::open(&path).unwrap();
     conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
 
@@ -3677,7 +3814,7 @@ fn responsibility_review_sla_escalates_p0_and_p1_without_escalating_p2() {
 #[test]
 fn responsibility_escalation_delivery_is_deduplicated_and_retry_bounded() {
     let path = legacy_v02_db_path("responsibility-escalation-delivery");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
     let conn = Connection::open(&path).unwrap();
     let repository_id: i64 = conn
         .query_row(
@@ -3811,7 +3948,7 @@ fn responsibility_escalation_delivery_is_deduplicated_and_retry_bounded() {
 #[test]
 fn responsibility_escalation_operator_lifecycle_is_audited_and_fingerprint_scoped() {
     let path = legacy_v02_db_path("responsibility-escalation-operator-lifecycle");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
     let conn = Connection::open(&path).unwrap();
     let repository_id: i64 = conn
         .query_row(
@@ -3964,7 +4101,7 @@ fn responsibility_escalation_operator_lifecycle_is_audited_and_fingerprint_scope
 #[test]
 fn responsibility_timed_suppression_expires_and_can_be_resnoozed() {
     let path = legacy_v02_db_path("responsibility-timed-suppression");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
     let conn = Connection::open(&path).unwrap();
     let repository_id: i64 = conn
         .query_row(
@@ -4098,7 +4235,7 @@ fn responsibility_timed_suppression_expires_and_can_be_resnoozed() {
 #[test]
 fn responsibility_review_policy_is_project_scoped_and_preserves_defaults() {
     let path = legacy_v02_db_path("responsibility-review-policy");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
     let conn = Connection::open(&path).unwrap();
     let visualy_project_id: i64 = conn
         .query_row(
