@@ -28,6 +28,8 @@ Project는 제품/서비스 단위, Repository는 GitHub 저장소, Track은 병
 
 공용 CI 규칙은 UI에서 추가/삭제할 수 있으며 프로젝트 전체 또는 특정 Repository 범위로 제한할 수 있습니다. 미귀속 Inbox의 Run에서 **공용 CI로 분류**를 선택하면 같은 Project의 동일 Workflow 이름을 공용 규칙으로 학습합니다.
 
+Dashboard의 `Project CI Active`는 현재 `in_progress / queued / requested / pending / waiting` 상태인 Project-wide Run만 집계합니다. 공용 CI 화면의 `누적` 값은 로컬 DB에 보존된 Project-wide Run 이력 전체이므로 기존 DB를 migration한 경우 큰 숫자가 표시될 수 있습니다. 이 누적 이력 수를 현재 실행 중인 CI 개수로 해석하지 않습니다.
+
 ## Track Key
 
 Track Key는 repository나 대화 번호가 바뀌어도 같은 작업축이면 유지합니다.
