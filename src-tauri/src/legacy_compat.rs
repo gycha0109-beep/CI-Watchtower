@@ -128,7 +128,10 @@ fn refresh_project_tracks(
          SET active=0,updated_at=?
          WHERE project_id=? AND track_key NOT IN ({placeholders})"
     );
-    let mut values: Vec<rusqlite::types::Value> = vec![now.into(), project_id.into()];
+    let mut values: Vec<rusqlite::types::Value> = vec![
+        rusqlite::types::Value::Text(now.to_string()),
+        project_id.into(),
+    ];
     values.extend(
         tracks
             .iter()
