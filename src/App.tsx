@@ -19,6 +19,7 @@ type TrackFormState = Omit<TrackInput, 'longCiMinutes'> & { longCiMinutes: numbe
 type ViewFilter = 'all' | 'project' | 'unassigned' | number;
 type ScopeFilter = 'all' | number;
 type ResolutionHistoryFilter = 'all' | 'resolved' | 'deferred' | 'blocked' | 'stale_rejected' | 'still_open' | 'failed';
+type AppSurface = 'dashboard' | 'issues' | 'advanced';
 
 const emptyTrack = (projectId = 0): TrackFormState => ({
   projectId,
@@ -238,6 +239,7 @@ function App() {
   const [resolutionHistoryFilter, setResolutionHistoryFilter] = useState<ResolutionHistoryFilter>('all');
   const [resolutionHistoryReviewKey, setResolutionHistoryReviewKey] = useState<string | null>(null);
   const [expandedResolutionAuditId, setExpandedResolutionAuditId] = useState<number | null>(null);
+  const [activeSurface, setActiveSurface] = useState<AppSurface>('dashboard');
 
   const refresh = useCallback(async (poll = false) => {
     try {
@@ -755,6 +757,7 @@ function App() {
   };
 
   const editTrack = (item: DashboardTrack) => {
+    setActiveSurface('advanced');
     setEditingId(item.track.id);
     setTrackForm({
       id: item.track.id,
@@ -765,7 +768,6 @@ function App() {
     });
     setSelectedProject(item.track.projectId);
     setSelectedView(item.track.id);
-    document.querySelector('.controls-panel')?.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const removeTrack = async (item: DashboardTrack) => {
@@ -822,6 +824,7 @@ function App() {
   };
 
   const inspectAttribution = async (run: WorkflowRunSummary) => {
+    setActiveSurface('issues');
     if (auditRun?.id === run.id) {
       setAuditRun(null);
       setAuditDetail(null);
@@ -856,6 +859,35 @@ function App() {
         </button>
       </header>
 
+      <nav className="surface-nav" aria-label="WatchTower 작업 화면">
+        <button
+          type="button"
+          className={activeSurface === 'dashboard' ? 'active' : ''}
+          onClick={() => setActiveSurface('dashboard')}
+        >
+          <b>Dashboard</b>
+          <span>Run · Track · Queue</span>
+        </button>
+        <button
+          type="button"
+          className={activeSurface === 'issues' ? 'active' : ''}
+          onClick={() => setActiveSurface('issues')}
+        >
+          <b>Issues</b>
+          <span>
+            {scopedUnassignedCount + currentProducerDriftRuns.length + responsibilityMapDriftsInScope.length} attention
+          </span>
+        </button>
+        <button
+          type="button"
+          className={activeSurface === 'advanced' ? 'active' : ''}
+          onClick={() => setActiveSurface('advanced')}
+        >
+          <b>Advanced</b>
+          <span>Registry · Rules · Settings</span>
+        </button>
+      </nav>
+
       {error && <div className="error-banner">{error}</div>}
       {notice && <div className="notice-banner">{notice}</div>}
 
@@ -876,10 +908,14 @@ function App() {
         </div>
       </section>
 
+      {activeSurface === 'dashboard' && (
       <section className="summary-grid five">
         <div className="summary-card"><span>Running</span><strong>{runningCount}</strong></div>
         <div className="summary-card"><span>Queued</span><strong>{queuedCount}</strong></div>
-        <button className="summary-card summary-button" onClick={() => setSelectedView('unassigned')}>
+        <button
+          className="summary-card summary-button"
+          onClick={() => setActiveSurface('issues')}
+        >
           <span>Unassigned</span><strong>{scopedUnassignedCount}</strong>
         </button>
         <button className="summary-card summary-button" onClick={() => setSelectedView('project')}>
@@ -887,7 +923,9 @@ function App() {
         </button>
         <div className={`summary-card congestion ${congestionText.toLowerCase()}`}><span>Queue</span><strong>{congestionText}</strong></div>
       </section>
+      )}
 
+      {activeSurface === 'issues' && (
       <section className="panel producer-contract-panel">
         <div className="producer-contract-head">
           <div>
@@ -1504,8 +1542,10 @@ function App() {
           </div>
         )}
       </section>
+      )}
 
-      <div className="layout-grid">
+      <div className={`layout-grid surface-${activeSurface}`}>
+        {activeSurface === 'advanced' && (
         <section className="panel controls-panel">
           <h2>프로젝트 등록</h2>
           <form onSubmit={submitProject} className="stack-form">
@@ -1676,7 +1716,9 @@ function App() {
             <small className="muted-copy">Project를 하나 선택하면 해당 Project의 SLA/알림 정책을 편집할 수 있습니다.</small>
           )}
         </section>
+        )}
 
+        {activeSurface !== 'advanced' && (
         <section className="tracks-column">
           <section className="panel track-filter-panel">
             <div className="filter-head">
@@ -1686,25 +1728,31 @@ function App() {
                 {selectedProjectRepos.map(repo => <option key={repo.id} value={repo.id}>{repo.repo}</option>)}
               </select>
             </div>
-            <div className="filter-chips">
-              <button className={`filter-chip ${selectedView === 'all' ? 'active' : ''}`} onClick={() => setSelectedView('all')}>전체 <span>{tracksInProject.length}</span></button>
-              <button className={`filter-chip project-wide ${selectedView === 'project' ? 'active' : ''}`} onClick={() => setSelectedView('project')}>공용 CI <span>{scopedProjectRunCount}</span></button>
-              {tracksInProject.map(item => {
-                const activity = trackActivity(scopedTrack(item, item.runs.filter(runInScope)));
-                const activeCount = activity.running + activity.queued;
-                return (
-                  <button key={item.track.id} className={`filter-chip ${selectedView === item.track.id ? 'active' : ''}`} onClick={() => setSelectedView(item.track.id)}>
-                    {item.track.name}
-                    {activeCount > 0 && <span className="chip-live">{activeCount}</span>}
-                    {activeCount === 0 && activity.red > 0 && <span className="chip-red">RED</span>}
-                  </button>
-                );
-              })}
-              <button className={`filter-chip unassigned ${selectedView === 'unassigned' ? 'active' : ''}`} onClick={() => setSelectedView('unassigned')}>미귀속 <span>{scopedUnassignedCount}</span></button>
-            </div>
+            {activeSurface === 'dashboard' ? (
+              <div className="filter-chips">
+                <button className={`filter-chip ${selectedView === 'all' ? 'active' : ''}`} onClick={() => setSelectedView('all')}>전체 <span>{tracksInProject.length}</span></button>
+                <button className={`filter-chip project-wide ${selectedView === 'project' ? 'active' : ''}`} onClick={() => setSelectedView('project')}>공용 CI <span>{scopedProjectRunCount}</span></button>
+                {tracksInProject.map(item => {
+                  const activity = trackActivity(scopedTrack(item, item.runs.filter(runInScope)));
+                  const activeCount = activity.running + activity.queued;
+                  return (
+                    <button key={item.track.id} className={`filter-chip ${selectedView === item.track.id ? 'active' : ''}`} onClick={() => setSelectedView(item.track.id)}>
+                      {item.track.name}
+                      {activeCount > 0 && <span className="chip-live">{activeCount}</span>}
+                      {activeCount === 0 && activity.red > 0 && <span className="chip-red">RED</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="issue-scope-copy">
+                <b>Issue scope</b>
+                <span>미귀속 {scopedUnassignedCount} · producer drift {currentProducerDriftRuns.length} · responsibility drift {responsibilityMapDriftsInScope.length}</span>
+              </div>
+            )}
           </section>
 
-          {auditRun && (
+          {activeSurface === 'issues' && auditRun && (
             <section className="panel attribution-audit-panel">
               <div className="attribution-audit-head">
                 <div>
@@ -1779,7 +1827,7 @@ function App() {
             </section>
           )}
 
-          {selectedView === 'project' && (
+          {activeSurface === 'dashboard' && selectedView === 'project' && (
             <section className="panel inbox-panel">
               <div className="section-head">
                 <div>
@@ -1801,7 +1849,7 @@ function App() {
             </section>
           )}
 
-          {selectedView === 'unassigned' && (
+          {activeSurface === 'issues' && (
             <section className="panel inbox-panel">
               <div className="section-head">
                 <div><p className="eyebrow">ATTRIBUTION INBOX</p><h2>미귀속 CI</h2><p className="muted-copy">표시 {visibleUnassignedRuns.length}건 · 현재 범위 전체 {scopedUnassignedCount}건 · 저장소별 최대 최근 200건 표시</p></div>
@@ -1826,11 +1874,11 @@ function App() {
             </section>
           )}
 
-          {selectedView !== 'unassigned' && selectedView !== 'project' && visibleTracks.length === 0 && (
+          {activeSurface === 'dashboard' && selectedView !== 'unassigned' && selectedView !== 'project' && visibleTracks.length === 0 && (
             <div className="panel empty-state"><h2>표시할 트랙이 없습니다.</h2><p>선택한 프로젝트에 Track Key를 등록하십시오.</p></div>
           )}
 
-          {visibleTracks.map(item => {
+          {activeSurface === 'dashboard' && visibleTracks.map(item => {
             const [label, cls] = statusLabel(item);
             return (
               <article className="panel track-card" key={item.track.id}>
@@ -1858,6 +1906,7 @@ function App() {
             );
           })}
         </section>
+        )}
       </div>
     </main>
   );

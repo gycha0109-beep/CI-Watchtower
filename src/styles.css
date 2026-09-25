@@ -10,7 +10,13 @@ body { margin: 0; min-width: 1040px; min-height: 100vh; background: radial-gradi
 button, input { font: inherit; }
 button { cursor: pointer; }
 .app-shell { width: min(1480px, calc(100% - 48px)); margin: 0 auto; padding: 30px 0 56px; }
-.topbar { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 14px; }
+.surface-nav { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin-bottom: 18px; padding: 5px; border: 1px solid #202a42; border-radius: 14px; background: rgba(10,14,25,.88); }
+.surface-nav button { display: grid; gap: 3px; justify-items: start; border: 1px solid transparent; border-radius: 10px; background: transparent; color: #8390ab; padding: 10px 12px; text-align: left; }
+.surface-nav button:hover { background: #11182a; color: #cbd6eb; }
+.surface-nav button.active { border-color: #3657a7; background: rgba(63,110,247,.14); color: #eef3ff; }
+.surface-nav b { font-size: 13px; }
+.surface-nav span { color: #71809c; font-size: 10px; font-weight: 650; }
 .eyebrow { color: #6f85b4; font-size: 11px; font-weight: 800; letter-spacing: .16em; margin: 0 0 6px; }
 h1 { font-size: 34px; letter-spacing: -.04em; margin: 0; }
 h2 { font-size: 16px; margin: 0 0 15px; }
@@ -226,6 +232,10 @@ h2 { font-size: 16px; margin: 0 0 15px; }
 .producer-drift-source-pending { border-color: #4d4229; background: rgba(226,179,55,.05); color: #e4c66d; }
 
 .layout-grid { display: grid; grid-template-columns: 350px minmax(0,1fr); gap: 18px; align-items: start; }
+.layout-grid.surface-dashboard,
+.layout-grid.surface-issues,
+.layout-grid.surface-advanced { grid-template-columns: minmax(0,1fr); }
+.layout-grid.surface-advanced .controls-panel { position: static; max-height: none; overflow: visible; }
 .panel { background: rgba(14,19,33,.93); border: 1px solid #202a42; border-radius: 16px; box-shadow: 0 18px 50px rgba(0,0,0,.22); }
 .controls-panel { padding: 20px; position: sticky; top: 20px; max-height: calc(100vh - 40px); overflow: auto; }
 hr { border: 0; border-top: 1px solid #222c44; margin: 24px 0; }
@@ -425,6 +435,9 @@ input:focus { border-color: #4a73ee; box-shadow: 0 0 0 3px rgba(74,115,238,.12);
 .filter-head h2 {
   margin: 0;
 }
+.issue-scope-copy { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 34px; border-top: 1px solid #202a42; padding-top: 12px; color: #dfe7f8; }
+.issue-scope-copy b { font-size: 12px; }
+.issue-scope-copy span { color: #71809c; font-size: 11px; }
 .filter-help {
   color: #697894;
   font-size: 11px;
