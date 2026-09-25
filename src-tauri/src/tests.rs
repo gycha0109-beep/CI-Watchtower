@@ -11,6 +11,11 @@ fn legacy_v02_db_path(label: &str) -> std::path::PathBuf {
     ))
 }
 
+fn init_visualy_test_fixture(path: &Path) {
+    init_db(path).unwrap();
+    legacy_compat::seed_bejewely_project_scope(&Connection::open(path).unwrap()).unwrap();
+}
+
 fn seed_legacy_v02_database(path: &Path) {
     let conn = Connection::open(path).unwrap();
     conn.execute_batch(
@@ -434,7 +439,7 @@ fn repository_scope_stats_keep_project_and_repository_counts_exact() {
 #[test]
 fn dependabot_dynamic_workflows_do_not_pollute_attribution_surfaces() {
     let path = legacy_v02_db_path("dependabot-dynamic-noise");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
 
     let conn = Connection::open(&path).unwrap();
     let repository_id: i64 = conn
@@ -1767,7 +1772,7 @@ fn dynamic_workflow_rule_declares_responsibility_without_forcing_track_ownership
 #[test]
 fn producer_contract_stats_classify_recent_runs_without_overlapping_buckets() {
     let path = legacy_v02_db_path("producer-contract");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
 
     let conn = Connection::open(&path).unwrap();
     conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
@@ -1929,7 +1934,7 @@ fn producer_contract_stats_classify_recent_runs_without_overlapping_buckets() {
 #[test]
 fn producer_contract_runs_separate_current_from_historical_drift_by_workflow_identity() {
     let path = legacy_v02_db_path("producer-contract-current");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
 
     let conn = Connection::open(&path).unwrap();
     conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
@@ -2617,7 +2622,7 @@ fn attribution_detail_exposes_final_decision_and_ordered_evidence() {
 #[test]
 fn responsibility_map_source_health_preserves_last_good_snapshot_on_failure() {
     let path = legacy_v02_db_path("responsibility-map-source-health");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
     let conn = Connection::open(&path).unwrap();
     conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
 
@@ -2717,7 +2722,7 @@ fn responsibility_map_source_health_preserves_last_good_snapshot_on_failure() {
 #[test]
 fn responsibility_map_drift_is_detect_only_and_repository_scoped() {
     let path = legacy_v02_db_path("responsibility-map-drift");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
     let conn = Connection::open(&path).unwrap();
     conn.execute("PRAGMA foreign_keys=ON", []).unwrap();
 
@@ -3809,7 +3814,7 @@ fn responsibility_review_sla_escalates_p0_and_p1_without_escalating_p2() {
 #[test]
 fn responsibility_escalation_delivery_is_deduplicated_and_retry_bounded() {
     let path = legacy_v02_db_path("responsibility-escalation-delivery");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
     let conn = Connection::open(&path).unwrap();
     let repository_id: i64 = conn
         .query_row(
@@ -3943,7 +3948,7 @@ fn responsibility_escalation_delivery_is_deduplicated_and_retry_bounded() {
 #[test]
 fn responsibility_escalation_operator_lifecycle_is_audited_and_fingerprint_scoped() {
     let path = legacy_v02_db_path("responsibility-escalation-operator-lifecycle");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
     let conn = Connection::open(&path).unwrap();
     let repository_id: i64 = conn
         .query_row(
@@ -4096,7 +4101,7 @@ fn responsibility_escalation_operator_lifecycle_is_audited_and_fingerprint_scope
 #[test]
 fn responsibility_timed_suppression_expires_and_can_be_resnoozed() {
     let path = legacy_v02_db_path("responsibility-timed-suppression");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
     let conn = Connection::open(&path).unwrap();
     let repository_id: i64 = conn
         .query_row(
@@ -4230,7 +4235,7 @@ fn responsibility_timed_suppression_expires_and_can_be_resnoozed() {
 #[test]
 fn responsibility_review_policy_is_project_scoped_and_preserves_defaults() {
     let path = legacy_v02_db_path("responsibility-review-policy");
-    init_db(&path).unwrap();
+    init_visualy_test_fixture(&path);
     let conn = Connection::open(&path).unwrap();
     let visualy_project_id: i64 = conn
         .query_row(
