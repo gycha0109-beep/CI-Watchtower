@@ -119,7 +119,10 @@ fn refresh_project_tracks(
         upsert_track(conn, project_id, name, track_key, now)?;
     }
 
-    let placeholders = std::iter::repeat_n("?", tracks.len()).collect::<Vec<_>>().join(",");
+    let placeholders = std::iter::repeat("?")
+        .take(tracks.len())
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!(
         "UPDATE watch_tracks
          SET active=0,updated_at=?
