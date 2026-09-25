@@ -11,6 +11,7 @@ import type {
   ResponsibilityResolutionPreview,
   ResponsibilityResolutionPreviewInput,
   ResponsibilityResolutionResult,
+  ResponsibilityReviewPolicy,
   RunAttributionDetail,
   Settings,
   TrackInput,
@@ -50,6 +51,8 @@ export const api = {
   assignRun: (runId: number, trackId: number) => invoke<void>('assign_run', { runId, trackId }),
   ignoreRun: (runId: number) => invoke<void>('ignore_run', { runId }),
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
+  saveResponsibilityReviewPolicy: (policy: ResponsibilityReviewPolicy) =>
+    invoke<void>('save_responsibility_review_policy', { policy }),
   setGithubToken: (token: string) => invoke<void>('set_github_token', { token }),
   clearGithubToken: () => invoke<void>('clear_github_token'),
   openExternal: (url: string) => invoke<void>('open_external', { url }),

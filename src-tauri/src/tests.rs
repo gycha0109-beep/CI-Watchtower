@@ -3617,11 +3617,21 @@ fn explicit_conflict_model_has_distinct_keys() {
 
 #[test]
 fn responsibility_review_priority_and_age_bucket_follow_operational_order() {
-    assert_eq!(responsibility_review_priority("attention", 0), "p0");
-    assert_eq!(responsibility_review_priority("open", 72), "p1");
-    assert_eq!(responsibility_review_priority("open", 71), "p2");
-    assert_eq!(responsibility_review_priority("deferred", 120), "p3");
-    assert_eq!(responsibility_review_priority("blocked", 120), "blocked");
+    let policy = default_responsibility_review_policy(1);
+    assert_eq!(
+        responsibility_review_priority(&policy, "attention", 0),
+        "p0"
+    );
+    assert_eq!(responsibility_review_priority(&policy, "open", 72), "p1");
+    assert_eq!(responsibility_review_priority(&policy, "open", 71), "p2");
+    assert_eq!(
+        responsibility_review_priority(&policy, "deferred", 120),
+        "p3"
+    );
+    assert_eq!(
+        responsibility_review_priority(&policy, "blocked", 120),
+        "blocked"
+    );
     assert_eq!(responsibility_review_age_bucket(23), "fresh");
     assert_eq!(responsibility_review_age_bucket(24), "aging");
     assert_eq!(responsibility_review_age_bucket(71), "aging");
@@ -3633,30 +3643,31 @@ fn responsibility_review_priority_and_age_bucket_follow_operational_order() {
 
 #[test]
 fn responsibility_review_sla_escalates_p0_and_p1_without_escalating_p2() {
-    let p0_fresh = responsibility_review_sla("p0", 0);
+    let policy = default_responsibility_review_policy(1);
+    let p0_fresh = responsibility_review_sla(&policy, "p0", 0);
     assert_eq!(p0_fresh.0, "within_sla");
     assert_eq!(p0_fresh.1, Some(24));
     assert_eq!(p0_fresh.2, Some(24));
     assert_eq!(p0_fresh.3, "warning");
-    let p0_due = responsibility_review_sla("p0", 12);
+    let p0_due = responsibility_review_sla(&policy, "p0", 12);
     assert_eq!(p0_due.0, "due_soon");
     assert_eq!(p0_due.2, Some(12));
-    let p0_breached = responsibility_review_sla("p0", 24);
+    let p0_breached = responsibility_review_sla(&policy, "p0", 24);
     assert_eq!(p0_breached.0, "breached");
     assert_eq!(p0_breached.3, "critical");
-    let p1_due = responsibility_review_sla("p1", 72);
+    let p1_due = responsibility_review_sla(&policy, "p1", 72);
     assert_eq!(p1_due.0, "due_soon");
     assert_eq!(p1_due.1, Some(96));
     assert_eq!(p1_due.2, Some(24));
     assert_eq!(p1_due.3, "warning");
-    let p1_breached = responsibility_review_sla("p1", 100);
+    let p1_breached = responsibility_review_sla(&policy, "p1", 100);
     assert_eq!(p1_breached.0, "breached");
     assert_eq!(p1_breached.2, Some(-4));
     assert_eq!(p1_breached.3, "critical");
-    let p2_due = responsibility_review_sla("p2", 48);
+    let p2_due = responsibility_review_sla(&policy, "p2", 48);
     assert_eq!(p2_due.0, "due_soon");
     assert_eq!(p2_due.3, "none");
-    let deferred = responsibility_review_sla("p3", 500);
+    let deferred = responsibility_review_sla(&policy, "p3", 500);
     assert_eq!(deferred.0, "exempt");
     assert_eq!(deferred.1, None);
     assert!(responsibility_escalation_rank("critical") < responsibility_escalation_rank("warning"));
@@ -3786,6 +3797,78 @@ fn responsibility_escalation_delivery_is_deduplicated_and_retry_bounded() {
         .unwrap();
     assert_eq!(critical.status, "failed");
     assert_eq!(critical.attempts, 3);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
+fn responsibility_review_policy_is_project_scoped_and_preserves_defaults() {
+    let path = legacy_v02_db_path("responsibility-review-policy");
+    init_db(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let visualy_project_id: i64 = conn
+        .query_row(
+            "SELECT id FROM projects WHERE project_key='visualy'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let myeongha_project_id: i64 = conn
+        .query_row(
+            "SELECT id FROM projects WHERE project_key='myeongha'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let visualy_default = responsibility_review_policy(&conn, visualy_project_id).unwrap();
+    assert_eq!(visualy_default.p0_target_hours, 24);
+    assert_eq!(visualy_default.p1_target_hours, 96);
+    assert_eq!(visualy_default.p2_target_hours, 72);
+    assert!(visualy_default.notify_warning);
+    assert!(visualy_default.updated_at.is_none());
+
+    conn.execute(
+        "INSERT INTO responsibility_review_policies(
+           project_id,p0_target_hours,p1_target_hours,p2_target_hours,
+           p0_due_soon_hours,p1_due_soon_hours,p2_due_soon_hours,
+           notify_warning,notify_critical,updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        params![
+            visualy_project_id,
+            12,
+            120,
+            48,
+            6,
+            12,
+            12,
+            0,
+            1,
+            "2026-09-25T01:00:00Z"
+        ],
+    )
+    .unwrap();
+
+    let visualy = responsibility_review_policy(&conn, visualy_project_id).unwrap();
+    let myeongha = responsibility_review_policy(&conn, myeongha_project_id).unwrap();
+    assert_eq!(visualy.p0_target_hours, 12);
+    assert_eq!(visualy.p1_target_hours, 120);
+    assert_eq!(visualy.p2_target_hours, 48);
+    assert!(!visualy.notify_warning);
+    assert!(visualy.notify_critical);
+    assert_eq!(myeongha.p0_target_hours, 24);
+    assert_eq!(myeongha.p2_target_hours, 72);
+    assert!(myeongha.updated_at.is_none());
+
+    assert_eq!(responsibility_review_priority(&visualy, "open", 47), "p2");
+    assert_eq!(responsibility_review_priority(&visualy, "open", 48), "p1");
+    let p0 = responsibility_review_sla(&visualy, "p0", 6);
+    assert_eq!(p0.0, "due_soon");
+    assert_eq!(p0.1, Some(12));
+    assert_eq!(p0.2, Some(6));
 
     drop(conn);
     let _ = std::fs::remove_file(&path);

@@ -26,6 +26,12 @@ const HISTORICAL_RECONCILE_BATCH: i64 = 12;
 const PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY: i64 = 50;
 const RESPONSIBILITY_MAP_PATH: &str = "docs/ci/workflow-responsibility-map.json";
 const RESPONSIBILITY_ESCALATION_MAX_ATTEMPTS: i64 = 3;
+const DEFAULT_RESPONSIBILITY_P0_TARGET_HOURS: i64 = 24;
+const DEFAULT_RESPONSIBILITY_P1_TARGET_HOURS: i64 = 96;
+const DEFAULT_RESPONSIBILITY_P2_TARGET_HOURS: i64 = 72;
+const DEFAULT_RESPONSIBILITY_P0_DUE_SOON_HOURS: i64 = 12;
+const DEFAULT_RESPONSIBILITY_P1_DUE_SOON_HOURS: i64 = 24;
+const DEFAULT_RESPONSIBILITY_P2_DUE_SOON_HOURS: i64 = 24;
 
 struct AppState {
     db_path: PathBuf,
@@ -400,6 +406,21 @@ struct Settings {
     auto_archive_completed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponsibilityReviewPolicy {
+    project_id: i64,
+    p0_target_hours: i64,
+    p1_target_hours: i64,
+    p2_target_hours: i64,
+    p0_due_soon_hours: i64,
+    p1_due_soon_hours: i64,
+    p2_due_soon_hours: i64,
+    notify_warning: bool,
+    notify_critical: bool,
+    updated_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Dashboard {
@@ -410,6 +431,7 @@ struct Dashboard {
     token_configured: bool,
     settings: Settings,
     projects: Vec<Project>,
+    responsibility_review_policies: Vec<ResponsibilityReviewPolicy>,
     repositories: Vec<MonitoredRepository>,
     tracks: Vec<DashboardTrack>,
     project_workflow_rules: Vec<ProjectWorkflowRule>,
@@ -779,6 +801,19 @@ fn init_db(path: &Path) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_responsibility_review_state_scope
           ON responsibility_review_state(project_id, repository_id, last_seen_at DESC);
+
+        CREATE TABLE IF NOT EXISTS responsibility_review_policies (
+          project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+          p0_target_hours INTEGER NOT NULL CHECK(p0_target_hours > 0),
+          p1_target_hours INTEGER NOT NULL CHECK(p1_target_hours > 0),
+          p2_target_hours INTEGER NOT NULL CHECK(p2_target_hours > 0),
+          p0_due_soon_hours INTEGER NOT NULL CHECK(p0_due_soon_hours > 0),
+          p1_due_soon_hours INTEGER NOT NULL CHECK(p1_due_soon_hours > 0),
+          p2_due_soon_hours INTEGER NOT NULL CHECK(p2_due_soon_hours > 0),
+          notify_warning INTEGER NOT NULL DEFAULT 1,
+          notify_critical INTEGER NOT NULL DEFAULT 1,
+          updated_at TEXT NOT NULL
+        );
 
         CREATE TABLE IF NOT EXISTS track_aliases (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1647,7 +1682,7 @@ fn github_client(token: &str) -> Result<Client> {
     );
     Ok(Client::builder()
         .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.27")
+        .user_agent("ci-watchtower/0.3.28")
         .timeout(Duration::from_secs(20))
         .build()?)
 }
@@ -2128,10 +2163,69 @@ fn responsibility_review_status(
     .into())
 }
 
-fn responsibility_review_priority(status: &str, age_hours: i64) -> String {
+fn default_responsibility_review_policy(project_id: i64) -> ResponsibilityReviewPolicy {
+    ResponsibilityReviewPolicy {
+        project_id,
+        p0_target_hours: DEFAULT_RESPONSIBILITY_P0_TARGET_HOURS,
+        p1_target_hours: DEFAULT_RESPONSIBILITY_P1_TARGET_HOURS,
+        p2_target_hours: DEFAULT_RESPONSIBILITY_P2_TARGET_HOURS,
+        p0_due_soon_hours: DEFAULT_RESPONSIBILITY_P0_DUE_SOON_HOURS,
+        p1_due_soon_hours: DEFAULT_RESPONSIBILITY_P1_DUE_SOON_HOURS,
+        p2_due_soon_hours: DEFAULT_RESPONSIBILITY_P2_DUE_SOON_HOURS,
+        notify_warning: true,
+        notify_critical: true,
+        updated_at: None,
+    }
+}
+
+fn responsibility_review_policy(
+    conn: &Connection,
+    project_id: i64,
+) -> Result<ResponsibilityReviewPolicy> {
+    Ok(conn
+        .query_row(
+            "SELECT project_id,p0_target_hours,p1_target_hours,p2_target_hours,
+                    p0_due_soon_hours,p1_due_soon_hours,p2_due_soon_hours,
+                    notify_warning,notify_critical,updated_at
+             FROM responsibility_review_policies WHERE project_id=?",
+            params![project_id],
+            |row| {
+                Ok(ResponsibilityReviewPolicy {
+                    project_id: row.get(0)?,
+                    p0_target_hours: row.get(1)?,
+                    p1_target_hours: row.get(2)?,
+                    p2_target_hours: row.get(3)?,
+                    p0_due_soon_hours: row.get(4)?,
+                    p1_due_soon_hours: row.get(5)?,
+                    p2_due_soon_hours: row.get(6)?,
+                    notify_warning: row.get::<_, i64>(7)? != 0,
+                    notify_critical: row.get::<_, i64>(8)? != 0,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
+        .optional()?
+        .unwrap_or_else(|| default_responsibility_review_policy(project_id)))
+}
+
+fn list_responsibility_review_policies(
+    conn: &Connection,
+    projects: &[Project],
+) -> Result<Vec<ResponsibilityReviewPolicy>> {
+    projects
+        .iter()
+        .map(|project| responsibility_review_policy(conn, project.id))
+        .collect()
+}
+
+fn responsibility_review_priority(
+    policy: &ResponsibilityReviewPolicy,
+    status: &str,
+    age_hours: i64,
+) -> String {
     match status {
         "attention" => "p0".into(),
-        "open" if age_hours >= 72 => "p1".into(),
+        "open" if age_hours >= policy.p2_target_hours => "p1".into(),
         "open" => "p2".into(),
         "deferred" => "p3".into(),
         "blocked" => "blocked".into(),
@@ -2161,15 +2255,16 @@ fn responsibility_review_age_bucket(age_hours: i64) -> String {
 }
 
 fn responsibility_review_sla(
+    policy: &ResponsibilityReviewPolicy,
     priority: &str,
     age_hours: i64,
 ) -> (String, Option<i64>, Option<i64>, String, Option<String>) {
-    let target_hours = match priority {
-        "p0" => Some(24),
-        "p1" => Some(96),
-        "p2" => Some(72),
-        "p3" | "blocked" => None,
-        _ => None,
+    let (target_hours, due_soon_hours) = match priority {
+        "p0" => (Some(policy.p0_target_hours), policy.p0_due_soon_hours),
+        "p1" => (Some(policy.p1_target_hours), policy.p1_due_soon_hours),
+        "p2" => (Some(policy.p2_target_hours), policy.p2_due_soon_hours),
+        "p3" | "blocked" => (None, 0),
+        _ => (None, 0),
     };
     let Some(target_hours) = target_hours else {
         return ("exempt".into(), None, None, "none".into(), None);
@@ -2178,12 +2273,12 @@ fn responsibility_review_sla(
     if remaining <= 0 {
         let reason = match priority {
             "p0" => format!(
-                "P0 attention drift exceeded the 24h review SLA by {}h.",
-                -remaining
+                "P0 attention drift exceeded the {}h review SLA by {}h.",
+                target_hours, -remaining
             ),
             "p1" => format!(
-                "P1 aging drift exceeded the 96h review SLA by {}h.",
-                -remaining
+                "P1 aging drift exceeded the {}h review SLA by {}h.",
+                target_hours, -remaining
             ),
             _ => format!("Review SLA exceeded by {}h.", -remaining),
         };
@@ -2199,12 +2294,11 @@ fn responsibility_review_sla(
             Some(reason),
         );
     }
-    let due_soon = match priority {
-        "p0" => remaining <= 12,
-        "p1" | "p2" => remaining <= 24,
-        _ => false,
+    let status = if remaining <= due_soon_hours {
+        "due_soon"
+    } else {
+        "within_sla"
     };
-    let status = if due_soon { "due_soon" } else { "within_sla" };
     let escalation_level = if matches!(priority, "p0" | "p1") {
         "warning"
     } else {
@@ -2212,12 +2306,12 @@ fn responsibility_review_sla(
     };
     let reason = match priority {
         "p0" => Some(format!(
-            "P0 attention drift has {}h remaining before the 24h review SLA.",
-            remaining
+            "P0 attention drift has {}h remaining before the {}h review SLA.",
+            remaining, target_hours
         )),
         "p1" => Some(format!(
-            "P1 aging drift has {}h remaining before the 96h review SLA.",
-            remaining
+            "P1 aging drift has {}h remaining before the {}h review SLA.",
+            remaining, target_hours
         )),
         _ => None,
     };
@@ -2297,9 +2391,11 @@ fn populate_responsibility_review_operations(
     drift.review_event_count = event_count;
     drift.failed_attempt_count = failed_attempt_count;
     drift.last_reviewed_at = last_reviewed_at;
-    drift.review_priority = responsibility_review_priority(&drift.review_status, age_hours);
+    let policy = responsibility_review_policy(conn, drift.project_id)?;
+    drift.review_priority =
+        responsibility_review_priority(&policy, &drift.review_status, age_hours);
     let (sla_status, sla_target_hours, sla_remaining_hours, escalation_level, escalation_reason) =
-        responsibility_review_sla(&drift.review_priority, age_hours);
+        responsibility_review_sla(&policy, &drift.review_priority, age_hours);
     drift.sla_status = sla_status;
     drift.sla_target_hours = sla_target_hours;
     drift.sla_remaining_hours = sla_remaining_hours;
@@ -3209,6 +3305,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
     let conn = db(state)?;
     let settings = load_settings(&conn)?;
     let projects = list_projects(&conn, true)?;
+    let responsibility_review_policies = list_responsibility_review_policies(&conn, &projects)?;
     let repositories = list_repositories(&conn, false)?;
     let tracks = list_tracks(&conn, true)?;
     let project_workflow_rules = list_project_workflow_rules(&conn)?;
@@ -3294,6 +3391,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         token_configured: token_configured(),
         settings,
         projects,
+        responsibility_review_policies,
         repositories,
         tracks: dashboard_tracks,
         project_workflow_rules,
@@ -4155,6 +4253,12 @@ fn notify_responsibility_escalations(
         let Some(event_type) = responsibility_escalation_event_type(&drift.escalation_level) else {
             continue;
         };
+        let policy = responsibility_review_policy(conn, drift.project_id)?;
+        if (event_type == "warning" && !policy.notify_warning)
+            || (event_type == "critical" && !policy.notify_critical)
+        {
+            continue;
+        }
         if !responsibility_source_synced(conn, drift.repository_id)? {
             continue;
         }
@@ -5841,6 +5945,76 @@ fn save_settings(
 }
 
 #[tauri::command]
+fn save_responsibility_review_policy(
+    policy: ResponsibilityReviewPolicy,
+    state: State<'_, AppState>,
+) -> std::result::Result<(), String> {
+    let targets = [
+        policy.p0_target_hours,
+        policy.p1_target_hours,
+        policy.p2_target_hours,
+    ];
+    if targets.iter().any(|value| *value < 1 || *value > 720) {
+        return Err("Responsibility SLA target은 1~720시간 사이여야 합니다.".into());
+    }
+    if policy.p1_target_hours <= policy.p2_target_hours {
+        return Err("P1 SLA target은 P2 SLA target보다 커야 합니다.".into());
+    }
+    for (due, target) in [
+        (policy.p0_due_soon_hours, policy.p0_target_hours),
+        (policy.p1_due_soon_hours, policy.p1_target_hours),
+        (policy.p2_due_soon_hours, policy.p2_target_hours),
+    ] {
+        if due < 1 || due > target {
+            return Err("Due-soon 기준은 1시간 이상이며 해당 SLA target 이하여야 합니다.".into());
+        }
+    }
+    let conn = db(&state).map_err(|e| e.to_string())?;
+    let project_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1)",
+            params![policy.project_id],
+            |row| Ok(row.get::<_, i64>(0)? != 0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !project_exists {
+        return Err("활성 Project를 찾을 수 없습니다.".into());
+    }
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO responsibility_review_policies(
+           project_id,p0_target_hours,p1_target_hours,p2_target_hours,
+           p0_due_soon_hours,p1_due_soon_hours,p2_due_soon_hours,
+           notify_warning,notify_critical,updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(project_id) DO UPDATE SET
+           p0_target_hours=excluded.p0_target_hours,
+           p1_target_hours=excluded.p1_target_hours,
+           p2_target_hours=excluded.p2_target_hours,
+           p0_due_soon_hours=excluded.p0_due_soon_hours,
+           p1_due_soon_hours=excluded.p1_due_soon_hours,
+           p2_due_soon_hours=excluded.p2_due_soon_hours,
+           notify_warning=excluded.notify_warning,
+           notify_critical=excluded.notify_critical,
+           updated_at=excluded.updated_at",
+        params![
+            policy.project_id,
+            policy.p0_target_hours,
+            policy.p1_target_hours,
+            policy.p2_target_hours,
+            policy.p0_due_soon_hours,
+            policy.p1_due_soon_hours,
+            policy.p2_due_soon_hours,
+            if policy.notify_warning { 1 } else { 0 },
+            if policy.notify_critical { 1 } else { 0 },
+            now,
+        ],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn set_github_token(token: String) -> std::result::Result<(), String> {
     let token = token.trim();
     if token.len() < 20 {
@@ -5990,6 +6164,7 @@ pub fn run() {
             assign_run,
             ignore_run,
             save_settings,
+            save_responsibility_review_policy,
             set_github_token,
             clear_github_token,
             open_external

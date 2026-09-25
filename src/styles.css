@@ -694,3 +694,8 @@ select:focus { border-color: #4a73ee; box-shadow: 0 0 0 3px rgba(74,115,238,.12)
   font-size: 9px;
 }
 .reconciliation-evidence b { color: #9db4ff; }
+
+.responsibility-policy-editor { gap: 8px; }
+.responsibility-policy-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; }
+.responsibility-policy-toggle { display: flex !important; flex-direction: row !important; align-items: center; gap: 7px; color: #9cabc4; }
+.responsibility-policy-toggle input { width: auto; }
