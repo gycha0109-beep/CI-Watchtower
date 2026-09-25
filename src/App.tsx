@@ -329,6 +329,7 @@ function App() {
   );
   const scopedUnassignedCount = scopeStats.reduce((sum, item) => sum + item.unassignedCount, 0);
   const scopedProjectRunCount = scopeStats.reduce((sum, item) => sum + item.projectRunCount, 0);
+  const scopedProjectActiveRunCount = scopeStats.reduce((sum, item) => sum + item.projectActiveRunCount, 0);
 
   const producerStatsInScope = useMemo(
     () => (dashboard?.producerContractStats ?? []).filter(item =>
@@ -930,7 +931,7 @@ function App() {
           <span>Unassigned</span><strong>{scopedUnassignedCount}</strong>
         </button>
         <button className="summary-card summary-button" onClick={() => setSelectedView('project')}>
-          <span>Project CI</span><strong>{scopedProjectRunCount}</strong>
+          <span>Project CI Active</span><strong>{scopedProjectActiveRunCount}</strong>
         </button>
         <div className={`summary-card congestion ${congestionText.toLowerCase()}`}><span>Queue</span><strong>{congestionText}</strong></div>
       </section>
@@ -1742,7 +1743,7 @@ function App() {
             {activeSurface === 'dashboard' ? (
               <div className="filter-chips">
                 <button className={`filter-chip ${selectedView === 'all' ? 'active' : ''}`} onClick={() => setSelectedView('all')}>전체 <span>{tracksInProject.length}</span></button>
-                <button className={`filter-chip project-wide ${selectedView === 'project' ? 'active' : ''}`} onClick={() => setSelectedView('project')}>공용 CI <span>{scopedProjectRunCount}</span></button>
+                <button className={`filter-chip project-wide ${selectedView === 'project' ? 'active' : ''}`} onClick={() => setSelectedView('project')}>공용 CI 이력 <span>{scopedProjectRunCount}</span></button>
                 {tracksInProject.map(item => {
                   const activity = trackActivity(scopedTrack(item, item.runs.filter(runInScope)));
                   const activeCount = activity.running + activity.queued;
@@ -1843,12 +1844,12 @@ function App() {
               <div className="section-head">
                 <div>
                   <p className="eyebrow">PROJECT-WIDE CI</p>
-                  <h2>공용 CI</h2>
-                  <p className="muted-copy">표시 {visibleProjectRuns.length}건 · 현재 범위 전체 {scopedProjectRunCount}건 · 저장소별 최대 최근 200건 표시</p>
+                  <h2>공용 CI 이력</h2>
+                  <p className="muted-copy">현재 활성 {scopedProjectActiveRunCount}건 · 누적 {scopedProjectRunCount}건 · 화면 표시 {visibleProjectRuns.length}건 · 저장소별 최대 최근 200건 표시</p>
                 </div>
                 <strong>{scopedProjectRunCount}</strong>
               </div>
-              {scopedProjectRunCount === 0 ? <p className="muted-copy">현재 범위에 공용 CI가 없습니다.</p> : visibleProjectRuns.length === 0 ? <p className="muted-copy">현재 범위에 공용 CI가 있지만 표시 한도를 벗어났습니다.</p> : visibleProjectRuns.map(run => (
+              {scopedProjectRunCount === 0 ? <p className="muted-copy">현재 범위에 공용 CI 이력이 없습니다.</p> : visibleProjectRuns.length === 0 ? <p className="muted-copy">현재 범위에 공용 CI 이력이 있지만 표시 한도를 벗어났습니다.</p> : visibleProjectRuns.map(run => (
                 <div className={`run-row project-run-row ${auditRun?.id === run.id ? 'audit-selected' : ''}`} key={run.id}>
                   <span className={`dot ${runDot(run)}`} />
                   <button className="run-main run-link" onClick={() => void api.openExternal(run.htmlUrl)}><b>{run.workflowName}</b><small>{projectById.get(run.projectId)?.name} · {run.repository} · {run.headBranch ?? 'detached'} · <span className="mono">{run.headSha.slice(0, 8)}</span></small></button>

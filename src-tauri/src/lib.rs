@@ -496,6 +496,7 @@ struct RepositoryScopeStats {
     project_id: i64,
     unassigned_count: i64,
     project_run_count: i64,
+    project_active_run_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2748,7 +2749,14 @@ fn repository_scope_stats(conn: &Connection) -> Result<Vec<RepositoryScopeStats>
                        AND wr.ignored=0
                        AND wr.resolution_status='project'
                       THEN 1 ELSE 0
-                    END) AS project_run_count
+                    END) AS project_run_count,
+                SUM(CASE
+                      WHEN wr.run_id IS NOT NULL
+                       AND wr.ignored=0
+                       AND wr.resolution_status='project'
+                       AND wr.status IN ('in_progress','queued','requested','pending','waiting')
+                      THEN 1 ELSE 0
+                    END) AS project_active_run_count
          FROM monitored_repositories mr
          LEFT JOIN workflow_runs wr ON wr.repository_id=mr.id
          LEFT JOIN run_assignments ra ON ra.run_id=wr.run_id
@@ -2761,6 +2769,7 @@ fn repository_scope_stats(conn: &Connection) -> Result<Vec<RepositoryScopeStats>
             project_id: row.get(1)?,
             unassigned_count: row.get(2)?,
             project_run_count: row.get(3)?,
+            project_active_run_count: row.get(4)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
