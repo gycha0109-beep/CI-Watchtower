@@ -2981,6 +2981,13 @@ fn average_duration(conn: &Connection, track_id: i64) -> Result<Option<i64>> {
 }
 
 fn build_dashboard(state: &AppState) -> Result<Dashboard> {
+    build_dashboard_with_token_status(state, token_configured())
+}
+
+fn build_dashboard_with_token_status(
+    state: &AppState,
+    token_is_configured: bool,
+) -> Result<Dashboard> {
     let conn = db(state)?;
     let settings = load_settings(&conn)?;
     let projects = list_projects(&conn, true)?;
@@ -3069,7 +3076,7 @@ fn build_dashboard(state: &AppState) -> Result<Dashboard> {
         queued_count: queued_count.max(0) as usize,
         unassigned_count: unassigned_count.max(0) as usize,
         congestion_level: congestion_level.into(),
-        token_configured: token_configured(),
+        token_configured: token_is_configured,
         settings,
         projects,
         responsibility_review_policies,
