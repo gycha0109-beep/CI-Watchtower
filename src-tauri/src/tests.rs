@@ -2071,6 +2071,33 @@ fn producer_contract_runs_separate_current_from_historical_drift_by_workflow_ide
 }
 
 #[test]
+fn normal_runtime_sources_do_not_embed_historical_project_knowledge() {
+    let runtime_sources = [
+        include_str!("lib.rs"),
+        include_str!("../../src/App.tsx"),
+        include_str!("../../src/api.ts"),
+        include_str!("../../src/types.ts"),
+    ];
+    let forbidden = [
+        "K_beauty",
+        "BEJEWELY",
+        "MyeongHa",
+        "MESH6J",
+        "taxonomy&AI",
+        "privacy-recovery",
+    ];
+
+    for source in runtime_sources {
+        for value in forbidden {
+            assert!(
+                !source.contains(value),
+                "normal runtime source must not embed historical project value: {value}"
+            );
+        }
+    }
+}
+
+#[test]
 fn fresh_database_starts_without_project_specific_seed_data() {
     let path = legacy_v02_db_path("fresh-core-decoupled");
     init_db(&path).unwrap();
