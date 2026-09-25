@@ -914,10 +914,7 @@ function App() {
         <div className="summary-card"><span>Queued</span><strong>{queuedCount}</strong></div>
         <button
           className="summary-card summary-button"
-          onClick={() => {
-            setSelectedView('unassigned');
-            setActiveSurface('issues');
-          }}
+          onClick={() => setActiveSurface('issues')}
         >
           <span>Unassigned</span><strong>{scopedUnassignedCount}</strong>
         </button>
