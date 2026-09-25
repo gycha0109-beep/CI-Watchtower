@@ -495,13 +495,9 @@ jobs:
                               })()}
                               <small>{item.escalationReason ?? 'Review SLA escalation'}</small>""", "delivery row state")
 
-          app = replace_once(app, """              </div>
-                    </div>
-                  )}
-                  {responsibilityMapSourceWarnings.length > 0 ? (""", """              </div>
-                    </div>
-                  )}
-                  {responsibilityEscalationDeliveriesInScope.length > 0 && (
+          app = replace_once(app, """          )}
+          {responsibilityMapSourceWarnings.length > 0 ? (""", """          )}
+          {responsibilityEscalationDeliveriesInScope.length > 0 && (
                     <div className="responsibility-delivery-history">
                       <div className="responsibility-delivery-history-head">
                         <b>Desktop Escalation Delivery</b>
