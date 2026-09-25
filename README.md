@@ -49,7 +49,7 @@ Track Key는 영문 소문자, 숫자, 하이픈을 사용하는 canonical key�
 
 ```text
 feat/frontend-integration/reader-scene
-fix/ops/privacy-recovery
+fix/ops/queue-stall
 research/face-research/repeatability
 ```
 
