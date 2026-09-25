@@ -135,6 +135,9 @@ struct ResponsibilityMapDrift {
     sla_remaining_hours: Option<i64>,
     escalation_level: String,
     escalation_reason: Option<String>,
+    operator_state: String,
+    operator_actor: Option<String>,
+    operator_updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +160,22 @@ struct ResponsibilityEscalationDelivery {
     first_attempt_at: String,
     last_attempt_at: String,
     emitted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponsibilityEscalationOperatorInput {
+    review_key: String,
+    fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponsibilityEscalationOperatorResult {
+    status: String,
+    operator_state: String,
+    audit_id: Option<i64>,
+    current_drift: Option<ResponsibilityMapDrift>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -900,6 +919,38 @@ fn init_db(path: &Path) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_responsibility_escalation_delivery_scope
           ON responsibility_escalation_deliveries(project_id, repository_id, last_attempt_at DESC);
+
+        CREATE TABLE IF NOT EXISTS responsibility_escalation_operator_state (
+          review_key TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          repository_id INTEGER NOT NULL REFERENCES monitored_repositories(id) ON DELETE CASCADE,
+          workflow_name TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('active','acknowledged','suppressed')),
+          actor TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(review_key, fingerprint)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_responsibility_escalation_operator_state_scope
+          ON responsibility_escalation_operator_state(project_id, repository_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS responsibility_escalation_operator_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          review_key TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          repository_id INTEGER NOT NULL REFERENCES monitored_repositories(id) ON DELETE CASCADE,
+          workflow_name TEXT NOT NULL,
+          action TEXT NOT NULL CHECK(action IN ('acknowledge','suppress','activate')),
+          actor TEXT NOT NULL,
+          before_state TEXT NOT NULL,
+          after_state TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_responsibility_escalation_operator_audit_review
+          ON responsibility_escalation_operator_audit(review_key, fingerprint, id DESC);
 
         CREATE TABLE IF NOT EXISTS app_settings (
           id INTEGER PRIMARY KEY CHECK(id=1),
@@ -2332,6 +2383,35 @@ fn responsibility_escalation_rank(level: &str) -> i64 {
     }
 }
 
+fn responsibility_escalation_operator_state(
+    conn: &Connection,
+    drift: &ResponsibilityMapDrift,
+    now: &str,
+) -> Result<(String, Option<String>, Option<String>)> {
+    conn.execute(
+        "INSERT OR IGNORE INTO responsibility_escalation_operator_state(
+           review_key,fingerprint,project_id,repository_id,workflow_name,state,actor,updated_at
+         ) VALUES(?,?,?,?,?,'active',NULL,?)",
+        params![
+            drift.review_key,
+            drift.fingerprint,
+            drift.project_id,
+            drift.repository_id,
+            drift.workflow_name,
+            now,
+        ],
+    )?;
+    let (state, actor, updated_at): (String, Option<String>, String) = conn.query_row(
+        "SELECT state,actor,updated_at
+         FROM responsibility_escalation_operator_state
+         WHERE review_key=? AND fingerprint=?",
+        params![drift.review_key, drift.fingerprint],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let operator_updated_at = actor.as_ref().map(|_| updated_at);
+    Ok((state, actor, operator_updated_at))
+}
+
 fn populate_responsibility_review_operations(
     conn: &Connection,
     drift: &mut ResponsibilityMapDrift,
@@ -2401,6 +2481,11 @@ fn populate_responsibility_review_operations(
     drift.sla_remaining_hours = sla_remaining_hours;
     drift.escalation_level = escalation_level;
     drift.escalation_reason = escalation_reason;
+    let (operator_state, operator_actor, operator_updated_at) =
+        responsibility_escalation_operator_state(conn, drift, &now_text)?;
+    drift.operator_state = operator_state;
+    drift.operator_actor = operator_actor;
+    drift.operator_updated_at = operator_updated_at;
     Ok(())
 }
 
@@ -2639,6 +2724,9 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                 sla_remaining_hours: Some(72),
                 escalation_level: "none".into(),
                 escalation_reason: None,
+                operator_state: "active".into(),
+                operator_actor: None,
+                operator_updated_at: None,
             });
         }
     }
@@ -2689,6 +2777,9 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                 sla_remaining_hours: Some(72),
                 escalation_level: "none".into(),
                 escalation_reason: None,
+                operator_state: "active".into(),
+                operator_actor: None,
+                operator_updated_at: None,
                 });
             }
         }
@@ -2729,6 +2820,9 @@ fn responsibility_map_drifts(conn: &Connection) -> Result<Vec<ResponsibilityMapD
                 sla_remaining_hours: Some(72),
                 escalation_level: "none".into(),
                 escalation_reason: None,
+                operator_state: "active".into(),
+                operator_actor: None,
+                operator_updated_at: None,
                 });
             }
         }
@@ -4253,6 +4347,9 @@ fn notify_responsibility_escalations(
         let Some(event_type) = responsibility_escalation_event_type(&drift.escalation_level) else {
             continue;
         };
+        if drift.operator_state == "suppressed" {
+            continue;
+        }
         let policy = responsibility_review_policy(conn, drift.project_id)?;
         if (event_type == "warning" && !policy.notify_warning)
             || (event_type == "critical" && !policy.notify_critical)
@@ -4590,6 +4687,142 @@ fn current_responsibility_drift(
         .into_iter()
         .find(|item| item.review_key == review_key)
         .ok_or_else(|| anyhow!("검토 대상 Responsibility Drift가 더 이상 존재하지 않습니다."))
+}
+
+fn set_responsibility_escalation_operator_state_with_conn(
+    conn: &Connection,
+    input: &ResponsibilityEscalationOperatorInput,
+    target_state: &str,
+    action: &str,
+) -> Result<ResponsibilityEscalationOperatorResult> {
+    let drift = current_responsibility_drift(conn, &input.review_key)?;
+    if drift.fingerprint != input.fingerprint {
+        return Ok(ResponsibilityEscalationOperatorResult {
+            status: "stale_rejected".into(),
+            operator_state: drift.operator_state.clone(),
+            audit_id: None,
+            current_drift: Some(drift),
+        });
+    }
+    if target_state != "active" && drift.escalation_level == "none" {
+        return Ok(ResponsibilityEscalationOperatorResult {
+            status: "not_escalated".into(),
+            operator_state: drift.operator_state.clone(),
+            audit_id: None,
+            current_drift: Some(drift),
+        });
+    }
+    let before_state = drift.operator_state.clone();
+    if before_state == target_state {
+        return Ok(ResponsibilityEscalationOperatorResult {
+            status: target_state.into(),
+            operator_state: target_state.into(),
+            audit_id: None,
+            current_drift: Some(drift),
+        });
+    }
+    let now = Utc::now().to_rfc3339();
+    let actor = "local-user";
+    let tx = conn.unchecked_transaction()?;
+    let changed = tx.execute(
+        "UPDATE responsibility_escalation_operator_state
+         SET state=?,actor=?,updated_at=?,project_id=?,repository_id=?,workflow_name=?
+         WHERE review_key=? AND fingerprint=?",
+        params![
+            target_state,
+            actor,
+            now,
+            drift.project_id,
+            drift.repository_id,
+            drift.workflow_name,
+            drift.review_key,
+            drift.fingerprint,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(anyhow!("Escalation operator lifecycle state를 찾지 못했습니다."));
+    }
+    tx.execute(
+        "INSERT INTO responsibility_escalation_operator_audit(
+           review_key,fingerprint,project_id,repository_id,workflow_name,
+           action,actor,before_state,after_state,created_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        params![
+            drift.review_key,
+            drift.fingerprint,
+            drift.project_id,
+            drift.repository_id,
+            drift.workflow_name,
+            action,
+            actor,
+            before_state,
+            target_state,
+            now,
+        ],
+    )?;
+    let audit_id = tx.last_insert_rowid();
+    tx.commit()?;
+    let mut current = drift;
+    current.operator_state = target_state.into();
+    current.operator_actor = Some(actor.into());
+    current.operator_updated_at = Some(now);
+    Ok(ResponsibilityEscalationOperatorResult {
+        status: target_state.into(),
+        operator_state: target_state.into(),
+        audit_id: Some(audit_id),
+        current_drift: Some(current),
+    })
+}
+
+#[tauri::command]
+fn acknowledge_responsibility_escalation(
+    input: ResponsibilityEscalationOperatorInput,
+    state: State<'_, AppState>,
+) -> std::result::Result<ResponsibilityEscalationOperatorResult, String> {
+    let result = (|| -> Result<ResponsibilityEscalationOperatorResult> {
+        let conn = db(&state)?;
+        set_responsibility_escalation_operator_state_with_conn(
+            &conn,
+            &input,
+            "acknowledged",
+            "acknowledge",
+        )
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn suppress_responsibility_escalation(
+    input: ResponsibilityEscalationOperatorInput,
+    state: State<'_, AppState>,
+) -> std::result::Result<ResponsibilityEscalationOperatorResult, String> {
+    let result = (|| -> Result<ResponsibilityEscalationOperatorResult> {
+        let conn = db(&state)?;
+        set_responsibility_escalation_operator_state_with_conn(
+            &conn,
+            &input,
+            "suppressed",
+            "suppress",
+        )
+    })();
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn activate_responsibility_escalation(
+    input: ResponsibilityEscalationOperatorInput,
+    state: State<'_, AppState>,
+) -> std::result::Result<ResponsibilityEscalationOperatorResult, String> {
+    let result = (|| -> Result<ResponsibilityEscalationOperatorResult> {
+        let conn = db(&state)?;
+        set_responsibility_escalation_operator_state_with_conn(
+            &conn,
+            &input,
+            "active",
+            "activate",
+        )
+    })();
+    result.map_err(|e| e.to_string())
 }
 
 fn exact_project_rule(
@@ -6143,6 +6376,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_dashboard,
+            acknowledge_responsibility_escalation,
+            suppress_responsibility_escalation,
+            activate_responsibility_escalation,
             get_responsibility_resolution_preview,
             resolve_responsibility_drift,
             defer_responsibility_drift,
