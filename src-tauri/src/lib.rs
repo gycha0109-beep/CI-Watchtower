@@ -1323,11 +1323,18 @@ fn elapsed_seconds(
     start.map(|s| (end - s).num_seconds().max(0)).unwrap_or(0)
 }
 
-fn normalize_evidence_track_key(value: &str) -> String {
-    match value.trim().to_lowercase().as_str() {
-        "taxonomy&ai" => "taxonomy-ai".into(),
-        key => key.into(),
+fn normalize_evidence_key(value: &str) -> Option<String> {
+    let key = value.trim().to_lowercase();
+    if key.is_empty() || key.len() > 64 {
+        return None;
     }
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.' | '&'))
+    {
+        return None;
+    }
+    Some(key)
 }
 
 fn normalize_repository_binding(binding: &str) -> (String, Option<String>) {
@@ -1339,7 +1346,7 @@ fn normalize_repository_binding(binding: &str) -> (String, Option<String>) {
         return ("dynamic".into(), None);
     }
     if let Some(track_key) = binding.strip_prefix("static:") {
-        let track_key = normalize_evidence_track_key(track_key.trim());
+        let track_key = track_key.trim().to_lowercase();
         if validate_track_key(&track_key).is_ok() {
             return ("static".into(), Some(track_key));
         }
@@ -1351,17 +1358,14 @@ fn extract_marker(text: &str) -> Option<String> {
     let start = text.find("[WT:")? + 4;
     let tail = &text[start..];
     let end = tail.find(']')?;
-    let key = normalize_evidence_track_key(&tail[..end]);
-    validate_track_key(&key).ok()?;
-    Some(key)
+    normalize_evidence_key(&tail[..end])
 }
 
 fn extract_track_trailer(text: &str) -> Option<String> {
     for line in text.lines() {
         let trimmed = line.trim();
         if let Some(value) = trimmed.strip_prefix("Watchtower-Track:") {
-            let key = normalize_evidence_track_key(value);
-            if validate_track_key(&key).is_ok() {
+            if let Some(key) = normalize_evidence_key(value) {
                 return Some(key);
             }
         }
@@ -1370,7 +1374,7 @@ fn extract_track_trailer(text: &str) -> Option<String> {
 }
 
 fn branch_has_key(branch: &str, key: &str) -> bool {
-    let normalized_branch = branch.to_lowercase().replace("taxonomy&ai", "taxonomy-ai");
+    let normalized_branch = branch.to_lowercase();
     normalized_branch == key
         || normalized_branch.split('/').any(|segment| segment == key)
         || normalized_branch.starts_with(&format!("{key}/"))
@@ -3477,6 +3481,16 @@ async fn resolve_run(
             if branch_has_key(branch, &track.track_key) {
                 evidence.push(Evidence {
                     track_key: track.track_key.clone(),
+                    signal_type: "branch".into(),
+                    score: 90,
+                    value: branch.to_string(),
+                });
+            }
+        }
+        for alias in aliases.keys() {
+            if branch_has_key(branch, alias) {
+                evidence.push(Evidence {
+                    track_key: alias.clone(),
                     signal_type: "branch".into(),
                     score: 90,
                     value: branch.to_string(),
