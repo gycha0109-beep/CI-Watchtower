@@ -129,6 +129,13 @@ h2 { font-size: 16px; margin: 0 0 15px; }
 .responsibility-escalation-main { min-width: 0; display: grid; gap: 2px; }
 .responsibility-escalation-main b { color: #dce5f6; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .responsibility-escalation-main small, .responsibility-escalation-row > small { color: #71809c; font-size: 9px; }
+.responsibility-escalation-detail { min-width: 0; display: flex; flex-wrap: wrap; gap: 5px 8px; align-items: center; }
+.responsibility-escalation-detail > small:last-of-type { flex-basis: 100%; color: #71809c; font-size: 9px; line-height: 1.35; }
+.responsibility-escalation-actions { display: flex; gap: 5px; margin-left: auto; }
+.responsibility-operator-state { width: fit-content; border: 1px solid #33415d; border-radius: 999px; padding: 3px 6px; font-size: 8px; font-weight: 900; letter-spacing: .06em; }
+.responsibility-operator-state.active { border-color: #36517f; color: #8fb8ff; }
+.responsibility-operator-state.acknowledged { border-color: #31524a; color: #78d9aa; }
+.responsibility-operator-state.suppressed { border-color: #4d4229; color: #e4c66d; }
 .responsibility-delivery-state { width: fit-content; font-size: 8px; font-weight: 900; letter-spacing: .04em; }
 .responsibility-delivery-state.emitted { color: #78d9aa; }
 .responsibility-delivery-state.failed { color: #ff8796; }
