@@ -179,7 +179,7 @@ fn invalidate_cross_project_assignments(
     Ok(())
 }
 
-fn seed_bejewely_project_scope(conn: &Connection) -> Result<()> {
+pub(super) fn seed_bejewely_project_scope(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     let now = Utc::now().to_rfc3339();
 
@@ -356,7 +356,7 @@ fn seed_bejewely_project_scope(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate_project_scope_legacy(conn: &Connection) -> Result<()> {
+pub(super) fn migrate_project_scope_legacy(conn: &Connection) -> Result<()> {
     let now = Utc::now().to_rfc3339();
 
     let has_myeongha: bool = conn.query_row(
