@@ -402,6 +402,7 @@ fn repository_scope_stats_keep_project_and_repository_counts_exact() {
                repository_id INTEGER NOT NULL,
                workflow_path TEXT,
                resolution_status TEXT NOT NULL,
+               status TEXT NOT NULL,
                ignored INTEGER NOT NULL
              );
              CREATE TABLE run_assignments(
@@ -410,21 +411,21 @@ fn repository_scope_stats_keep_project_and_repository_counts_exact() {
              );
              INSERT INTO monitored_repositories(id,project_id)
                VALUES(10,1),(20,1),(30,2);
-             INSERT INTO workflow_runs(run_id,repository_id,workflow_path,resolution_status,ignored)
-               VALUES(101,10,NULL,'unassigned',0),
-                     (102,10,NULL,'conflict',0),
-                     (103,10,NULL,'project',0),
-                     (104,10,NULL,'unassigned',1),
-                     (201,20,NULL,'unassigned',0),
-                     (202,20,NULL,'project',0),
-                     (301,30,NULL,'project',0),
-                     (302,30,NULL,'unassigned',0);
+             INSERT INTO workflow_runs(run_id,repository_id,workflow_path,resolution_status,status,ignored)
+               VALUES(101,10,NULL,'unassigned','completed',0),
+                     (102,10,NULL,'conflict','completed',0),
+                     (103,10,NULL,'project','in_progress',0),
+                     (104,10,NULL,'unassigned','completed',1),
+                     (201,20,NULL,'unassigned','completed',0),
+                     (202,20,NULL,'project','completed',0),
+                     (301,30,NULL,'project','queued',0),
+                     (302,30,NULL,'unassigned','completed',0);
              INSERT INTO run_assignments(run_id,track_id) VALUES(102,999);",
     )
     .unwrap();
 
     let stats = repository_scope_stats(&conn).unwrap();
-    let by_repo: HashMap<i64, (i64, i64, i64)> = stats
+    let by_repo: HashMap<i64, (i64, i64, i64, i64)> = stats
         .into_iter()
         .map(|item| {
             (
@@ -433,14 +434,15 @@ fn repository_scope_stats_keep_project_and_repository_counts_exact() {
                     item.project_id,
                     item.unassigned_count,
                     item.project_run_count,
+                    item.project_active_run_count,
                 ),
             )
         })
         .collect();
 
-    assert_eq!(by_repo.get(&10), Some(&(1, 1, 1)));
-    assert_eq!(by_repo.get(&20), Some(&(1, 1, 1)));
-    assert_eq!(by_repo.get(&30), Some(&(2, 1, 1)));
+    assert_eq!(by_repo.get(&10), Some(&(1, 1, 1, 1)));
+    assert_eq!(by_repo.get(&20), Some(&(1, 1, 1, 0)));
+    assert_eq!(by_repo.get(&30), Some(&(2, 1, 1, 1)));
 }
 
 #[test]
