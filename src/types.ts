@@ -253,6 +253,36 @@ export interface ResponsibilityMapDrift {
   slaRemainingHours: number | null;
   escalationLevel: 'critical' | 'warning' | 'none' | string;
   escalationReason: string | null;
+  operatorState: 'active' | 'acknowledged' | 'suppressed' | string;
+  operatorActor: string | null;
+  operatorUpdatedAt: string | null;
+}
+
+export interface ResponsibilityEscalationOperatorInput {
+  reviewKey: string;
+  fingerprint: string;
+}
+
+export interface ResponsibilityEscalationOperatorResult {
+  status: 'active' | 'acknowledged' | 'suppressed' | 'stale_rejected' | 'not_escalated' | string;
+  operatorState: 'active' | 'acknowledged' | 'suppressed' | string;
+  auditId: number | null;
+  currentDrift: ResponsibilityMapDrift | null;
+}
+
+export interface ResponsibilityEscalationOperatorAuditEntry {
+  id: number;
+  projectId: number;
+  repositoryId: number;
+  repository: string;
+  workflowName: string;
+  reviewKey: string;
+  fingerprint: string;
+  action: 'acknowledge' | 'suppress' | 'activate' | string;
+  actor: string;
+  beforeState: string;
+  afterState: string;
+  createdAt: string;
 }
 
 export interface ResponsibilityEscalationDelivery {
@@ -362,6 +392,7 @@ export interface Dashboard {
   responsibilityMapDrifts: ResponsibilityMapDrift[];
   responsibilityMapSources: ResponsibilityMapSourceStatus[];
   responsibilityEscalationDeliveries: ResponsibilityEscalationDelivery[];
+  responsibilityEscalationOperatorActions: ResponsibilityEscalationOperatorAuditEntry[];
   projectRuns: WorkflowRunSummary[];
   unassignedRuns: WorkflowRunSummary[];
 }
