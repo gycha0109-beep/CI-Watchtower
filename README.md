@@ -262,6 +262,18 @@ Responsibility Review SLA와 desktop escalation delivery 정책을 Project 단�
 - 정책이 저장되지 않은 Project는 default policy를 read-time fallback으로 사용하므로 기존 설치/DB migration에서 동작이 바뀌지 않습니다.
 - 정책 변경은 SLA 계산과 알림 delivery에만 영향을 주며 Track/Rule/producer/map/run assignment를 변경하지 않습니다.
 
+### Escalation Acknowledge / Suppression Lifecycle (v0.3.29)
+
+SLA escalation의 delivery transport와 운영자 처리 상태를 분리합니다.
+
+- 각 escalation은 `review_key + fingerprint` 단위로 `ACTIVE / ACKNOWLEDGED / SUPPRESSED` operator lifecycle을 가집니다.
+- `ACKNOWLEDGED`는 운영자가 현재 escalation을 확인했다는 뜻이며 Responsibility Drift를 해결하거나 숨기지 않습니다.
+- `SUPPRESSED`는 현재 fingerprint의 SLA Escalation 전용 surface와 신규/재시도 desktop delivery를 억제하지만 원래 Review Inbox의 Drift는 그대로 유지합니다.
+- `다시 활성`은 같은 fingerprint를 `ACTIVE`로 되돌립니다. 기존 delivery transport 이력(`EMITTED / FAILED`)은 변경하지 않습니다.
+- fingerprint가 바뀌면 새로운 lifecycle이므로 과거 ACK/Suppression을 상속하지 않고 다시 `ACTIVE`에서 시작합니다.
+- operator action은 actor, timestamp, before/after state와 함께 immutable audit history로 기록하고 Dashboard에서 최근 이력을 확인할 수 있습니다.
+- ACK/Suppression은 Track, Project-wide/Dynamic rule, producer YAML, repository responsibility map, run assignment, resolution 결과를 변경하지 않습니다.
+
 ## Producer Contract Health
 
 Dashboard는 각 Repository의 **최근 최대 50개 Run**을 evidence 표본으로 유지합니다. 다만 현재 producer 건강도는 표본 전체를 그대로 평균내지 않고, 같은 Repository의 같은 GitHub `workflow_id`에서 **가장 최신 non-ignored Run 하나**만 current producer 상태로 사용합니다.
