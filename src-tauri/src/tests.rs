@@ -2082,9 +2082,13 @@ fn normal_runtime_sources_do_not_embed_historical_project_knowledge() {
         "K_beauty",
         "BEJEWELY",
         "MyeongHa",
+        "Saju",
+        "visualy",
         "MESH6J",
         "taxonomy&AI",
         "privacy-recovery",
+        "face-reading",
+        "full-report",
     ];
 
     for source in runtime_sources {
