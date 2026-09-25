@@ -60,7 +60,7 @@ pub(super) fn mark_core_decoupling(conn: &Connection) -> Result<()> {
     mark_migration(conn, CORE_DECOUPLING_MIGRATION)
 }
 
-fn legacy_track_key(name: &str, id: i64) -> String {
+pub(super) fn legacy_track_key(name: &str, id: i64) -> String {
     let lower = name.to_lowercase();
     if lower.contains("프론트") || lower.contains("frontend") {
         "frontend-integration".into()
@@ -111,7 +111,7 @@ fn migrate_legacy(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn invalidate_cross_project_assignments(
+pub(super) fn invalidate_cross_project_assignments(
     conn: &Connection,
     repository_id: i64,
     from_repository_project_id: Option<i64>,
