@@ -2324,9 +2324,12 @@ fn fresh_install_real_use_acceptance_smoke() {
     assert_eq!(dashboard.queued_count, 1);
     assert_eq!(dashboard.unassigned_count, 1);
     assert_eq!(dashboard.tracks[0].track.track_key, "ops");
-    assert_eq!(dashboard.tracks[0].health, "red");
+    assert_eq!(dashboard.tracks[0].health, "running");
     assert!(dashboard.tracks[0].runs.iter().any(|run| run.id == 91_001));
-    assert!(dashboard.tracks[0].runs.iter().any(|run| run.id == 91_002));
+    assert!(dashboard.tracks[0]
+        .runs
+        .iter()
+        .any(|run| run.id == 91_002 && run.conclusion.as_deref() == Some("failure")));
     assert!(dashboard.unassigned_runs.iter().any(|run| run.id == 91_003));
 
     let drift = dashboard
