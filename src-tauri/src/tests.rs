@@ -232,19 +232,26 @@ fn extracts_run_name_marker() {
 }
 
 #[test]
-fn normalizes_legacy_bejewely_taxonomy_key() {
+fn generic_alias_tokens_are_preserved_until_project_scoped_resolution() {
     assert_eq!(
-        extract_marker("[WT:taxonomy&AI] Product Query Quality"),
-        Some("taxonomy-ai".into())
+        extract_marker("[WT:legacy&ops] Shared Validation"),
+        Some("legacy&ops".into())
     );
     assert_eq!(
-        extract_track_trailer("feat: x\n\nWatchtower-Track: taxonomy&AI"),
-        Some("taxonomy-ai".into())
+        extract_track_trailer("feat: x\n\nWatchtower-Track: legacy&ops"),
+        Some("legacy&ops".into())
     );
-    assert!(branch_has_key(
-        "feat/taxonomy&AI/provider-quality",
-        "taxonomy-ai"
-    ));
+    assert!(branch_has_key("feat/legacy&ops/provider-quality", "legacy&ops"));
+
+    let tracks = vec![track(1, "ops")];
+    let aliases = HashMap::from([("legacy&ops".into(), "ops".into())]);
+    let resolution = resolve_evidence(
+        &tracks,
+        &aliases,
+        vec![evidence("legacy&ops", "run_name", 100)],
+    );
+    assert_eq!(resolution.status, "assigned");
+    assert_eq!(resolution.track_id, Some(1));
 }
 
 #[test]
@@ -2064,6 +2071,37 @@ fn producer_contract_runs_separate_current_from_historical_drift_by_workflow_ide
 }
 
 #[test]
+fn normal_runtime_sources_do_not_embed_historical_project_knowledge() {
+    let runtime_sources = [
+        include_str!("lib.rs"),
+        include_str!("../../src/App.tsx"),
+        include_str!("../../src/api.ts"),
+        include_str!("../../src/types.ts"),
+    ];
+    let forbidden = [
+        "K_beauty",
+        "BEJEWELY",
+        "MyeongHa",
+        "Saju",
+        "visualy",
+        "MESH6J",
+        "taxonomy&AI",
+        "privacy-recovery",
+        "face-reading",
+        "full-report",
+    ];
+
+    for source in runtime_sources {
+        for value in forbidden {
+            assert!(
+                !source.contains(value),
+                "normal runtime source must not embed historical project value: {value}"
+            );
+        }
+    }
+}
+
+#[test]
 fn fresh_database_starts_without_project_specific_seed_data() {
     let path = legacy_v02_db_path("fresh-core-decoupled");
     init_db(&path).unwrap();
@@ -3452,8 +3490,12 @@ fn repository_responsibility_binding_normalizes_supported_contracts() {
         ("dynamic".into(), None)
     );
     assert_eq!(
-        normalize_repository_binding("static:taxonomy&AI"),
-        ("static".into(), Some("taxonomy-ai".into()))
+        normalize_repository_binding("static:ops"),
+        ("static".into(), Some("ops".into()))
+    );
+    assert_eq!(
+        normalize_repository_binding("static:legacy&ops"),
+        ("unknown".into(), None)
     );
     assert_eq!(
         normalize_repository_binding("future-contract"),
