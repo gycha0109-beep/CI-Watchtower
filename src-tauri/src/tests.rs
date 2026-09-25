@@ -3816,13 +3816,13 @@ fn responsibility_review_policy_is_project_scoped_and_preserves_defaults() {
             |row| row.get(0),
         )
         .unwrap();
-    let myeongha_project_id: i64 = conn
-        .query_row(
-            "SELECT id FROM projects WHERE project_key='myeongha'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    conn.execute(
+        "INSERT INTO projects(name,project_key,active,created_at,updated_at)
+         VALUES('Policy Isolation','policy-isolation',1,'now','now')",
+        [],
+    )
+    .unwrap();
+    let isolation_project_id = conn.last_insert_rowid();
 
     let visualy_default = responsibility_review_policy(&conn, visualy_project_id).unwrap();
     assert_eq!(visualy_default.p0_target_hours, 24);
@@ -3853,15 +3853,15 @@ fn responsibility_review_policy_is_project_scoped_and_preserves_defaults() {
     .unwrap();
 
     let visualy = responsibility_review_policy(&conn, visualy_project_id).unwrap();
-    let myeongha = responsibility_review_policy(&conn, myeongha_project_id).unwrap();
+    let isolated = responsibility_review_policy(&conn, isolation_project_id).unwrap();
     assert_eq!(visualy.p0_target_hours, 12);
     assert_eq!(visualy.p1_target_hours, 120);
     assert_eq!(visualy.p2_target_hours, 48);
     assert!(!visualy.notify_warning);
     assert!(visualy.notify_critical);
-    assert_eq!(myeongha.p0_target_hours, 24);
-    assert_eq!(myeongha.p2_target_hours, 72);
-    assert!(myeongha.updated_at.is_none());
+    assert_eq!(isolated.p0_target_hours, 24);
+    assert_eq!(isolated.p2_target_hours, 72);
+    assert!(isolated.updated_at.is_none());
 
     assert_eq!(responsibility_review_priority(&visualy, "open", 47), "p2");
     assert_eq!(responsibility_review_priority(&visualy, "open", 48), "p1");
