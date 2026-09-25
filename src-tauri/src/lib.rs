@@ -5268,37 +5268,41 @@ async fn poll_now(app: AppHandle) -> std::result::Result<Dashboard, String> {
     build_dashboard(&state).map_err(|e| e.to_string())
 }
 
+fn save_project_in_conn(conn: &Connection, input: &ProjectInput, now: &str) -> Result<i64> {
+    let name = input.name.trim();
+    let project_key = input.project_key.trim().to_lowercase();
+    if name.is_empty() {
+        return Err(anyhow!("프로젝트 이름을 입력하십시오."));
+    }
+    validate_track_key(&project_key)?;
+    let id = if let Some(id) = input.id {
+        conn.execute(
+            "UPDATE projects SET name=?,project_key=?,active=1,updated_at=? WHERE id=?",
+            params![name, project_key, now, id],
+        )?;
+        if conn.changes() == 0 {
+            return Err(anyhow!("수정할 프로젝트를 찾지 못했습니다."));
+        }
+        id
+    } else {
+        conn.execute(
+            "INSERT INTO projects(name,project_key,active,created_at,updated_at) VALUES(?,?,1,?,?)",
+            params![name, project_key, now, now],
+        )?;
+        conn.last_insert_rowid()
+    };
+    Ok(id)
+}
+
 #[tauri::command]
 fn save_project(
     input: ProjectInput,
     state: State<'_, AppState>,
 ) -> std::result::Result<i64, String> {
     let result = (|| -> Result<i64> {
-        let name = input.name.trim();
-        let project_key = input.project_key.trim().to_lowercase();
-        if name.is_empty() {
-            return Err(anyhow!("프로젝트 이름을 입력하십시오."));
-        }
-        validate_track_key(&project_key)?;
         let conn = db(&state)?;
         let now = Utc::now().to_rfc3339();
-        let id = if let Some(id) = input.id {
-            conn.execute(
-                "UPDATE projects SET name=?,project_key=?,active=1,updated_at=? WHERE id=?",
-                params![name, project_key, now, id],
-            )?;
-            if conn.changes() == 0 {
-                return Err(anyhow!("수정할 프로젝트를 찾지 못했습니다."));
-            }
-            id
-        } else {
-            conn.execute(
-                "INSERT INTO projects(name,project_key,active,created_at,updated_at) VALUES(?,?,1,?,?)",
-                params![name, project_key, now, now],
-            )?;
-            conn.last_insert_rowid()
-        };
-        Ok(id)
+        save_project_in_conn(&conn, &input, &now)
     })();
     result.map_err(|e| e.to_string())
 }
@@ -5549,45 +5553,49 @@ fn delete_dynamic_workflow_rule(
     result.map_err(|e| e.to_string())
 }
 
+fn save_track_in_conn(conn: &Connection, input: &TrackInput, now: &str) -> Result<i64> {
+    let name = input.name.trim();
+    let track_key = input.track_key.trim().to_lowercase();
+    if name.is_empty() {
+        return Err(anyhow!("트랙 이름을 입력하십시오."));
+    }
+    validate_track_key(&track_key)?;
+    if input.long_ci_minutes <= 0 || input.long_ci_minutes > 10080 {
+        return Err(anyhow!("장기 CI 기준시간은 1~10080분 사이로 입력하십시오."));
+    }
+    let project_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1)",
+        params![input.project_id],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )?;
+    if !project_exists {
+        return Err(anyhow!("프로젝트를 찾지 못했습니다."));
+    }
+    let id = if let Some(id) = input.id {
+        conn.execute(
+            "UPDATE watch_tracks SET project_id=?,name=?,track_key=?,long_ci_minutes=?,active=1,updated_at=? WHERE id=?",
+            params![input.project_id, name, track_key, input.long_ci_minutes, now, id],
+        )?;
+        if conn.changes() == 0 {
+            return Err(anyhow!("수정할 트랙을 찾지 못했습니다."));
+        }
+        id
+    } else {
+        conn.execute(
+            "INSERT INTO watch_tracks(project_id,name,track_key,long_ci_minutes,active,created_at,updated_at) VALUES(?,?,?,?,1,?,?)",
+            params![input.project_id, name, track_key, input.long_ci_minutes, now, now],
+        )?;
+        conn.last_insert_rowid()
+    };
+    Ok(id)
+}
+
 #[tauri::command]
 fn save_track(input: TrackInput, state: State<'_, AppState>) -> std::result::Result<i64, String> {
     let result = (|| -> Result<i64> {
-        let name = input.name.trim();
-        let track_key = input.track_key.trim().to_lowercase();
-        if name.is_empty() {
-            return Err(anyhow!("트랙 이름을 입력하십시오."));
-        }
-        validate_track_key(&track_key)?;
-        if input.long_ci_minutes <= 0 || input.long_ci_minutes > 10080 {
-            return Err(anyhow!("장기 CI 기준시간은 1~10080분 사이로 입력하십시오."));
-        }
         let conn = db(&state)?;
-        let project_exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1)",
-            params![input.project_id],
-            |row| Ok(row.get::<_, i64>(0)? != 0),
-        )?;
-        if !project_exists {
-            return Err(anyhow!("프로젝트를 찾지 못했습니다."));
-        }
         let now = Utc::now().to_rfc3339();
-        let id = if let Some(id) = input.id {
-            conn.execute(
-                "UPDATE watch_tracks SET project_id=?,name=?,track_key=?,long_ci_minutes=?,active=1,updated_at=? WHERE id=?",
-                params![input.project_id, name, track_key, input.long_ci_minutes, now, id],
-            )?;
-            if conn.changes() == 0 {
-                return Err(anyhow!("수정할 트랙을 찾지 못했습니다."));
-            }
-            id
-        } else {
-            conn.execute(
-                "INSERT INTO watch_tracks(project_id,name,track_key,long_ci_minutes,active,created_at,updated_at) VALUES(?,?,?,?,1,?,?)",
-                params![input.project_id, name, track_key, input.long_ci_minutes, now, now],
-            )?;
-            conn.last_insert_rowid()
-        };
-        Ok(id)
+        save_track_in_conn(&conn, &input, &now)
     })();
     result.map_err(|e| e.to_string())
 }
@@ -5613,41 +5621,49 @@ fn delete_track(id: i64, state: State<'_, AppState>) -> std::result::Result<(), 
     result.map_err(|e| e.to_string())
 }
 
+fn save_repository_in_conn(
+    conn: &Connection,
+    input: &RepositoryInput,
+    now: &str,
+) -> Result<i64> {
+    let repo = input.repo.trim();
+    validate_repo(repo)?;
+    let project_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1)",
+        params![input.project_id],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )?;
+    if !project_exists {
+        return Err(anyhow!("프로젝트를 찾지 못했습니다."));
+    }
+    let id = if let Some(id) = input.id {
+        conn.execute(
+            "UPDATE monitored_repositories SET project_id=?,repo=?,enabled=?,updated_at=? WHERE id=?",
+            params![input.project_id, repo, if input.enabled { 1 } else { 0 }, now, id],
+        )?;
+        if conn.changes() == 0 {
+            return Err(anyhow!("수정할 저장소를 찾지 못했습니다."));
+        }
+        id
+    } else {
+        conn.execute(
+            "INSERT INTO monitored_repositories(project_id,repo,enabled,created_at,updated_at) VALUES(?,?,?,?,?)",
+            params![input.project_id, repo, if input.enabled { 1 } else { 0 }, now, now],
+        )?;
+        conn.last_insert_rowid()
+    };
+    Ok(id)
+}
+
 #[tauri::command]
 fn save_repository(
     input: RepositoryInput,
     state: State<'_, AppState>,
 ) -> std::result::Result<i64, String> {
     let result = (|| -> Result<i64> {
-        let repo = input.repo.trim();
-        validate_repo(repo)?;
         let conn = db(&state)?;
-        let project_exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1)",
-            params![input.project_id],
-            |row| Ok(row.get::<_, i64>(0)? != 0),
-        )?;
-        if !project_exists {
-            return Err(anyhow!("프로젝트를 찾지 못했습니다."));
-        }
         let now = Utc::now().to_rfc3339();
-        let id = if let Some(id) = input.id {
-            conn.execute(
-                "UPDATE monitored_repositories SET project_id=?,repo=?,enabled=?,updated_at=? WHERE id=?",
-                params![input.project_id, repo, if input.enabled { 1 } else { 0 }, now, id],
-            )?;
-            if conn.changes() == 0 {
-                return Err(anyhow!("수정할 저장소를 찾지 못했습니다."));
-            }
-            id
-        } else {
-            conn.execute(
-                "INSERT INTO monitored_repositories(project_id,repo,enabled,created_at,updated_at) VALUES(?,?,?,?,?)",
-                params![input.project_id, repo, if input.enabled { 1 } else { 0 }, now, now],
-            )?;
-            conn.last_insert_rowid()
-        };
-        Ok(id)
+        save_repository_in_conn(&conn, &input, &now)
     })();
     result.map_err(|e| e.to_string())
 }
