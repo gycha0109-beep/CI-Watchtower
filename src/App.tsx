@@ -1561,7 +1561,7 @@ function App() {
           <h2>프로젝트 등록</h2>
           <form onSubmit={submitProject} className="stack-form">
             <label>프로젝트 이름<input value={projectName} onChange={e => setProjectName(e.target.value)} placeholder="예: 제품 운영" /></label>
-            <label>Project Key<input value={projectKey} onChange={e => setProjectKey(e.target.value)} placeholder="visualy" /></label>
+            <label>Project Key<input value={projectKey} onChange={e => setProjectKey(e.target.value)} placeholder="product-app" /></label>
             <button className="primary" type="submit">프로젝트 추가</button>
           </form>
           <div className="project-manager-list">
@@ -1662,7 +1662,7 @@ function App() {
           <h2>Dynamic Workflow 규칙</h2>
           <p className="hint">여러 Track이 같은 Workflow를 의도적으로 공유할 때 등록합니다. 이 규칙은 Track을 강제하지 않으며 각 Run의 명시 신호는 계속 필요합니다.</p>
           <form onSubmit={submitDynamicRule} className="stack-form">
-            <label>Workflow 이름<input value={dynamicRuleName} onChange={e => setDynamicRuleName(e.target.value)} placeholder="예: MESH6J Manual Browser Capture Surface CI" /></label>
+            <label>Workflow 이름<input value={dynamicRuleName} onChange={e => setDynamicRuleName(e.target.value)} placeholder="예: Shared Browser Validation" /></label>
             <label>저장소 범위
               <select value={dynamicRuleRepositoryId} onChange={e => setDynamicRuleRepositoryId(e.target.value === 'all' ? 'all' : Number(e.target.value))}>
                 <option value="all">프로젝트 전체</option>
