@@ -2467,8 +2467,7 @@ fn responsibility_escalation_operator_state(
             .unwrap_or(false);
     if expired {
         let previous_until = suppressed_until.clone();
-        let tx = conn.unchecked_transaction()?;
-        tx.execute(
+        conn.execute(
             "UPDATE responsibility_escalation_operator_state
              SET state='active',actor='system-expiry',updated_at=?,suppressed_until=NULL,
                  project_id=?,repository_id=?,workflow_name=?
@@ -2482,7 +2481,7 @@ fn responsibility_escalation_operator_state(
                 drift.fingerprint,
             ],
         )?;
-        tx.execute(
+        conn.execute(
             "INSERT INTO responsibility_escalation_operator_audit(
                review_key,fingerprint,project_id,repository_id,workflow_name,
                action,actor,before_state,after_state,
@@ -2498,7 +2497,6 @@ fn responsibility_escalation_operator_state(
                 now,
             ],
         )?;
-        tx.commit()?;
         state = "active".into();
         actor = Some("system-expiry".into());
         updated_at = now.into();
