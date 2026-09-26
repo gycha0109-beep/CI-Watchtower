@@ -4049,8 +4049,9 @@ fn backfill_local_work_track_associations(conn: &Connection) -> Result<()> {
                      )
                    )",
             )?;
-            stmt.query_map(params![project_id], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            let rows =
+                stmt.query_map(params![project_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
 
         for (run_id, display_title) in candidates {
@@ -4061,15 +4062,15 @@ fn backfill_local_work_track_associations(conn: &Connection) -> Result<()> {
                      WHERE run_id=? AND score>=90
                      ORDER BY score DESC,id ASC",
                 )?;
-                stmt.query_map(params![run_id], |row| {
+                let rows = stmt.query_map(params![run_id], |row| {
                     Ok(Evidence {
                         track_key: row.get(0)?,
                         signal_type: row.get(1)?,
                         score: row.get(2)?,
                         value: row.get(3)?,
                     })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             if let Some(title) = display_title {
                 if let Some(key) = extract_marker(&title) {
