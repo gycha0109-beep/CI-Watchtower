@@ -2280,6 +2280,202 @@ fn existing_registry_refreshes_once_without_becoming_runtime_seed_data() {
 }
 
 #[test]
+fn refreshed_tracks_recover_stored_explicit_run_attribution_once() {
+    let path = legacy_v02_db_path("current-track-assignment-refresh");
+    init_db(&path).unwrap();
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "DELETE FROM schema_migrations
+         WHERE migration_key='current-track-assignment-20260926-v2'",
+        [],
+    )
+    .unwrap();
+    let now = "2026-09-26T00:00:00Z";
+    conn.execute(
+        "INSERT INTO projects(name,project_key,active,created_at,updated_at)
+         VALUES('명하','myeongha',1,?,?)",
+        params![now, now],
+    )
+    .unwrap();
+    let project_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO monitored_repositories(
+           project_id,repo,enabled,running_count,queued_count,created_at,updated_at
+         ) VALUES(?,'gycha0109-beep/Saju',1,0,0,?,?)",
+        params![project_id, now, now],
+    )
+    .unwrap();
+    let repository_id = conn.last_insert_rowid();
+
+    for (name, track_key, active) in [
+        ("캐릭터 설계", "character-design", 1_i64),
+        ("관상 엔진", "face-engine", 1_i64),
+        ("관상 브릿지", "face-bridge", 1_i64),
+        ("전통 관상 연구", "face-research", 1_i64),
+        ("사주 브릿지", "saju-bridge", 1_i64),
+        ("상품 제작 및 결제", "product-commerce", 0_i64),
+    ] {
+        conn.execute(
+            "INSERT INTO watch_tracks(
+               project_id,name,track_key,long_ci_minutes,active,created_at,updated_at
+             ) VALUES(?,?,?,8,?,?,?)",
+            params![project_id, name, track_key, active, now, now],
+        )
+        .unwrap();
+    }
+
+    let character_design_id: i64 = conn
+        .query_row(
+            "SELECT id FROM watch_tracks
+             WHERE project_id=? AND track_key='character-design'",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let old_product_commerce_id: i64 = conn
+        .query_row(
+            "SELECT id FROM watch_tracks
+             WHERE project_id=? AND track_key='product-commerce'",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    for (run_id, status, title) in [
+        (9101_i64, "unassigned", "saju bridge"),
+        (9102, "conflict", "face bridge priority"),
+        (9103, "conflict", "same-priority conflict"),
+        (9104, "assigned", "manual character design"),
+        (9105, "unassigned", "topic face bridge"),
+        (9106, "unassigned", "face observation engine"),
+        (9107, "unassigned", "traditional face research"),
+    ] {
+        conn.execute(
+            "INSERT INTO workflow_runs(
+               run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,
+               head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,
+               created_at,run_started_at,updated_at,last_seen_at,resolution_status,ignored
+             ) VALUES(?, ?, ?, 'Feature CI', '.github/workflows/feature.yml', ?, 'pull_request',
+                      'test/track-migration', ?, ?, 1, 'completed', 'success', ?,
+                      ?, ?, ?, ?, ?, 0)",
+            params![
+                run_id,
+                repository_id,
+                run_id,
+                title,
+                format!("sha{run_id}"),
+                run_id,
+                format!("https://example/{run_id}"),
+                now,
+                now,
+                now,
+                now,
+                status
+            ],
+        )
+        .unwrap();
+    }
+
+    for (run_id, track_key, signal_type, score) in [
+        (9101_i64, "saju-bridge", "pr_marker", 98_i64),
+        (9102, "face-reading-binding", "pr_marker", 98),
+        (9102, "face-engine", "branch", 90),
+        (9103, "face-reading-binding", "pr_marker", 98),
+        (9103, "face-engine", "pr_marker", 98),
+        (9105, "topic-face", "pr_marker", 98),
+        (9106, "face-observation-engine", "pr_marker", 98),
+        (9107, "face-traditional-research", "pr_marker", 98),
+    ] {
+        conn.execute(
+            "INSERT INTO run_evidence(
+               run_id,track_key,signal_type,score,value,created_at
+             ) VALUES(?,?,?,?,?,?)",
+            params![run_id, track_key, signal_type, score, track_key, now],
+        )
+        .unwrap();
+    }
+
+    conn.execute(
+        "INSERT INTO run_assignments(
+           run_id,track_id,confidence,source,reason,manual,assigned_at
+         ) VALUES(9104,?,100,'manual','사용자 수동 귀속',1,?)",
+        params![old_product_commerce_id, now],
+    )
+    .unwrap();
+
+    legacy_compat::refresh_existing_track_assignments(&conn).unwrap();
+
+    let assigned_key = |run_id: i64| -> Option<String> {
+        conn.query_row(
+            "SELECT wt.track_key
+             FROM run_assignments ra
+             JOIN watch_tracks wt ON wt.id=ra.track_id
+             WHERE ra.run_id=?",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    };
+
+    assert_eq!(assigned_key(9101).as_deref(), Some("saju-bridge"));
+    assert_eq!(assigned_key(9102).as_deref(), Some("face-bridge"));
+    assert_eq!(assigned_key(9103), None);
+    assert_eq!(assigned_key(9105).as_deref(), Some("face-bridge"));
+    assert_eq!(assigned_key(9106).as_deref(), Some("face-engine"));
+    assert_eq!(assigned_key(9107).as_deref(), Some("face-research"));
+    assert_eq!(assigned_key(9104).as_deref(), Some("character-design"));
+
+    let manual: i64 = conn
+        .query_row(
+            "SELECT manual FROM run_assignments WHERE run_id=9104",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(manual, 1);
+    let manual_track_id: i64 = conn
+        .query_row(
+            "SELECT track_id FROM run_assignments WHERE run_id=9104",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(manual_track_id, character_design_id);
+
+    let conflict_status: String = conn
+        .query_row(
+            "SELECT resolution_status FROM workflow_runs WHERE run_id=9103",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(conflict_status, "conflict");
+
+    conn.execute(
+        "UPDATE run_assignments SET reason='사용자 후속 수정'
+         WHERE run_id=9101",
+        [],
+    )
+    .unwrap();
+    legacy_compat::refresh_existing_track_assignments(&conn).unwrap();
+    let reason: String = conn
+        .query_row(
+            "SELECT reason FROM run_assignments WHERE run_id=9101",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reason, "사용자 후속 수정");
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
 fn fresh_database_starts_without_project_specific_seed_data() {
     let path = legacy_v02_db_path("fresh-core-decoupled");
     init_db(&path).unwrap();
