@@ -25,6 +25,7 @@ const DEFAULT_ACTIVE_POLL_SECONDS: i64 = 25;
 const DEFAULT_IDLE_POLL_SECONDS: i64 = 90;
 const DEFAULT_QUEUE_THRESHOLD: i64 = 6;
 const HISTORICAL_RECONCILE_BATCH: i64 = 12;
+const HISTORICAL_ASSOCIATION_BATCH: i64 = 24;
 const PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY: i64 = 50;
 const RESPONSIBILITY_MAP_PATH: &str = "docs/ci/workflow-responsibility-map.json";
 const RESPONSIBILITY_ESCALATION_MAX_ATTEMPTS: i64 = 3;
@@ -748,6 +749,18 @@ fn init_db(path: &Path) -> Result<()> {
           created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS run_track_associations (
+          run_id INTEGER PRIMARY KEY REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+          track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
+          confidence INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          associated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_run_track_associations_track
+          ON run_track_associations(track_id, associated_at DESC);
+
         CREATE TABLE IF NOT EXISTS track_fingerprints (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
@@ -1016,6 +1029,12 @@ fn init_db(path: &Path) -> Result<()> {
         "TEXT",
     )?;
     ensure_column(&conn, "workflow_runs", "last_resolution_attempt_at", "TEXT")?;
+    ensure_column(
+        &conn,
+        "workflow_runs",
+        "last_track_association_attempt_at",
+        "TEXT",
+    )?;
     ensure_column(
         &conn,
         "dynamic_workflow_rules",
