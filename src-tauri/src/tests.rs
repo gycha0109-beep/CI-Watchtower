@@ -4421,6 +4421,14 @@ fn manual_assignment_learning_and_project_wide_transition_complete_acceptance_cy
                value TEXT NOT NULL,
                created_at TEXT NOT NULL
              );
+             CREATE TABLE run_track_associations(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               associated_at TEXT NOT NULL
+             );
              CREATE TABLE track_fingerprints(
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                track_id INTEGER NOT NULL,
