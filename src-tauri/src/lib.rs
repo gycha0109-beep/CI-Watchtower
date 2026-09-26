@@ -4539,8 +4539,17 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &mut pr_cache,
                     )
                     .await?;
+                    let (association, explicit_seen) =
+                        work_track_association(&repository_tracks, &aliases, &resolution.evidence);
                     let conn = db(state)?;
                     persist_resolution(&conn, run.id, &resolution, &now_str)?;
+                    persist_work_track_association(
+                        &conn,
+                        run.id,
+                        association,
+                        explicit_seen,
+                        &now_str,
+                    )?;
                 }
 
                 // Old completed runs can fall out of GitHub's recent-100 window while still
@@ -4569,6 +4578,8 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &mut pr_cache,
                     )
                     .await?;
+                    let (association, explicit_seen) =
+                        work_track_association(&repository_tracks, &aliases, &resolution.evidence);
                     let conn = db(state)?;
                     persist_resolution_with_trigger(
                         &conn,
@@ -4576,6 +4587,50 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &resolution,
                         &now_str,
                         Some("historical_reconcile"),
+                    )?;
+                    persist_work_track_association(
+                        &conn,
+                        run.id,
+                        association,
+                        explicit_seen,
+                        &now_str,
+                    )?;
+                }
+
+                // Track association is independent from primary CI responsibility. Backfill
+                // stored project-wide/assigned runs that never persisted PR/commit evidence.
+                let stored_unassociated = {
+                    let conn = db(state)?;
+                    load_stored_unassociated_runs(
+                        &conn,
+                        repository.id,
+                        HISTORICAL_ASSOCIATION_BATCH,
+                    )?
+                };
+                for run in stored_unassociated {
+                    if recent_ids.contains(&run.id) {
+                        continue;
+                    }
+                    let evidence = collect_run_evidence(
+                        &client,
+                        &repository.repo,
+                        &run,
+                        &repository_tracks,
+                        &aliases,
+                        &fingerprints,
+                        &mut commit_cache,
+                        &mut pr_cache,
+                    )
+                    .await?;
+                    let (association, explicit_seen) =
+                        work_track_association(&repository_tracks, &aliases, &evidence);
+                    let conn = db(state)?;
+                    persist_work_track_association(
+                        &conn,
+                        run.id,
+                        association,
+                        explicit_seen,
+                        &now_str,
                     )?;
                 }
             }
