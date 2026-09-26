@@ -2674,20 +2674,33 @@ fn run_summary_from_row(
 fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<WorkflowRunSummary>> {
     let now = Utc::now();
     let mut stmt = conn.prepare(
-        "WITH ranked AS (
+        "WITH links AS (
+           SELECT ra.run_id,ra.source,ra.reason,ra.confidence
+           FROM run_assignments ra
+           WHERE ra.track_id=?
+           UNION ALL
+           SELECT rta.run_id,rta.source,rta.reason,rta.confidence
+           FROM run_track_associations rta
+           WHERE rta.track_id=?
+             AND NOT EXISTS(
+               SELECT 1 FROM run_assignments ra
+               WHERE ra.run_id=rta.run_id AND ra.track_id=?
+             )
+         ),
+         ranked AS (
            SELECT wr.run_id,mr.project_id,mr.id AS repository_id,mr.repo,
                   wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,
                   wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,
                   wr.created_at,wr.run_started_at,wr.updated_at,
-                  ra.source,ra.reason,ra.confidence,
+                  links.source,links.reason,links.confidence,
                   ROW_NUMBER() OVER (
                     PARTITION BY wr.repository_id
                     ORDER BY wr.created_at DESC
                   ) AS repository_rank
            FROM workflow_runs wr
            JOIN monitored_repositories mr ON mr.id=wr.repository_id
-           JOIN run_assignments ra ON ra.run_id=wr.run_id
-           WHERE ra.track_id=? AND wr.ignored=0
+           JOIN links ON links.run_id=wr.run_id
+           WHERE wr.ignored=0
          )
          SELECT run_id,project_id,repository_id,repo,workflow_name,display_title,event,
                 head_branch,head_sha,run_attempt,status,conclusion,html_url,resolution_status,
@@ -2696,7 +2709,7 @@ fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<Wo
          WHERE repository_rank<=?
          ORDER BY created_at DESC",
     )?;
-    let rows = stmt.query_map(params![track_id, limit], |row| {
+    let rows = stmt.query_map(params![track_id, track_id, track_id, limit], |row| {
         run_summary_from_row(row, now)
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2997,13 +3010,19 @@ fn track_health(runs: &[WorkflowRunSummary]) -> String {
 fn average_duration(conn: &Connection, track_id: i64) -> Result<Option<i64>> {
     let avg: Option<f64> = conn
         .query_row(
-            "SELECT AVG(duration_seconds) FROM (
+            "WITH track_runs AS (
+               SELECT run_id FROM run_assignments WHERE track_id=?
+               UNION
+               SELECT run_id FROM run_track_associations WHERE track_id=?
+             )
+             SELECT AVG(duration_seconds) FROM (
                SELECT CAST(strftime('%s',wr.updated_at)-strftime('%s',COALESCE(wr.run_started_at,wr.created_at)) AS INTEGER) duration_seconds
-               FROM workflow_runs wr JOIN run_assignments ra ON ra.run_id=wr.run_id
-               WHERE ra.track_id=? AND wr.status='completed'
+               FROM workflow_runs wr
+               JOIN track_runs tr ON tr.run_id=wr.run_id
+               WHERE wr.status='completed'
                ORDER BY wr.updated_at DESC LIMIT 20
              )",
-            params![track_id],
+            params![track_id, track_id],
             |row| row.get(0),
         )
         .optional()?
