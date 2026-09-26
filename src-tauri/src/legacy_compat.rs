@@ -5,6 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 const LEGACY_PROJECT_SCOPE_MIGRATION: &str = "legacy-project-scope-v032";
 const CORE_DECOUPLING_MIGRATION: &str = "core-decoupling-v032";
 const CURRENT_TRACK_REGISTRY_REFRESH: &str = "current-track-registry-20260926-v1";
+const CURRENT_TRACK_ASSIGNMENT_REFRESH: &str = "current-track-assignment-20260926-v2";
 
 fn migration_applied(conn: &Connection, key: &str) -> Result<bool> {
     Ok(conn.query_row(
@@ -190,6 +191,209 @@ pub(super) fn refresh_existing_track_registry(conn: &Connection) -> Result<()> {
     }
 
     mark_migration(conn, CURRENT_TRACK_REGISTRY_REFRESH)
+}
+
+
+fn upsert_project_alias(
+    conn: &Connection,
+    project_id: i64,
+    alias_key: &str,
+    target_track_key: &str,
+    now: &str,
+) -> Result<()> {
+    let target_track_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM watch_tracks
+             WHERE project_id=? AND track_key=? AND active=1
+             LIMIT 1",
+            params![project_id, target_track_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(target_track_id) = target_track_id else {
+        return Ok(());
+    };
+
+    conn.execute(
+        "INSERT INTO track_aliases(project_id,alias_key,track_id,active,created_at)
+         VALUES(?,?,?,1,?)
+         ON CONFLICT(project_id,alias_key)
+         DO UPDATE SET track_id=excluded.track_id,active=1",
+        params![project_id, alias_key, target_track_id, now],
+    )?;
+    Ok(())
+}
+
+fn move_inactive_track_assignments_to_alias_targets(
+    conn: &Connection,
+    project_id: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE run_assignments
+         SET track_id=(
+           SELECT ta.track_id
+           FROM watch_tracks old_track
+           JOIN track_aliases ta
+             ON ta.project_id=old_track.project_id
+            AND ta.alias_key=old_track.track_key
+            AND ta.active=1
+           JOIN watch_tracks target_track
+             ON target_track.id=ta.track_id
+            AND target_track.project_id=old_track.project_id
+            AND target_track.active=1
+           WHERE old_track.id=run_assignments.track_id
+             AND old_track.project_id=?
+             AND old_track.active=0
+           LIMIT 1
+         )
+         WHERE track_id IN (
+           SELECT old_track.id
+           FROM watch_tracks old_track
+           JOIN track_aliases ta
+             ON ta.project_id=old_track.project_id
+            AND ta.alias_key=old_track.track_key
+            AND ta.active=1
+           JOIN watch_tracks target_track
+             ON target_track.id=ta.track_id
+            AND target_track.project_id=old_track.project_id
+            AND target_track.active=1
+           WHERE old_track.project_id=?
+             AND old_track.active=0
+             AND old_track.id<>target_track.id
+         )",
+        params![project_id, project_id],
+    )?;
+    Ok(())
+}
+
+fn reconcile_stored_explicit_evidence(conn: &Connection, project_id: i64, now: &str) -> Result<()> {
+    conn.execute(
+        "WITH canonical AS (
+           SELECT re.run_id,re.score,re.signal_type,
+                  COALESCE(alias_track.track_key,re.track_key) AS canonical_key,
+                  COALESCE(alias_track.id,direct_track.id) AS target_track_id
+           FROM run_evidence re
+           JOIN workflow_runs wr ON wr.run_id=re.run_id
+           JOIN monitored_repositories mr ON mr.id=wr.repository_id
+           LEFT JOIN track_aliases ta
+             ON ta.project_id=mr.project_id
+            AND ta.alias_key=re.track_key
+            AND ta.active=1
+           LEFT JOIN watch_tracks alias_track
+             ON alias_track.id=ta.track_id
+            AND alias_track.project_id=mr.project_id
+            AND alias_track.active=1
+           LEFT JOIN watch_tracks direct_track
+             ON direct_track.project_id=mr.project_id
+            AND direct_track.track_key=re.track_key
+            AND direct_track.active=1
+           WHERE mr.project_id=?
+             AND wr.ignored=0
+             AND wr.resolution_status IN ('unassigned','conflict')
+             AND re.score IN (100,98,96,90)
+             AND NOT EXISTS(
+               SELECT 1 FROM run_assignments manual_assignment
+               WHERE manual_assignment.run_id=wr.run_id
+                 AND manual_assignment.manual=1
+             )
+         ),
+         top_score AS (
+           SELECT run_id,MAX(score) AS score
+           FROM canonical
+           GROUP BY run_id
+         ),
+         decisions AS (
+           SELECT c.run_id,MAX(c.score) AS confidence,
+                  MIN(c.signal_type) AS source,
+                  MIN(c.canonical_key) AS canonical_key,
+                  MAX(c.target_track_id) AS target_track_id,
+                  COUNT(DISTINCT c.canonical_key) AS key_count
+           FROM canonical c
+           JOIN top_score top
+             ON top.run_id=c.run_id
+            AND top.score=c.score
+           GROUP BY c.run_id
+         )
+         INSERT INTO run_assignments(
+           run_id,track_id,confidence,source,reason,manual,assigned_at
+         )
+         SELECT d.run_id,d.target_track_id,d.confidence,d.source,
+                '기존 명시 Track Key 재귀속: ' || d.canonical_key,0,?
+         FROM decisions d
+         WHERE d.key_count=1
+           AND d.target_track_id IS NOT NULL
+           AND NOT EXISTS(
+             SELECT 1 FROM run_assignments existing
+             WHERE existing.run_id=d.run_id
+           )
+         ON CONFLICT(run_id) DO NOTHING",
+        params![project_id, now],
+    )?;
+
+    conn.execute(
+        "UPDATE workflow_runs
+         SET resolution_status='assigned',last_resolution_attempt_at=?
+         WHERE ignored=0
+           AND resolution_status IN ('unassigned','conflict')
+           AND run_id IN (
+             SELECT ra.run_id
+             FROM run_assignments ra
+             JOIN watch_tracks wt ON wt.id=ra.track_id
+             JOIN monitored_repositories mr ON mr.project_id=wt.project_id
+             JOIN workflow_runs scoped_run
+               ON scoped_run.run_id=ra.run_id
+              AND scoped_run.repository_id=mr.id
+             WHERE wt.project_id=?
+               AND wt.active=1
+               AND ra.manual=0
+           )",
+        params![now, project_id],
+    )?;
+    Ok(())
+}
+
+pub(super) fn refresh_existing_track_assignments(conn: &Connection) -> Result<()> {
+    if migration_applied(conn, CURRENT_TRACK_ASSIGNMENT_REFRESH)? {
+        return Ok(());
+    }
+
+    if !migration_applied(conn, CORE_DECOUPLING_MIGRATION)?
+        || !migration_applied(conn, CURRENT_TRACK_REGISTRY_REFRESH)?
+    {
+        mark_migration(conn, CURRENT_TRACK_ASSIGNMENT_REFRESH)?;
+        return Ok(());
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
+
+    let myeongha_project_id: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM projects WHERE project_key='myeongha' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(project_id) = myeongha_project_id {
+        for (alias_key, target_track_key) in [
+            ("privacy-recovery", "ops"),
+            ("product-commerce", "character-design"),
+            ("commerce", "character-design"),
+            ("face-reading", "face-engine"),
+            ("face-observation-engine", "face-engine"),
+            ("face-reading-binding", "face-bridge"),
+            ("topic-face", "face-bridge"),
+            ("face-traditional-research", "face-research"),
+        ] {
+            upsert_project_alias(&tx, project_id, alias_key, target_track_key, &now)?;
+        }
+        move_inactive_track_assignments_to_alias_targets(&tx, project_id)?;
+        reconcile_stored_explicit_evidence(&tx, project_id, &now)?;
+    }
+
+    mark_migration(&tx, CURRENT_TRACK_ASSIGNMENT_REFRESH)?;
+    tx.commit()?;
+    Ok(())
 }
 
 pub(super) fn legacy_track_key(name: &str, id: i64) -> String {
