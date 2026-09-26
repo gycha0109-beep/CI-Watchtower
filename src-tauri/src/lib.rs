@@ -1082,6 +1082,7 @@ fn init_db(path: &Path) -> Result<()> {
     legacy_compat::refresh_existing_track_assignments(&conn)?;
     legacy_compat::mark_core_decoupling(&conn)?;
     reconcile_alias_assignments(&conn)?;
+    backfill_local_work_track_associations(&conn)?;
     Ok(())
 }
 
@@ -3942,6 +3943,137 @@ fn load_stored_unresolved_runs(
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn load_stored_unassociated_runs(
+    conn: &Connection,
+    repository_id: i64,
+    limit: i64,
+) -> Result<Vec<GithubRun>> {
+    let mut stmt = conn.prepare(
+        "SELECT run_id,workflow_id,workflow_name,workflow_path,display_title,event,head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,created_at,run_started_at,updated_at
+         FROM workflow_runs
+         WHERE repository_id=?
+           AND ignored=0
+           AND COALESCE(workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
+           AND NOT EXISTS(
+             SELECT 1 FROM run_track_associations rta
+             WHERE rta.run_id=workflow_runs.run_id
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM run_assignments ra
+             WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+           )
+         ORDER BY
+           CASE WHEN last_track_association_attempt_at IS NULL THEN 0 ELSE 1 END,
+           last_track_association_attempt_at ASC,
+           created_at DESC
+         LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![repository_id, limit], |row| {
+        Ok(GithubRun {
+            id: row.get(0)?,
+            workflow_id: row.get(1)?,
+            name: row.get(2)?,
+            path: row.get(3)?,
+            display_title: row.get(4)?,
+            event: row.get(5)?,
+            head_branch: row.get(6)?,
+            head_sha: row.get(7)?,
+            run_number: row.get(8)?,
+            run_attempt: row.get(9)?,
+            status: row.get(10)?,
+            conclusion: row.get(11)?,
+            html_url: row.get(12)?,
+            created_at: row.get(13)?,
+            run_started_at: row.get(14)?,
+            updated_at: row.get(15)?,
+            pull_requests: Vec::new(),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn backfill_local_work_track_associations(conn: &Connection) -> Result<()> {
+    let tracks = list_tracks(conn, true)?;
+    let projects: HashSet<i64> = tracks.iter().map(|track| track.project_id).collect();
+    let now = Utc::now().to_rfc3339();
+
+    for project_id in projects {
+        let project_tracks: Vec<Track> = tracks
+            .iter()
+            .filter(|track| track.project_id == project_id)
+            .cloned()
+            .collect();
+        let aliases = load_project_aliases(conn, project_id)?;
+
+        let candidates: Vec<(i64, Option<String>)> = {
+            let mut stmt = conn.prepare(
+                "SELECT wr.run_id,wr.display_title
+                 FROM workflow_runs wr
+                 JOIN monitored_repositories mr ON mr.id=wr.repository_id
+                 WHERE mr.project_id=?
+                   AND wr.ignored=0
+                   AND NOT EXISTS(
+                     SELECT 1 FROM run_track_associations rta
+                     WHERE rta.run_id=wr.run_id
+                   )
+                   AND NOT EXISTS(
+                     SELECT 1 FROM run_assignments ra
+                     WHERE ra.run_id=wr.run_id AND ra.manual=1
+                   )
+                   AND (
+                     wr.display_title LIKE '%[WT:%'
+                     OR EXISTS(
+                       SELECT 1 FROM run_evidence re
+                       WHERE re.run_id=wr.run_id AND re.score>=90
+                     )
+                   )",
+            )?;
+            stmt.query_map(params![project_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        for (run_id, display_title) in candidates {
+            let mut evidence: Vec<Evidence> = {
+                let mut stmt = conn.prepare(
+                    "SELECT track_key,signal_type,score,value
+                     FROM run_evidence
+                     WHERE run_id=? AND score>=90
+                     ORDER BY score DESC,id ASC",
+                )?;
+                stmt.query_map(params![run_id], |row| {
+                    Ok(Evidence {
+                        track_key: row.get(0)?,
+                        signal_type: row.get(1)?,
+                        score: row.get(2)?,
+                        value: row.get(3)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            if let Some(title) = display_title {
+                if let Some(key) = extract_marker(&title) {
+                    evidence.push(Evidence {
+                        track_key: key,
+                        signal_type: "run_name".into(),
+                        score: 100,
+                        value: title,
+                    });
+                }
+            }
+            let (association, explicit_seen) =
+                work_track_association(&project_tracks, &aliases, &evidence);
+            persist_work_track_association(
+                conn,
+                run_id,
+                association,
+                explicit_seen,
+                &now,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn mark_notified(
