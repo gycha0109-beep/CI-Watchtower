@@ -6062,6 +6062,10 @@ fn assign_run_to_project_in_conn(
         params![run_id],
     )?;
     conn.execute(
+        "DELETE FROM run_track_associations WHERE run_id=?",
+        params![run_id],
+    )?;
+    conn.execute(
         "UPDATE workflow_runs SET resolution_status='project',ignored=0 WHERE run_id=?",
         params![run_id],
     )?;
@@ -6146,6 +6150,10 @@ fn assign_run_in_conn(conn: &Connection, run_id: i64, track_id: i64, now: &str) 
     )?;
     conn.execute(
         "UPDATE workflow_runs SET resolution_status='assigned',ignored=0 WHERE run_id=?",
+        params![run_id],
+    )?;
+    conn.execute(
+        "DELETE FROM run_track_associations WHERE run_id=?",
         params![run_id],
     )?;
 
