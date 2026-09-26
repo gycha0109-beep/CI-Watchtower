@@ -296,6 +296,184 @@ fn evidence(key: &str, signal_type: &str, score: i64) -> Evidence {
 }
 
 #[test]
+fn work_track_association_uses_explicit_pr_marker_over_lower_branch_signal() {
+    let tracks = vec![track(1, "saju"), track(2, "saju-bridge")];
+    let (association, explicit_seen) = work_track_association(
+        &tracks,
+        &HashMap::new(),
+        &[
+            evidence("saju", "branch", 90),
+            evidence("saju-bridge", "pr_marker", 98),
+        ],
+    );
+    assert!(explicit_seen);
+    let (track_id, confidence, source, _) = association.unwrap();
+    assert_eq!(track_id, 2);
+    assert_eq!(confidence, 98);
+    assert_eq!(source, "pr_marker");
+}
+
+#[test]
+fn work_track_association_keeps_same_priority_conflict_fail_closed() {
+    let tracks = vec![track(1, "face-engine"), track(2, "face-bridge")];
+    let (association, explicit_seen) = work_track_association(
+        &tracks,
+        &HashMap::new(),
+        &[
+            evidence("face-engine", "pr_marker", 98),
+            evidence("face-bridge", "pr_marker", 98),
+        ],
+    );
+    assert!(explicit_seen);
+    assert!(association.is_none());
+}
+
+#[test]
+fn project_wide_runs_are_backfilled_into_work_tracks_without_changing_responsibility() {
+    let path = legacy_v02_db_path("project-wide-work-track-association");
+    init_db(&path).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let now = "2026-09-26T01:00:00Z";
+
+    conn.execute(
+        "INSERT INTO projects(name,project_key,active,created_at,updated_at)
+         VALUES('명하','myeongha-test',1,?,?)",
+        params![now, now],
+    )
+    .unwrap();
+    let project_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO monitored_repositories(
+           project_id,repo,enabled,running_count,queued_count,created_at,updated_at
+         ) VALUES(?,'example/Saju',1,0,0,?,?)",
+        params![project_id, now, now],
+    )
+    .unwrap();
+    let repository_id = conn.last_insert_rowid();
+
+    for (name, key) in [
+        ("챗봇 & 메모리 관계 엔진", "character-memory"),
+        ("사주 브릿지", "saju-bridge"),
+    ] {
+        conn.execute(
+            "INSERT INTO watch_tracks(
+               project_id,name,track_key,long_ci_minutes,active,created_at,updated_at
+             ) VALUES(?,?,?,8,1,?,?)",
+            params![project_id, name, key, now, now],
+        )
+        .unwrap();
+    }
+
+    let character_run = GithubRun {
+        id: 9901,
+        workflow_id: 1,
+        name: "CI".into(),
+        path: Some(".github/workflows/ci.yml".into()),
+        display_title: Some("[WT:character-memory] feat(character): memory gate".into()),
+        event: "pull_request".into(),
+        head_branch: Some("character/memory-gate".into()),
+        head_sha: "sha9901".into(),
+        run_number: 1,
+        run_attempt: 1,
+        status: "completed".into(),
+        conclusion: Some("success".into()),
+        html_url: "https://example/9901".into(),
+        created_at: "2026-09-26T01:00:00Z".into(),
+        run_started_at: Some("2026-09-26T01:00:01Z".into()),
+        updated_at: "2026-09-26T01:00:31Z".into(),
+        pull_requests: Vec::new(),
+    };
+    upsert_run(&conn, repository_id, &character_run, now).unwrap();
+    conn.execute(
+        "UPDATE workflow_runs SET resolution_status='project' WHERE run_id=9901",
+        [],
+    )
+    .unwrap();
+
+    let saju_bridge_run = GithubRun {
+        id: 9902,
+        workflow_id: 2,
+        name: "PIE Prospective Shadow".into(),
+        path: Some(".github/workflows/pie.yml".into()),
+        display_title: Some("research(saju-bridge): source-bound runtime".into()),
+        event: "pull_request".into(),
+        head_branch: Some("research/spouse-t8-runtime".into()),
+        head_sha: "sha9902".into(),
+        run_number: 2,
+        run_attempt: 1,
+        status: "completed".into(),
+        conclusion: Some("success".into()),
+        html_url: "https://example/9902".into(),
+        created_at: "2026-09-26T01:01:00Z".into(),
+        run_started_at: Some("2026-09-26T01:01:01Z".into()),
+        updated_at: "2026-09-26T01:01:41Z".into(),
+        pull_requests: Vec::new(),
+    };
+    upsert_run(&conn, repository_id, &saju_bridge_run, now).unwrap();
+    conn.execute(
+        "UPDATE workflow_runs SET resolution_status='project' WHERE run_id=9902",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO run_evidence(
+           run_id,track_key,signal_type,score,value,created_at
+         ) VALUES(9902,'saju-bridge','pr_marker',98,'PR #1703',?)",
+        params![now],
+    )
+    .unwrap();
+
+    backfill_local_work_track_associations(&conn).unwrap();
+
+    let character_track_id: i64 = conn
+        .query_row(
+            "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='character-memory'",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let saju_bridge_track_id: i64 = conn
+        .query_row(
+            "SELECT id FROM watch_tracks WHERE project_id=? AND track_key='saju-bridge'",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let character_runs = runs_for_track(&conn, character_track_id, 30).unwrap();
+    assert_eq!(character_runs.len(), 1);
+    assert_eq!(character_runs[0].id, 9901);
+    assert_eq!(character_runs[0].resolution_status, "project");
+    assert_eq!(character_runs[0].attribution_source.as_deref(), Some("run_name"));
+
+    let bridge_runs = runs_for_track(&conn, saju_bridge_track_id, 30).unwrap();
+    assert_eq!(bridge_runs.len(), 1);
+    assert_eq!(bridge_runs[0].id, 9902);
+    assert_eq!(bridge_runs[0].resolution_status, "project");
+    assert_eq!(bridge_runs[0].attribution_source.as_deref(), Some("pr_marker"));
+
+    assert_eq!(average_duration(&conn, character_track_id).unwrap(), Some(30));
+    assert_eq!(average_duration(&conn, saju_bridge_track_id).unwrap(), Some(40));
+
+    let project_statuses: Vec<String> = conn
+        .prepare(
+            "SELECT resolution_status FROM workflow_runs
+             WHERE run_id IN (9901,9902) ORDER BY run_id",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(project_statuses, vec!["project", "project"]);
+
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+}
+
+#[test]
 fn unknown_run_name_marker_fails_closed_over_known_branch() {
     let tracks = vec![track(1, "ops")];
     let resolution = resolve_evidence(
@@ -4242,6 +4420,14 @@ fn manual_assignment_learning_and_project_wide_transition_complete_acceptance_cy
                score INTEGER NOT NULL,
                value TEXT NOT NULL,
                created_at TEXT NOT NULL
+             );
+             CREATE TABLE run_track_associations(
+               run_id INTEGER PRIMARY KEY,
+               track_id INTEGER NOT NULL,
+               confidence INTEGER NOT NULL,
+               source TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               associated_at TEXT NOT NULL
              );
              CREATE TABLE track_fingerprints(
                id INTEGER PRIMARY KEY AUTOINCREMENT,

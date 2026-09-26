@@ -25,6 +25,7 @@ const DEFAULT_ACTIVE_POLL_SECONDS: i64 = 25;
 const DEFAULT_IDLE_POLL_SECONDS: i64 = 90;
 const DEFAULT_QUEUE_THRESHOLD: i64 = 6;
 const HISTORICAL_RECONCILE_BATCH: i64 = 12;
+const HISTORICAL_ASSOCIATION_BATCH: i64 = 24;
 const PRODUCER_CONTRACT_SAMPLE_PER_REPOSITORY: i64 = 50;
 const RESPONSIBILITY_MAP_PATH: &str = "docs/ci/workflow-responsibility-map.json";
 const RESPONSIBILITY_ESCALATION_MAX_ATTEMPTS: i64 = 3;
@@ -748,6 +749,18 @@ fn init_db(path: &Path) -> Result<()> {
           created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS run_track_associations (
+          run_id INTEGER PRIMARY KEY REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+          track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
+          confidence INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          associated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_run_track_associations_track
+          ON run_track_associations(track_id, associated_at DESC);
+
         CREATE TABLE IF NOT EXISTS track_fingerprints (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           track_id INTEGER NOT NULL REFERENCES watch_tracks(id) ON DELETE CASCADE,
@@ -1018,6 +1031,12 @@ fn init_db(path: &Path) -> Result<()> {
     ensure_column(&conn, "workflow_runs", "last_resolution_attempt_at", "TEXT")?;
     ensure_column(
         &conn,
+        "workflow_runs",
+        "last_track_association_attempt_at",
+        "TEXT",
+    )?;
+    ensure_column(
+        &conn,
         "dynamic_workflow_rules",
         "protected",
         "INTEGER NOT NULL DEFAULT 0",
@@ -1063,6 +1082,7 @@ fn init_db(path: &Path) -> Result<()> {
     legacy_compat::refresh_existing_track_assignments(&conn)?;
     legacy_compat::mark_core_decoupling(&conn)?;
     reconcile_alias_assignments(&conn)?;
+    backfill_local_work_track_associations(&conn)?;
     Ok(())
 }
 
@@ -2654,20 +2674,33 @@ fn run_summary_from_row(
 fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<WorkflowRunSummary>> {
     let now = Utc::now();
     let mut stmt = conn.prepare(
-        "WITH ranked AS (
+        "WITH links AS (
+           SELECT ra.run_id,ra.source,ra.reason,ra.confidence
+           FROM run_assignments ra
+           WHERE ra.track_id=?
+           UNION ALL
+           SELECT rta.run_id,rta.source,rta.reason,rta.confidence
+           FROM run_track_associations rta
+           WHERE rta.track_id=?
+             AND NOT EXISTS(
+               SELECT 1 FROM run_assignments ra
+               WHERE ra.run_id=rta.run_id AND ra.track_id=?
+             )
+         ),
+         ranked AS (
            SELECT wr.run_id,mr.project_id,mr.id AS repository_id,mr.repo,
                   wr.workflow_name,wr.display_title,wr.event,wr.head_branch,wr.head_sha,
                   wr.run_attempt,wr.status,wr.conclusion,wr.html_url,wr.resolution_status,
                   wr.created_at,wr.run_started_at,wr.updated_at,
-                  ra.source,ra.reason,ra.confidence,
+                  links.source,links.reason,links.confidence,
                   ROW_NUMBER() OVER (
                     PARTITION BY wr.repository_id
                     ORDER BY wr.created_at DESC
                   ) AS repository_rank
            FROM workflow_runs wr
            JOIN monitored_repositories mr ON mr.id=wr.repository_id
-           JOIN run_assignments ra ON ra.run_id=wr.run_id
-           WHERE ra.track_id=? AND wr.ignored=0
+           JOIN links ON links.run_id=wr.run_id
+           WHERE wr.ignored=0
          )
          SELECT run_id,project_id,repository_id,repo,workflow_name,display_title,event,
                 head_branch,head_sha,run_attempt,status,conclusion,html_url,resolution_status,
@@ -2676,7 +2709,7 @@ fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<Wo
          WHERE repository_rank<=?
          ORDER BY created_at DESC",
     )?;
-    let rows = stmt.query_map(params![track_id, limit], |row| {
+    let rows = stmt.query_map(params![track_id, track_id, track_id, limit], |row| {
         run_summary_from_row(row, now)
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2977,13 +3010,19 @@ fn track_health(runs: &[WorkflowRunSummary]) -> String {
 fn average_duration(conn: &Connection, track_id: i64) -> Result<Option<i64>> {
     let avg: Option<f64> = conn
         .query_row(
-            "SELECT AVG(duration_seconds) FROM (
+            "WITH track_runs AS (
+               SELECT run_id FROM run_assignments WHERE track_id=?
+               UNION
+               SELECT run_id FROM run_track_associations WHERE track_id=?
+             )
+             SELECT AVG(duration_seconds) FROM (
                SELECT CAST(strftime('%s',wr.updated_at)-strftime('%s',COALESCE(wr.run_started_at,wr.created_at)) AS INTEGER) duration_seconds
-               FROM workflow_runs wr JOIN run_assignments ra ON ra.run_id=wr.run_id
-               WHERE ra.track_id=? AND wr.status='completed'
+               FROM workflow_runs wr
+               JOIN track_runs tr ON tr.run_id=wr.run_id
+               WHERE wr.status='completed'
                ORDER BY wr.updated_at DESC LIMIT 20
              )",
-            params![track_id],
+            params![track_id, track_id],
             |row| row.get(0),
         )
         .optional()?
@@ -3459,30 +3498,16 @@ fn resolve_evidence(
     }
 }
 
-async fn resolve_run(
+async fn collect_run_evidence(
     client: &Client,
     repo: &str,
     run: &GithubRun,
-    project_id: i64,
-    repository_id: i64,
     tracks: &[Track],
-    project_rules: &[ProjectWorkflowRule],
     aliases: &HashMap<String, String>,
     fingerprints: &[Fingerprint],
     commit_cache: &mut HashMap<String, Option<String>>,
     pr_cache: &mut HashMap<String, Vec<GithubPull>>,
-) -> Result<Resolution> {
-    if project_rule_matches(project_rules, project_id, repository_id, &run.name) {
-        return Ok(Resolution {
-            status: "project".into(),
-            track_id: None,
-            confidence: Some(100),
-            source: Some("project_workflow".into()),
-            reason: Some(format!("프로젝트 공용 CI: {}", run.name)),
-            evidence: Vec::new(),
-        });
-    }
-
+) -> Result<Vec<Evidence>> {
     let mut evidence = Vec::new();
 
     if let Some(key) = run.display_title.as_deref().and_then(extract_marker) {
@@ -3541,8 +3566,141 @@ async fn resolve_run(
     }
 
     evidence.extend(fingerprint_evidence(fingerprints, run));
+    Ok(evidence)
+}
 
-    return Ok(resolve_evidence(tracks, aliases, evidence));
+fn work_track_association(
+    tracks: &[Track],
+    aliases: &HashMap<String, String>,
+    evidence: &[Evidence],
+) -> (Option<(i64, i64, String, String)>, bool) {
+    let known: HashMap<&str, i64> = tracks
+        .iter()
+        .map(|track| (track.track_key.as_str(), track.id))
+        .collect();
+
+    for priority_score in [100_i64, 98, 96, 90] {
+        let priority_items: Vec<&Evidence> = evidence
+            .iter()
+            .filter(|item| {
+                item.score == priority_score
+                    && matches!(
+                        item.signal_type.as_str(),
+                        "run_name" | "pr_marker" | "commit_marker" | "branch"
+                    )
+            })
+            .collect();
+        if priority_items.is_empty() {
+            continue;
+        }
+
+        let canonical_keys: HashSet<String> = priority_items
+            .iter()
+            .map(|item| canonical_evidence_key(&item.track_key, aliases))
+            .collect();
+        if canonical_keys.len() != 1 {
+            return (None, true);
+        }
+
+        let canonical_key = canonical_keys
+            .into_iter()
+            .next()
+            .expect("single canonical association key");
+        let Some(track_id) = known.get(canonical_key.as_str()).copied() else {
+            return (None, true);
+        };
+        let source = priority_items
+            .iter()
+            .find(|item| canonical_evidence_key(&item.track_key, aliases) == canonical_key)
+            .map(|item| item.signal_type.clone())
+            .unwrap_or_else(|| "explicit".into());
+        return (
+            Some((
+                track_id,
+                priority_score,
+                source.clone(),
+                format!("작업 Track 근거: {source} → {canonical_key}"),
+            )),
+            true,
+        );
+    }
+
+    (None, false)
+}
+
+fn persist_work_track_association(
+    conn: &Connection,
+    run_id: i64,
+    association: Option<(i64, i64, String, String)>,
+    explicit_seen: bool,
+    now: &str,
+) -> Result<()> {
+    if let Some((track_id, confidence, source, reason)) = association {
+        conn.execute(
+            "INSERT INTO run_track_associations(
+               run_id,track_id,confidence,source,reason,associated_at
+             ) VALUES(?,?,?,?,?,?)
+             ON CONFLICT(run_id)
+             DO UPDATE SET
+               track_id=excluded.track_id,
+               confidence=excluded.confidence,
+               source=excluded.source,
+               reason=excluded.reason,
+               associated_at=excluded.associated_at",
+            params![run_id, track_id, confidence, source, reason, now],
+        )?;
+    } else if explicit_seen {
+        conn.execute(
+            "DELETE FROM run_track_associations WHERE run_id=?",
+            params![run_id],
+        )?;
+    }
+    conn.execute(
+        "UPDATE workflow_runs
+         SET last_track_association_attempt_at=?
+         WHERE run_id=?",
+        params![now, run_id],
+    )?;
+    Ok(())
+}
+
+async fn resolve_run(
+    client: &Client,
+    repo: &str,
+    run: &GithubRun,
+    project_id: i64,
+    repository_id: i64,
+    tracks: &[Track],
+    project_rules: &[ProjectWorkflowRule],
+    aliases: &HashMap<String, String>,
+    fingerprints: &[Fingerprint],
+    commit_cache: &mut HashMap<String, Option<String>>,
+    pr_cache: &mut HashMap<String, Vec<GithubPull>>,
+) -> Result<Resolution> {
+    let evidence = collect_run_evidence(
+        client,
+        repo,
+        run,
+        tracks,
+        aliases,
+        fingerprints,
+        commit_cache,
+        pr_cache,
+    )
+    .await?;
+
+    if project_rule_matches(project_rules, project_id, repository_id, &run.name) {
+        return Ok(Resolution {
+            status: "project".into(),
+            track_id: None,
+            confidence: Some(100),
+            source: Some("project_workflow".into()),
+            reason: Some(format!("프로젝트 공용 CI: {}", run.name)),
+            evidence,
+        });
+    }
+
+    Ok(resolve_evidence(tracks, aliases, evidence))
 }
 
 fn persist_resolution_with_trigger(
@@ -3804,6 +3962,138 @@ fn load_stored_unresolved_runs(
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn load_stored_unassociated_runs(
+    conn: &Connection,
+    repository_id: i64,
+    limit: i64,
+) -> Result<Vec<GithubRun>> {
+    let mut stmt = conn.prepare(
+        "SELECT run_id,workflow_id,workflow_name,workflow_path,display_title,event,head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,created_at,run_started_at,updated_at
+         FROM workflow_runs
+         WHERE repository_id=?
+           AND ignored=0
+           AND COALESCE(workflow_path,'') NOT LIKE 'dynamic/dependabot/%'
+           AND NOT EXISTS(
+             SELECT 1 FROM run_track_associations rta
+             WHERE rta.run_id=workflow_runs.run_id
+           )
+           AND NOT EXISTS(
+             SELECT 1 FROM run_assignments ra
+             WHERE ra.run_id=workflow_runs.run_id AND ra.manual=1
+           )
+         ORDER BY
+           CASE WHEN last_track_association_attempt_at IS NULL THEN 0 ELSE 1 END,
+           last_track_association_attempt_at ASC,
+           created_at DESC
+         LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![repository_id, limit], |row| {
+        Ok(GithubRun {
+            id: row.get(0)?,
+            workflow_id: row.get(1)?,
+            name: row.get(2)?,
+            path: row.get(3)?,
+            display_title: row.get(4)?,
+            event: row.get(5)?,
+            head_branch: row.get(6)?,
+            head_sha: row.get(7)?,
+            run_number: row.get(8)?,
+            run_attempt: row.get(9)?,
+            status: row.get(10)?,
+            conclusion: row.get(11)?,
+            html_url: row.get(12)?,
+            created_at: row.get(13)?,
+            run_started_at: row.get(14)?,
+            updated_at: row.get(15)?,
+            pull_requests: Vec::new(),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn backfill_local_work_track_associations(conn: &Connection) -> Result<()> {
+    let tracks = list_tracks(conn, true)?;
+    let projects: HashSet<i64> = tracks.iter().map(|track| track.project_id).collect();
+    let now = Utc::now().to_rfc3339();
+
+    for project_id in projects {
+        let project_tracks: Vec<Track> = tracks
+            .iter()
+            .filter(|track| track.project_id == project_id)
+            .cloned()
+            .collect();
+        let aliases = load_project_aliases(conn, project_id)?;
+
+        let candidates: Vec<(i64, Option<String>)> = {
+            let mut stmt = conn.prepare(
+                "SELECT wr.run_id,wr.display_title
+                 FROM workflow_runs wr
+                 JOIN monitored_repositories mr ON mr.id=wr.repository_id
+                 WHERE mr.project_id=?
+                   AND wr.ignored=0
+                   AND NOT EXISTS(
+                     SELECT 1 FROM run_track_associations rta
+                     WHERE rta.run_id=wr.run_id
+                   )
+                   AND NOT EXISTS(
+                     SELECT 1 FROM run_assignments ra
+                     WHERE ra.run_id=wr.run_id AND ra.manual=1
+                   )
+                   AND (
+                     wr.display_title LIKE '%[WT:%'
+                     OR EXISTS(
+                       SELECT 1 FROM run_evidence re
+                       WHERE re.run_id=wr.run_id AND re.score>=90
+                     )
+                   )",
+            )?;
+            let rows =
+                stmt.query_map(params![project_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        for (run_id, display_title) in candidates {
+            let mut evidence: Vec<Evidence> = {
+                let mut stmt = conn.prepare(
+                    "SELECT track_key,signal_type,score,value
+                     FROM run_evidence
+                     WHERE run_id=? AND score>=90
+                     ORDER BY score DESC,id ASC",
+                )?;
+                let rows = stmt.query_map(params![run_id], |row| {
+                    Ok(Evidence {
+                        track_key: row.get(0)?,
+                        signal_type: row.get(1)?,
+                        score: row.get(2)?,
+                        value: row.get(3)?,
+                    })
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            if let Some(title) = display_title {
+                if let Some(key) = extract_marker(&title) {
+                    evidence.push(Evidence {
+                        track_key: key,
+                        signal_type: "run_name".into(),
+                        score: 100,
+                        value: title,
+                    });
+                }
+            }
+            let (association, explicit_seen) =
+                work_track_association(&project_tracks, &aliases, &evidence);
+            persist_work_track_association(
+                conn,
+                run_id,
+                association,
+                explicit_seen,
+                &now,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn mark_notified(
@@ -4250,8 +4540,17 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &mut pr_cache,
                     )
                     .await?;
+                    let (association, explicit_seen) =
+                        work_track_association(&repository_tracks, &aliases, &resolution.evidence);
                     let conn = db(state)?;
                     persist_resolution(&conn, run.id, &resolution, &now_str)?;
+                    persist_work_track_association(
+                        &conn,
+                        run.id,
+                        association,
+                        explicit_seen,
+                        &now_str,
+                    )?;
                 }
 
                 // Old completed runs can fall out of GitHub's recent-100 window while still
@@ -4280,6 +4579,8 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &mut pr_cache,
                     )
                     .await?;
+                    let (association, explicit_seen) =
+                        work_track_association(&repository_tracks, &aliases, &resolution.evidence);
                     let conn = db(state)?;
                     persist_resolution_with_trigger(
                         &conn,
@@ -4287,6 +4588,50 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &resolution,
                         &now_str,
                         Some("historical_reconcile"),
+                    )?;
+                    persist_work_track_association(
+                        &conn,
+                        run.id,
+                        association,
+                        explicit_seen,
+                        &now_str,
+                    )?;
+                }
+
+                // Track association is independent from primary CI responsibility. Backfill
+                // stored project-wide/assigned runs that never persisted PR/commit evidence.
+                let stored_unassociated = {
+                    let conn = db(state)?;
+                    load_stored_unassociated_runs(
+                        &conn,
+                        repository.id,
+                        HISTORICAL_ASSOCIATION_BATCH,
+                    )?
+                };
+                for run in stored_unassociated {
+                    if recent_ids.contains(&run.id) {
+                        continue;
+                    }
+                    let evidence = collect_run_evidence(
+                        &client,
+                        &repository.repo,
+                        &run,
+                        &repository_tracks,
+                        &aliases,
+                        &fingerprints,
+                        &mut commit_cache,
+                        &mut pr_cache,
+                    )
+                    .await?;
+                    let (association, explicit_seen) =
+                        work_track_association(&repository_tracks, &aliases, &evidence);
+                    let conn = db(state)?;
+                    persist_work_track_association(
+                        &conn,
+                        run.id,
+                        association,
+                        explicit_seen,
+                        &now_str,
                     )?;
                 }
             }
@@ -5718,6 +6063,10 @@ fn assign_run_to_project_in_conn(
         params![run_id],
     )?;
     conn.execute(
+        "DELETE FROM run_track_associations WHERE run_id=?",
+        params![run_id],
+    )?;
+    conn.execute(
         "UPDATE workflow_runs SET resolution_status='project',ignored=0 WHERE run_id=?",
         params![run_id],
     )?;
@@ -5802,6 +6151,10 @@ fn assign_run_in_conn(conn: &Connection, run_id: i64, track_id: i64, now: &str) 
     )?;
     conn.execute(
         "UPDATE workflow_runs SET resolution_status='assigned',ignored=0 WHERE run_id=?",
+        params![run_id],
+    )?;
+    conn.execute(
+        "DELETE FROM run_track_associations WHERE run_id=?",
         params![run_id],
     )?;
 
