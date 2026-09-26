@@ -3478,30 +3478,16 @@ fn resolve_evidence(
     }
 }
 
-async fn resolve_run(
+async fn collect_run_evidence(
     client: &Client,
     repo: &str,
     run: &GithubRun,
-    project_id: i64,
-    repository_id: i64,
     tracks: &[Track],
-    project_rules: &[ProjectWorkflowRule],
     aliases: &HashMap<String, String>,
     fingerprints: &[Fingerprint],
     commit_cache: &mut HashMap<String, Option<String>>,
     pr_cache: &mut HashMap<String, Vec<GithubPull>>,
-) -> Result<Resolution> {
-    if project_rule_matches(project_rules, project_id, repository_id, &run.name) {
-        return Ok(Resolution {
-            status: "project".into(),
-            track_id: None,
-            confidence: Some(100),
-            source: Some("project_workflow".into()),
-            reason: Some(format!("프로젝트 공용 CI: {}", run.name)),
-            evidence: Vec::new(),
-        });
-    }
-
+) -> Result<Vec<Evidence>> {
     let mut evidence = Vec::new();
 
     if let Some(key) = run.display_title.as_deref().and_then(extract_marker) {
@@ -3560,8 +3546,141 @@ async fn resolve_run(
     }
 
     evidence.extend(fingerprint_evidence(fingerprints, run));
+    Ok(evidence)
+}
 
-    return Ok(resolve_evidence(tracks, aliases, evidence));
+fn work_track_association(
+    tracks: &[Track],
+    aliases: &HashMap<String, String>,
+    evidence: &[Evidence],
+) -> (Option<(i64, i64, String, String)>, bool) {
+    let known: HashMap<&str, i64> = tracks
+        .iter()
+        .map(|track| (track.track_key.as_str(), track.id))
+        .collect();
+
+    for priority_score in [100_i64, 98, 96, 90] {
+        let priority_items: Vec<&Evidence> = evidence
+            .iter()
+            .filter(|item| {
+                item.score == priority_score
+                    && matches!(
+                        item.signal_type.as_str(),
+                        "run_name" | "pr_marker" | "commit_marker" | "branch"
+                    )
+            })
+            .collect();
+        if priority_items.is_empty() {
+            continue;
+        }
+
+        let canonical_keys: HashSet<String> = priority_items
+            .iter()
+            .map(|item| canonical_evidence_key(&item.track_key, aliases))
+            .collect();
+        if canonical_keys.len() != 1 {
+            return (None, true);
+        }
+
+        let canonical_key = canonical_keys
+            .into_iter()
+            .next()
+            .expect("single canonical association key");
+        let Some(track_id) = known.get(canonical_key.as_str()).copied() else {
+            return (None, true);
+        };
+        let source = priority_items
+            .iter()
+            .find(|item| canonical_evidence_key(&item.track_key, aliases) == canonical_key)
+            .map(|item| item.signal_type.clone())
+            .unwrap_or_else(|| "explicit".into());
+        return (
+            Some((
+                track_id,
+                priority_score,
+                source.clone(),
+                format!("작업 Track 근거: {source} → {canonical_key}"),
+            )),
+            true,
+        );
+    }
+
+    (None, false)
+}
+
+fn persist_work_track_association(
+    conn: &Connection,
+    run_id: i64,
+    association: Option<(i64, i64, String, String)>,
+    explicit_seen: bool,
+    now: &str,
+) -> Result<()> {
+    if let Some((track_id, confidence, source, reason)) = association {
+        conn.execute(
+            "INSERT INTO run_track_associations(
+               run_id,track_id,confidence,source,reason,associated_at
+             ) VALUES(?,?,?,?,?,?)
+             ON CONFLICT(run_id)
+             DO UPDATE SET
+               track_id=excluded.track_id,
+               confidence=excluded.confidence,
+               source=excluded.source,
+               reason=excluded.reason,
+               associated_at=excluded.associated_at",
+            params![run_id, track_id, confidence, source, reason, now],
+        )?;
+    } else if explicit_seen {
+        conn.execute(
+            "DELETE FROM run_track_associations WHERE run_id=?",
+            params![run_id],
+        )?;
+    }
+    conn.execute(
+        "UPDATE workflow_runs
+         SET last_track_association_attempt_at=?
+         WHERE run_id=?",
+        params![now, run_id],
+    )?;
+    Ok(())
+}
+
+async fn resolve_run(
+    client: &Client,
+    repo: &str,
+    run: &GithubRun,
+    project_id: i64,
+    repository_id: i64,
+    tracks: &[Track],
+    project_rules: &[ProjectWorkflowRule],
+    aliases: &HashMap<String, String>,
+    fingerprints: &[Fingerprint],
+    commit_cache: &mut HashMap<String, Option<String>>,
+    pr_cache: &mut HashMap<String, Vec<GithubPull>>,
+) -> Result<Resolution> {
+    let evidence = collect_run_evidence(
+        client,
+        repo,
+        run,
+        tracks,
+        aliases,
+        fingerprints,
+        commit_cache,
+        pr_cache,
+    )
+    .await?;
+
+    if project_rule_matches(project_rules, project_id, repository_id, &run.name) {
+        return Ok(Resolution {
+            status: "project".into(),
+            track_id: None,
+            confidence: Some(100),
+            source: Some("project_workflow".into()),
+            reason: Some(format!("프로젝트 공용 CI: {}", run.name)),
+            evidence,
+        });
+    }
+
+    Ok(resolve_evidence(tracks, aliases, evidence))
 }
 
 fn persist_resolution_with_trigger(
