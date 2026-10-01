@@ -37,7 +37,7 @@ Responsibility: .github workflows + docs/ci/workflow-responsibility-map.json + p
 
 ## Identity and upgrade policy
 
-The existing registered MyeongHa project owns MyeongHa and Saju. The existing Visualy project owns K_beauty. Project/repository IDs stay unchanged; no repository move or personal project seed is needed. Existing aliases remain project scoped. No new alias is inferred. Existing inactive full-report/mobile rows remain inactive because producer evidence does not authorize overwriting later user choices. UI is normalized by the existing lowercase key convention.
+The existing registered MyeongHa project owns MyeongHa and Saju. The existing Visualy project owns K_beauty. Project/repository IDs stay unchanged; no repository move or personal project seed is needed. Existing aliases remain project scoped. No new alias is inferred. The existing full-report/mobile inactivity was traced to the old registry migration batch (matching row timestamps and ledger). Current Producer declaration plus explicit PR evidence repairs only that migration-owned state while retaining IDs. Later user inactivation is preserved. UI is normalized by the existing lowercase key convention.
 
 Project, Work Track, CI responsibility, and Workflow/Job are distinct. PR body trailers discover Work Tracks. Workflow markers never discover Track rows. MyeongHa responsibility metadata suppresses legacy technical markers. K_beauty per-workflow registry is read; observed pipeline-reliability remains distinct from trust despite the stale canonical list. No-map repositories use current workflow inventory with conservative project-wide common CI and dynamic Work Track association.
 

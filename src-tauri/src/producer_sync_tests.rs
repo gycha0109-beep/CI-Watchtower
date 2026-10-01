@@ -15,7 +15,7 @@ fn fixture() -> (PathBuf, Connection, MonitoredRepository) {
 fn snapshot(keys: &[&str]) -> ProducerSnapshot {
     ProducerSnapshot { repository: "example/producer".into(), default_branch: "main".into(), sha: "default-sha".into(),
         pulls: vec![ProducerPull { number: 12, keys: keys.iter().map(|key| key.to_string()).collect(), head_sha: "run-sha".into(), merge_sha: Some("merge-sha".into()), branch: "feat/actual-work".into() }],
-        retired_keys: vec!["retired".into()], workflows: vec![ProducerWorkflow { path: ".github/workflows/ci.yml".into(), name: "CI".into(), binding: "unassigned-by-design".into(), responsibility: "project-wide-ci".into(), source: RESPONSIBILITY_MAP_PATH.into() }],
+        retired_keys: vec!["retired".into()], declared_keys: Vec::new(), workflows: vec![ProducerWorkflow { path: ".github/workflows/ci.yml".into(), name: "CI".into(), binding: "unassigned-by-design".into(), responsibility: "project-wide-ci".into(), source: RESPONSIBILITY_MAP_PATH.into() }],
         historical_runs: Vec::new(), current_runs: Vec::new() }
 }
 
@@ -138,5 +138,30 @@ fn active_run_outside_recent_window_requires_exact_github_reconciliation() {
     assert!(producer_sync::missing_active_run_ids(&conn,repo.id,&[old]).unwrap().is_empty());
     upsert_run(&conn,repo.id,&run(123),"2026-10-01T00:01:00Z").unwrap();
     assert!(producer_sync::missing_active_run_ids(&conn,repo.id,&[]).unwrap().is_empty());
+    drop(conn);let _=std::fs::remove_file(path);
+}
+
+#[test]
+fn producer_confirmed_old_migration_retirement_is_repaired_without_overriding_user_inactivation() {
+    let (path,conn,repo)=fixture(); let stamp="2026-09-26T00:00:00.500Z";
+    conn.execute("UPDATE schema_migrations SET applied_at='2026-09-26T00:00:01Z' WHERE migration_key='current-track-registry-20260926-v1'",[]).unwrap();
+    let mut ids=Vec::new();
+    for key in ["peer","actual-work","user-disabled"] {
+        ids.push(save_track_in_conn(&conn,&TrackInput{id:None,project_id:repo.project_id,name:key.into(),track_key:key.into(),long_ci_minutes:8},stamp).unwrap());
+    }
+    conn.execute("UPDATE watch_tracks SET active=0 WHERE id=?",params![ids[1]]).unwrap();
+    conn.execute("UPDATE watch_tracks SET active=0,updated_at='2026-09-27T00:00:00Z' WHERE id=?",params![ids[2]]).unwrap();
+    upsert_run(&conn,repo.id,&run(123),stamp).unwrap();
+    let mut data=snapshot(&["actual-work"]);
+    data.pulls.push(ProducerPull{number:13,keys:vec!["user-disabled".into()],head_sha:"another-sha".into(),merge_sha:None,branch:"feat/disabled".into()});
+    data.declared_keys=vec!["actual-work".into(),"user-disabled".into()];
+    producer_sync::apply(&conn,&repo,&data).unwrap();
+    let tracks=list_tracks(&conn,false).unwrap();
+    assert!(tracks.iter().find(|t|t.id==ids[1]).unwrap().active);
+    assert!(!tracks.iter().find(|t|t.id==ids[2]).unwrap().active);
+    assert_eq!(load_run_attribution_detail(&conn,123).unwrap().work_track_key.as_deref(),Some("actual-work"));
+    conn.execute("UPDATE watch_tracks SET active=0 WHERE id=?",params![ids[1]]).unwrap();
+    assert!(!producer_sync::apply(&conn,&repo,&data).unwrap());
+    assert!(!list_tracks(&conn,false).unwrap().iter().find(|t|t.id==ids[1]).unwrap().active);
     drop(conn);let _=std::fs::remove_file(path);
 }

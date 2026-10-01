@@ -2604,7 +2604,7 @@ fn load_run_attribution_detail(conn: &Connection, run_id: i64) -> Result<RunAttr
         Vec::new()
     };
 
-    let association: Option<(String, String)> = if manual == Some(1) {
+    let association: Option<(String, String)> = if assignment_manual == Some(1) {
         assigned_track_name.clone().zip(assigned_track_key.clone())
     } else { conn.query_row(
         "SELECT wt.name,wt.track_key FROM run_track_associations rta JOIN watch_tracks wt ON wt.id=rta.track_id WHERE rta.run_id=?", params![run_id],

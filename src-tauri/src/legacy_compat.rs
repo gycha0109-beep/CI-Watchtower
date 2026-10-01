@@ -7,6 +7,29 @@ const CORE_DECOUPLING_MIGRATION: &str = "core-decoupling-v032";
 const CURRENT_TRACK_REGISTRY_REFRESH: &str = "current-track-registry-20260926-v1";
 const CURRENT_TRACK_ASSIGNMENT_REFRESH: &str = "current-track-assignment-20260926-v2";
 
+pub(super) fn restore_producer_confirmed_inactive_tracks(
+    conn: &Connection, project_id: i64, observed_keys: &std::collections::HashSet<String>, declared_keys: &[String], now: &str,
+) -> Result<()> {
+    // This old migration stamped an entire project batch and disabled every unlisted row.
+    // Require that exact shared batch stamp, its ledger boundary, and current producer/PR proof.
+    // Later user edits have a different stamp and must remain inactive.
+    let candidates = {
+        let mut stmt = conn.prepare("SELECT wt.id,wt.track_key FROM watch_tracks wt JOIN schema_migrations sm ON sm.migration_key=?
+          WHERE wt.project_id=? AND wt.active=0
+            AND julianday(wt.updated_at)<=julianday(sm.applied_at)
+            AND (julianday(sm.applied_at)-julianday(wt.updated_at))*86400 BETWEEN 0 AND 1
+            AND EXISTS(SELECT 1 FROM watch_tracks peer WHERE peer.project_id=wt.project_id AND peer.active=1 AND peer.updated_at=wt.updated_at)")?;
+        let rows=stmt.query_map(params![CURRENT_TRACK_REGISTRY_REFRESH,project_id],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (id,key) in candidates {
+        if observed_keys.contains(&key) && declared_keys.contains(&key) {
+            conn.execute("UPDATE watch_tracks SET active=1,updated_at=? WHERE id=?",params![now,id])?;
+        }
+    }
+    Ok(())
+}
+
 fn migration_applied(conn: &Connection, key: &str) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE migration_key=?)",

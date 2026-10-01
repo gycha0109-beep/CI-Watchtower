@@ -32,6 +32,8 @@ pub(super) struct ProducerSnapshot {
     pub sha: String,
     pub pulls: Vec<ProducerPull>,
     pub retired_keys: Vec<String>,
+    #[serde(default)]
+    pub declared_keys: Vec<String>,
     pub workflows: Vec<ProducerWorkflow>,
     #[serde(default)]
     pub historical_runs: Vec<GithubRun>,
@@ -114,6 +116,8 @@ pub(super) async fn discover(client: &Client, repo: &str) -> Result<ProducerSnap
     let map = content(client, repo, RESPONSIBILITY_MAP_PATH, sha).await?.unwrap_or(Value::Null);
     let retired_keys: Vec<String> = map["authority"]["deprecatedWorkTrackKeys"].as_array()
         .map(|values| values.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let declared_keys: Vec<String> = map["watchtowerProject"]["canonicalTrackKeys"].as_array()
+        .map(|values| values.iter().filter_map(|v|v.as_str().map(str::to_string)).collect()).unwrap_or_default();
     let mut workflows = Vec::new();
     for file in roster {
         let path = file["path"].as_str().ok_or_else(|| anyhow!("Missing workflow path"))?;
@@ -155,7 +159,7 @@ pub(super) async fn discover(client: &Client, repo: &str) -> Result<ProducerSnap
         }
     }
     let current_runs = github_repository_runs(client, repo).await?;
-    Ok(ProducerSnapshot { repository: repo.into(), default_branch: branch.into(), sha: sha.into(), pulls, retired_keys, workflows, historical_runs: historical_runs.into_values().collect(), current_runs })
+    Ok(ProducerSnapshot { repository: repo.into(), default_branch: branch.into(), sha: sha.into(), pulls, retired_keys, declared_keys, workflows, historical_runs: historical_runs.into_values().collect(), current_runs })
 }
 
 pub(super) fn contracts(snapshot: &ProducerSnapshot) -> Vec<RepositoryResponsibilityContract> {
@@ -183,6 +187,7 @@ pub(super) fn apply(conn: &Connection, repository: &MonitoredRepository, snapsho
         let keys: HashSet<_> = pr.keys.iter().collect();
         keys.len() == 1 && keys.iter().all(|key| validate_track_key(key).is_ok())
     }).flat_map(|pr| pr.keys.clone()).filter(|key| !snapshot.retired_keys.contains(key)).collect();
+    legacy_compat::restore_producer_confirmed_inactive_tracks(&tx,repository.project_id,&keys,&snapshot.declared_keys,&now)?;
     for key in keys {
         // Existing rows, inactive rows and user aliases all win; no upsert overwrites user edits.
         let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM watch_tracks WHERE project_id=? AND track_key=?) OR EXISTS(SELECT 1 FROM track_aliases WHERE project_id=? AND alias_key=?)",
