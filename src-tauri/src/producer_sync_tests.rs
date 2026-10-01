@@ -178,9 +178,13 @@ fn track_history_prefers_work_association_over_technical_assignment_and_manual_o
     persist_work_track_association(&conn,123,Some((ids[1],98,"pr_marker".into(),"actual PR work".into())),true,now).unwrap();
     assert!(runs_for_track(&conn,ids[0],30).unwrap().is_empty());
     assert_eq!(runs_for_track(&conn,ids[1],30).unwrap().len(),1);
+    assert_eq!(average_duration(&conn,ids[0]).unwrap(),None);
+    assert_eq!(average_duration(&conn,ids[1]).unwrap(),Some(60));
     conn.execute("UPDATE run_assignments SET manual=1,source='manual' WHERE run_id=123",[]).unwrap();
     assert_eq!(runs_for_track(&conn,ids[0],30).unwrap().len(),1);
     assert!(runs_for_track(&conn,ids[1],30).unwrap().is_empty());
+    assert_eq!(average_duration(&conn,ids[0]).unwrap(),Some(60));
+    assert_eq!(average_duration(&conn,ids[1]).unwrap(),None);
     drop(conn);let _=std::fs::remove_file(path);
 }
 

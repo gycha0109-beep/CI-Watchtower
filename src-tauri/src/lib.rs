@@ -3017,9 +3017,15 @@ fn average_duration(conn: &Connection, track_id: i64) -> Result<Option<i64>> {
     let avg: Option<f64> = conn
         .query_row(
             "WITH track_runs AS (
-               SELECT run_id FROM run_assignments WHERE track_id=?
+               SELECT ra.run_id FROM run_assignments ra WHERE ra.track_id=?
+                 AND (ra.manual=1 OR NOT EXISTS(
+                   SELECT 1 FROM run_track_associations rta WHERE rta.run_id=ra.run_id
+                 ))
                UNION
-               SELECT run_id FROM run_track_associations WHERE track_id=?
+               SELECT rta.run_id FROM run_track_associations rta WHERE rta.track_id=?
+                 AND NOT EXISTS(
+                   SELECT 1 FROM run_assignments ra WHERE ra.run_id=rta.run_id AND ra.manual=1
+                 )
              )
              SELECT AVG(duration_seconds) FROM (
                SELECT CAST(strftime('%s',wr.updated_at)-strftime('%s',COALESCE(wr.run_started_at,wr.created_at)) AS INTEGER) duration_seconds
