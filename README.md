@@ -24,6 +24,8 @@ Project는 제품/서비스 단위, Repository는 GitHub 저장소, Track은 병
 
 신규 설치는 특정 프로젝트를 자동 등록하지 않는 빈 registry로 시작합니다. 기존 v0.2 계열 DB의 프로젝트별 호환 처리는 `src-tauri/src/legacy_compat.rs`의 one-shot migration에만 격리되어 있으며, 정상 startup은 사용자가 등록한 Project / Repository / Track / Rule을 그대로 사용합니다.
 
+v0.3.38은 등록된 Repository의 최신 default branch metadata와 최근 PR 500개의 `Watchtower-Track:`를 조사해 기존 DB를 저장소별 한 번만 동기화합니다. 개인 프로젝트 seed는 없으며, 기존 ID·수동 지정·alias·이력을 보존합니다. Work Track 귀속과 CI responsibility는 별도로 유지하고, 귀속 상세에서 실제 Job/Step 상태와 시간을 조회합니다. 조사 근거와 동기화 정책은 [Producer discovery audit](docs/producer-discovery/README.md)에 있습니다.
+
 ## Project-wide CI
 
 공용 CI 규칙은 UI에서 추가/삭제할 수 있으며 프로젝트 전체 또는 특정 Repository 범위로 제한할 수 있습니다. 미귀속 Inbox의 Run에서 **공용 CI로 분류**를 선택하면 같은 Project의 동일 Workflow 이름을 공용 규칙으로 학습합니다.

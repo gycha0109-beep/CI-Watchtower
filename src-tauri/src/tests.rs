@@ -1,6 +1,6 @@
 use super::*;
 
-fn legacy_v02_db_path(label: &str) -> std::path::PathBuf {
+pub(super) fn legacy_v02_db_path(label: &str) -> std::path::PathBuf {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -210,7 +210,7 @@ fn seed_legacy_v02_database(path: &Path) {
         .unwrap();
 }
 
-fn track(id: i64, key: &str) -> Track {
+pub(super) fn track(id: i64, key: &str) -> Track {
     Track {
         id,
         project_id: 1,
@@ -238,8 +238,8 @@ fn generic_alias_tokens_are_preserved_until_project_scoped_resolution() {
         Some("legacy&ops".into())
     );
     assert_eq!(
-        extract_track_trailer("feat: x\n\nWatchtower-Track: legacy&ops"),
-        Some("legacy&ops".into())
+        producer_sync::trailer_keys("feat: x\n\nWatchtower-Track: legacy&ops"),
+        vec!["legacy&ops".to_string()]
     );
     assert!(branch_has_key("feat/legacy&ops/provider-quality", "legacy&ops"));
 
@@ -257,8 +257,8 @@ fn generic_alias_tokens_are_preserved_until_project_scoped_resolution() {
 #[test]
 fn extracts_pr_or_commit_trailer() {
     assert_eq!(
-        extract_track_trailer("feat: x\n\nWatchtower-Track: ops"),
-        Some("ops".into())
+        producer_sync::trailer_keys("feat: x\n\nWatchtower-Track: ops"),
+        vec!["ops".to_string()]
     );
 }
 
@@ -286,7 +286,7 @@ fn legacy_known_tracks_keep_stable_keys() {
     assert_eq!(legacy_compat::legacy_track_key("관상 연구 및 검증 2", 3), "face-research");
 }
 
-fn evidence(key: &str, signal_type: &str, score: i64) -> Evidence {
+pub(super) fn evidence(key: &str, signal_type: &str, score: i64) -> Evidence {
     Evidence {
         track_key: key.into(),
         signal_type: signal_type.into(),
@@ -3419,10 +3419,13 @@ fn attribution_detail_exposes_final_decision_and_ordered_evidence() {
                (1000,'ops','run_name',100,'[WT:ops] CI','2026-09-24T02:00:00Z');"
         ).unwrap();
 
+    producer_sync::init(&conn).unwrap();
+    conn.execute_batch("CREATE TABLE run_track_associations(run_id INTEGER PRIMARY KEY,track_id INTEGER NOT NULL);").unwrap();
     let detail = load_run_attribution_detail(&conn, 1000).unwrap();
     assert_eq!(detail.project_id, 1);
     assert_eq!(detail.repository, "example/repo");
     assert_eq!(detail.assigned_track_key.as_deref(), Some("ops"));
+    assert_eq!(detail.work_track_key.as_deref(), Some("ops"));
     assert_eq!(detail.source.as_deref(), Some("manual"));
     assert_eq!(detail.confidence, Some(100));
     assert_eq!(detail.manual, Some(true));
@@ -4331,6 +4334,8 @@ fn attribution_detail_identifies_repository_specific_project_rule() {
              INSERT INTO project_workflow_rules VALUES(8,1,100,'Governance',1);"
         ).unwrap();
 
+    producer_sync::init(&conn).unwrap();
+    conn.execute_batch("CREATE TABLE run_track_associations(run_id INTEGER PRIMARY KEY,track_id INTEGER NOT NULL);").unwrap();
     let detail = load_run_attribution_detail(&conn, 1000).unwrap();
     assert_eq!(detail.resolution_status, "project");
     assert_eq!(detail.source.as_deref(), Some("project_workflow"));

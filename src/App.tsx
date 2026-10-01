@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { api } from './api';
 import type {
   Dashboard,
@@ -13,6 +13,7 @@ import type {
   Settings,
   TrackInput,
   WorkflowRunSummary,
+  WorkflowJob,
 } from './types';
 
 type TrackFormState = Omit<TrackInput, 'longCiMinutes'> & { longCiMinutes: number | '' };
@@ -231,6 +232,10 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [auditRun, setAuditRun] = useState<WorkflowRunSummary | null>(null);
   const [auditDetail, setAuditDetail] = useState<RunAttributionDetail | null>(null);
+  const [auditJobs, setAuditJobs] = useState<WorkflowJob[]>([]);
+  const auditRequestId = useRef(0);
+  const [jobsLoaded, setJobsLoaded] = useState(false);
+  const [jobsError, setJobsError] = useState<string | null>(null);
   const [auditLoadingId, setAuditLoadingId] = useState<number | null>(null);
   const [resolutionPreview, setResolutionPreview] = useState<ResponsibilityResolutionPreview | null>(null);
   const [resolutionLoadingKey, setResolutionLoadingKey] = useState<string | null>(null);
@@ -826,6 +831,7 @@ function App() {
 
   const inspectAttribution = async (run: WorkflowRunSummary) => {
     setActiveSurface('issues');
+    const requestId = ++auditRequestId.current;
     if (auditRun?.id === run.id) {
       setAuditRun(null);
       setAuditDetail(null);
@@ -834,15 +840,26 @@ function App() {
     try {
       setError(null);
       setAuditRun(run);
+      setAuditJobs([]);
+      setJobsLoaded(false);
+      setJobsError(null);
       setAuditDetail(null);
       setAuditLoadingId(run.id);
-      setAuditDetail(await api.getRunAttribution(run.id));
+      const detail = await api.getRunAttribution(run.id);
+      if (auditRequestId.current !== requestId) return;
+      setAuditDetail(detail);
+      void api.getRunJobs(run.id).then(jobs => {
+        if (auditRequestId.current === requestId) { setAuditJobs(jobs); setJobsLoaded(true); }
+      }).catch(e => {
+        if (auditRequestId.current === requestId) { setJobsError(String(e)); setJobsLoaded(true); }
+      });
     } catch (e) {
+      if (auditRequestId.current !== requestId) return;
       setAuditRun(null);
       setAuditDetail(null);
       setError(String(e));
     } finally {
-      setAuditLoadingId(null);
+      if (auditRequestId.current === requestId) setAuditLoadingId(null);
     }
   };
 
@@ -1787,6 +1804,8 @@ function App() {
               ) : (
                 <>
                   <div className="audit-summary-grid">
+                    <div><span>작업 Track</span><b>{auditDetail.workTrackName ? `${auditDetail.workTrackName} / ${auditDetail.workTrackKey}` : '명시 근거 없음 / 충돌'}</b></div>
+                    <div><span>CI 책임</span><b>{auditDetail.technicalResponsibility ?? auditDetail.resolutionStatus}</b></div>
                     <div><span>최종 상태</span><b>{auditDetail.resolutionStatus}</b></div>
                     <div><span>최종 귀속</span><b>{auditDetail.assignedTrackName ? `${auditDetail.assignedTrackName} / ${auditDetail.assignedTrackKey}` : auditDetail.resolutionStatus === 'project' ? 'Project-wide CI' : '미귀속'}</b></div>
                     <div><span>판정 소스</span><b>{auditDetail.source ?? '—'}</b></div>
@@ -1797,6 +1816,17 @@ function App() {
                     <span>최종 판정 이유</span>
                     <p>{auditDetail.reason ?? '확정 판정 이유가 기록되지 않았습니다.'}</p>
                     {auditDetail.projectRuleId != null && <small>Project rule #{auditDetail.projectRuleId} · {auditDetail.projectRuleRepositoryId == null ? '프로젝트 전체 범위' : 'Repository 전용 범위'}</small>}
+                  </div>
+                  <div className="audit-evidence-list">
+                    <div className="audit-evidence-head"><b>Workflow → Job → Step</b><span>전체 Run 경과 {Math.floor(auditRun.elapsedSeconds / 60)}분 {auditRun.elapsedSeconds % 60}초</span></div>
+                    {jobsError && <p className="muted-copy">Job 조회 실패: {jobsError}</p>}
+                    {!jobsError && !jobsLoaded && <p className="muted-copy">Job 정보를 조회하는 중입니다.</p>}
+                    {jobsLoaded && !jobsError && auditJobs.length === 0 && <p className="muted-copy">이 실행 시도에 조회 가능한 Job이 없습니다.</p>}
+                    {auditJobs.map(job => <details key={job.id} className="rule-item workflow-job">
+                      <summary>{job.name} · {job.status} / {job.conclusion ?? '—'} · {job.runnerId ? job.runnerName : 'runner 미배정'}</summary>
+                      <p className="muted-copy">시작 {job.startedAt ?? '—'} · 완료 {job.completedAt ?? '—'}</p>
+                      {job.steps.map(step => <p key={step.number} className="muted-copy">{step.number}. {step.name} · {step.status} / {step.conclusion ?? '—'} · {step.startedAt ?? '—'} → {step.completedAt ?? '—'}</p>)}
+                    </details>)}
                   </div>
                   <div className="audit-evidence-list">
                     <div className="audit-evidence-head"><b>관측 근거</b><span>{auditDetail.evidence.length}건</span></div>

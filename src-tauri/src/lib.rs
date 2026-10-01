@@ -18,6 +18,9 @@ use tauri::{
 use tauri_plugin_notification::NotificationExt;
 
 mod legacy_compat;
+mod producer_sync;
+mod job_telemetry;
+mod import_cli;
 
 const KEYRING_SERVICE: &str = "ci-watchtower";
 const KEYRING_ACCOUNT: &str = "github-pat";
@@ -285,18 +288,6 @@ struct ResponsibilityMapSourceStatus {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RepositoryResponsibilityMap {
-    workflows: HashMap<String, RepositoryWorkflowResponsibility>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RepositoryWorkflowResponsibility {
-    watchtower_track_binding: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct GithubWorkflowsResponse {
     workflows: Vec<GithubWorkflowDefinition>,
 }
@@ -410,6 +401,9 @@ struct ReconciliationAuditEntry {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RunAttributionDetail {
+    work_track_name: Option<String>,
+    work_track_key: Option<String>,
+    technical_responsibility: Option<String>,
     run_id: i64,
     project_id: i64,
     repository_id: i64,
@@ -534,7 +528,7 @@ struct GithubRunsResponse {
     workflow_runs: Vec<GithubRun>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct GithubRun {
     id: i64,
     workflow_id: i64,
@@ -561,7 +555,7 @@ fn default_attempt() -> i64 {
     1
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct GithubPullRef {
     number: i64,
 }
@@ -1078,6 +1072,7 @@ fn init_db(path: &Path) -> Result<()> {
     if legacy_project_scope {
         legacy_compat::finish_project_scope_migration(&conn)?;
     }
+    producer_sync::init(&conn)?;
     legacy_compat::refresh_existing_track_registry(&conn)?;
     legacy_compat::refresh_existing_track_assignments(&conn)?;
     legacy_compat::mark_core_decoupling(&conn)?;
@@ -1384,18 +1379,6 @@ fn extract_marker(text: &str) -> Option<String> {
     normalize_evidence_key(&tail[..end])
 }
 
-fn extract_track_trailer(text: &str) -> Option<String> {
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(value) = trimmed.strip_prefix("Watchtower-Track:") {
-            if let Some(key) = normalize_evidence_key(value) {
-                return Some(key);
-            }
-        }
-    }
-    None
-}
-
 fn branch_has_key(branch: &str, key: &str) -> bool {
     let normalized_branch = branch.to_lowercase();
     normalized_branch == key
@@ -1606,6 +1589,7 @@ fn responsibility_map_source_statuses(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+#[cfg(test)]
 fn replace_repository_responsibility_contracts(
     conn: &Connection,
     repository_id: i64,
@@ -1613,12 +1597,23 @@ fn replace_repository_responsibility_contracts(
     now: &str,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
+    replace_repository_responsibility_contracts_inner(&tx, repository_id, contracts, now)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn replace_repository_responsibility_contracts_inner(
+    conn: &Connection,
+    repository_id: i64,
+    contracts: &[RepositoryResponsibilityContract],
+    now: &str,
+) -> Result<()> {
+    conn.execute(
         "DELETE FROM repository_responsibility_contracts WHERE repository_id=?",
         params![repository_id],
     )?;
     for contract in contracts {
-        tx.execute(
+        conn.execute(
             "INSERT INTO repository_responsibility_contracts(
                repository_id,workflow_path,workflow_name,binding_kind,track_key,
                source_binding,source_path,last_seen_at
@@ -1635,7 +1630,6 @@ fn replace_repository_responsibility_contracts(
             ],
         )?;
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -2610,7 +2604,16 @@ fn load_run_attribution_detail(conn: &Connection, run_id: i64) -> Result<RunAttr
         Vec::new()
     };
 
+    let association: Option<(String, String)> = if assignment_manual == Some(1) {
+        assigned_track_name.clone().zip(assigned_track_key.clone())
+    } else { conn.query_row(
+        "SELECT wt.name,wt.track_key FROM run_track_associations rta JOIN watch_tracks wt ON wt.id=rta.track_id WHERE rta.run_id=?", params![run_id],
+        |row| Ok((row.get(0)?, row.get(1)?))).optional()? };
+    let technical_responsibility = producer_sync::load_snapshot(conn, repository_id)?.and_then(|snapshot| snapshot.workflows.into_iter().find(|workflow| workflow.name == workflow_name).map(|workflow| workflow.responsibility));
     Ok(RunAttributionDetail {
+        work_track_name: association.as_ref().map(|value| value.0.clone()),
+        work_track_key: association.map(|value| value.1),
+        technical_responsibility,
         run_id,
         project_id,
         repository_id,
@@ -2678,13 +2681,16 @@ fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<Wo
            SELECT ra.run_id,ra.source,ra.reason,ra.confidence
            FROM run_assignments ra
            WHERE ra.track_id=?
+             AND (ra.manual=1 OR NOT EXISTS(
+               SELECT 1 FROM run_track_associations rta WHERE rta.run_id=ra.run_id
+             ))
            UNION ALL
            SELECT rta.run_id,rta.source,rta.reason,rta.confidence
            FROM run_track_associations rta
            WHERE rta.track_id=?
              AND NOT EXISTS(
                SELECT 1 FROM run_assignments ra
-               WHERE ra.run_id=rta.run_id AND ra.track_id=?
+               WHERE ra.run_id=rta.run_id AND ra.manual=1
              )
          ),
          ranked AS (
@@ -2709,7 +2715,7 @@ fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<Wo
          WHERE repository_rank<=?
          ORDER BY created_at DESC",
     )?;
-    let rows = stmt.query_map(params![track_id, track_id, track_id, limit], |row| {
+    let rows = stmt.query_map(params![track_id, track_id, limit], |row| {
         run_summary_from_row(row, now)
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3011,9 +3017,15 @@ fn average_duration(conn: &Connection, track_id: i64) -> Result<Option<i64>> {
     let avg: Option<f64> = conn
         .query_row(
             "WITH track_runs AS (
-               SELECT run_id FROM run_assignments WHERE track_id=?
+               SELECT ra.run_id FROM run_assignments ra WHERE ra.track_id=?
+                 AND (ra.manual=1 OR NOT EXISTS(
+                   SELECT 1 FROM run_track_associations rta WHERE rta.run_id=ra.run_id
+                 ))
                UNION
-               SELECT run_id FROM run_track_associations WHERE track_id=?
+               SELECT rta.run_id FROM run_track_associations rta WHERE rta.track_id=?
+                 AND NOT EXISTS(
+                   SELECT 1 FROM run_assignments ra WHERE ra.run_id=rta.run_id AND ra.manual=1
+                 )
              )
              SELECT AVG(duration_seconds) FROM (
                SELECT CAST(strftime('%s',wr.updated_at)-strftime('%s',COALESCE(wr.run_started_at,wr.created_at)) AS INTEGER) duration_seconds
@@ -3161,68 +3173,17 @@ async fn fetch_json<T: for<'de> Deserialize<'de>>(
 async fn github_repository_runs(client: &Client, repo: &str) -> Result<Vec<GithubRun>> {
     let url = format!("https://api.github.com/repos/{repo}/actions/runs?per_page=100");
     let data: GithubRunsResponse = fetch_json(client, url, "GitHub Actions 조회 실패").await?;
-    Ok(data.workflow_runs)
-}
-
-async fn github_repository_responsibility_contracts(
-    client: &Client,
-    repo: &str,
-) -> Result<Option<Vec<RepositoryResponsibilityContract>>> {
-    let url = format!("https://api.github.com/repos/{repo}/contents/{RESPONSIBILITY_MAP_PATH}");
-    let response = client
-        .get(url)
-        .header(
-            header::ACCEPT,
-            header::HeaderValue::from_static("application/vnd.github.raw+json"),
-        )
-        .send()
-        .await?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
+    let mut runs: HashMap<i64, GithubRun> = data.workflow_runs.into_iter().map(|run| (run.id, run)).collect();
+    // Old active runs must not disappear merely because 100 newer completed runs exist.
+    for status in ["queued", "in_progress", "waiting", "pending", "requested"] {
+        for page in 1..=10 {
+            let data: GithubRunsResponse = fetch_json(client, format!("https://api.github.com/repos/{repo}/actions/runs?status={status}&per_page=100&page={page}"), "Active Actions 조회 실패").await?;
+            let count = data.workflow_runs.len();
+            for run in data.workflow_runs { runs.insert(run.id, run); }
+            if count < 100 { break; }
+        }
     }
-    if !response.status().is_success() {
-        return Err(anyhow!(
-            "Responsibility map 조회 실패: HTTP {}",
-            response.status()
-        ));
-    }
-    let map: RepositoryResponsibilityMap = serde_json::from_str(&response.text().await?)?;
-    let workflows_url =
-        format!("https://api.github.com/repos/{repo}/actions/workflows?per_page=100");
-    let workflow_data: GithubWorkflowsResponse =
-        fetch_json(client, workflows_url, "Workflow inventory 조회 실패").await?;
-    let workflow_names: HashMap<String, String> = workflow_data
-        .workflows
-        .into_iter()
-        .map(|workflow| (workflow.path, workflow.name))
-        .collect();
-
-    let contracts = map
-        .workflows
-        .into_iter()
-        .map(|(workflow_file, responsibility)| {
-            let workflow_path = if workflow_file.starts_with(".github/workflows/") {
-                workflow_file.clone()
-            } else {
-                format!(".github/workflows/{workflow_file}")
-            };
-            let workflow_name = workflow_names
-                .get(&workflow_path)
-                .cloned()
-                .unwrap_or_else(|| workflow_file.clone());
-            let source_binding = responsibility.watchtower_track_binding;
-            let (binding_kind, track_key) = normalize_repository_binding(&source_binding);
-            RepositoryResponsibilityContract {
-                workflow_path,
-                workflow_name,
-                binding_kind,
-                track_key,
-                source_binding,
-                source_path: RESPONSIBILITY_MAP_PATH.into(),
-            }
-        })
-        .collect();
-    Ok(Some(contracts))
+    Ok(runs.into_values().collect())
 }
 
 async fn github_commit_message(
@@ -3544,7 +3505,7 @@ async fn collect_run_evidence(
 
     let pulls = github_prs_for_run(client, repo, run, pr_cache).await;
     for pr in pulls {
-        if let Some(key) = pr.body.as_deref().and_then(extract_track_trailer) {
+        for key in producer_sync::trailer_keys(pr.body.as_deref().unwrap_or_default()) {
             evidence.push(Evidence {
                 track_key: key,
                 signal_type: "pr_marker".into(),
@@ -3555,7 +3516,7 @@ async fn collect_run_evidence(
     }
 
     if let Some(message) = github_commit_message(client, repo, &run.head_sha, commit_cache).await {
-        if let Some(key) = extract_track_trailer(&message) {
+        for key in producer_sync::trailer_keys(&message) {
             evidence.push(Evidence {
                 track_key: key,
                 signal_type: "commit_marker".into(),
@@ -3566,6 +3527,7 @@ async fn collect_run_evidence(
     }
 
     evidence.extend(fingerprint_evidence(fingerprints, run));
+    // Per-repository producer facts filter legacy responsibility markers, never other repositories.
     Ok(evidence)
 }
 
@@ -3579,7 +3541,7 @@ fn work_track_association(
         .map(|track| (track.track_key.as_str(), track.id))
         .collect();
 
-    for priority_score in [100_i64, 98, 96, 90] {
+    for priority_score in [98_i64, 100, 96, 90] {
         let priority_items: Vec<&Evidence> = evidence
             .iter()
             .filter(|item| {
@@ -3635,6 +3597,20 @@ fn persist_work_track_association(
     explicit_seen: bool,
     now: &str,
 ) -> Result<()> {
+    let previous: Option<(i64,String,String,i64,String,String,i64)> = conn.query_row(
+        "SELECT rta.track_id,wt.track_key,rta.source,rta.confidence,rta.reason,rta.associated_at,wr.repository_id
+         FROM run_track_associations rta JOIN watch_tracks wt ON wt.id=rta.track_id JOIN workflow_runs wr ON wr.run_id=rta.run_id WHERE rta.run_id=?",
+        params![run_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).optional()?;
+    if let Some((old_id,old_key,old_source,old_confidence,old_reason,old_at,repository_id))=previous {
+        let next_id=association.as_ref().map(|item|item.0);
+        if next_id!=Some(old_id) && (next_id.is_some() || explicit_seen) {
+            let next_key: Option<String>=if let Some(id)=next_id {Some(conn.query_row("SELECT track_key FROM watch_tracks WHERE id=?",params![id],|row|row.get(0))?)} else {None};
+            let previous_evidence=vec![Evidence{track_key:old_key.clone(),signal_type:old_source.clone(),score:old_confidence,value:format!("Track #{old_id}; {old_at}; {old_reason}")}];
+            let next_evidence: Vec<Evidence>=association.as_ref().map(|item|Evidence{track_key:next_key.clone().unwrap_or_default(),signal_type:item.2.clone(),score:item.1,value:item.3.clone()}).into_iter().collect();
+            conn.execute("INSERT INTO resolution_reconciliation_audit(run_id,repository_id,trigger,from_status,from_track_key,from_source,from_confidence,to_status,to_track_key,to_source,to_confidence,to_reason,previous_evidence_json,evidence_json,reconciled_at) VALUES(?,?,'work_track_association','assigned',?,?,?,?,?,?,?,?,?,?,?)",
+                params![run_id,repository_id,old_key,old_source,old_confidence,if next_id.is_some(){"assigned"}else{"unassigned"},next_key,association.as_ref().map(|item|item.2.as_str()),association.as_ref().map(|item|item.1),association.as_ref().map(|item|item.3.as_str()).unwrap_or("현재 명시 근거에 따라 작업 Track 연관 해제"),serde_json::to_string(&previous_evidence)?,serde_json::to_string(&next_evidence)?,now])?;
+        }
+    }
     if let Some((track_id, confidence, source, reason)) = association {
         conn.execute(
             "INSERT INTO run_track_associations(
@@ -3780,11 +3756,13 @@ fn persist_resolution_with_trigger(
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
-    conn.execute("DELETE FROM run_evidence WHERE run_id=?", params![run_id])?;
+    if trigger != Some("producer_discovery") {
+        conn.execute("DELETE FROM run_evidence WHERE run_id=?", params![run_id])?;
+    }
     for item in &resolution.evidence {
         conn.execute(
-            "INSERT INTO run_evidence(run_id,track_key,signal_type,score,value,created_at) VALUES(?,?,?,?,?,?)",
-            params![run_id, item.track_key, item.signal_type, item.score, item.value, now],
+            "INSERT INTO run_evidence(run_id,track_key,signal_type,score,value,created_at) SELECT ?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM run_evidence WHERE run_id=? AND track_key=? AND signal_type=? AND score=? AND value=?)",
+            params![run_id, item.track_key, item.signal_type, item.score, item.value, now,run_id,item.track_key,item.signal_type,item.score,item.value],
         )?;
     }
     conn.execute(
@@ -4026,9 +4004,9 @@ fn backfill_local_work_track_associations(conn: &Connection) -> Result<()> {
             .collect();
         let aliases = load_project_aliases(conn, project_id)?;
 
-        let candidates: Vec<(i64, Option<String>)> = {
+        let candidates: Vec<(i64, Option<String>, i64, Option<String>, String)> = {
             let mut stmt = conn.prepare(
-                "SELECT wr.run_id,wr.display_title
+                "SELECT wr.run_id,wr.display_title,wr.repository_id,wr.workflow_path,wr.workflow_name
                  FROM workflow_runs wr
                  JOIN monitored_repositories mr ON mr.id=wr.repository_id
                  WHERE mr.project_id=?
@@ -4050,11 +4028,11 @@ fn backfill_local_work_track_associations(conn: &Connection) -> Result<()> {
                    )",
             )?;
             let rows =
-                stmt.query_map(params![project_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                stmt.query_map(params![project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
 
-        for (run_id, display_title) in candidates {
+        for (run_id, display_title, repository_id, workflow_path, workflow_name) in candidates {
             let mut evidence: Vec<Evidence> = {
                 let mut stmt = conn.prepare(
                     "SELECT track_key,signal_type,score,value
@@ -4082,13 +4060,19 @@ fn backfill_local_work_track_associations(conn: &Connection) -> Result<()> {
                     });
                 }
             }
+            let mut scoped_aliases = aliases.clone();
+            let mut discarded_marker = false;
+            if let Some(snapshot) = producer_sync::load_snapshot(conn, repository_id)? {
+                discarded_marker = producer_sync::filter_evidence(&snapshot, workflow_path.as_deref(), &workflow_name, &mut evidence);
+                for key in &snapshot.retired_keys { scoped_aliases.remove(key); }
+            }
             let (association, explicit_seen) =
-                work_track_association(&project_tracks, &aliases, &evidence);
+                work_track_association(&project_tracks, &scoped_aliases, &evidence);
             persist_work_track_association(
                 conn,
                 run_id,
                 association,
-                explicit_seen,
+                explicit_seen || discarded_marker,
                 &now,
             )?;
         }
@@ -4412,6 +4396,21 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
     if repositories.is_empty() {
         return Ok(());
     }
+    for repository in &repositories {
+        let needs_discovery = { let conn = db(state)?; !producer_sync::applied(&conn, repository.id)? };
+        if needs_discovery {
+            match producer_sync::discover(&client, &repository.repo).await {
+                Ok(mut snapshot) => {
+                    if let Err(error) = producer_sync::reconcile_active_runs(&client, repository, state, &mut snapshot.current_runs).await {
+                        let conn = db(state)?; update_repository_responsibility_source(&conn, repository.id, "error", &Utc::now().to_rfc3339(), Some(&error.to_string()))?;
+                        continue;
+                    }
+                    let conn = db(state)?; producer_sync::apply(&conn, repository, &snapshot)?;
+                }
+                Err(error) => { let conn = db(state)?; update_repository_responsibility_source(&conn, repository.id, "error", &Utc::now().to_rfc3339(), Some(&error.to_string()))?; }
+            }
+        }
+    }
     let tracks = {
         let conn = db(state)?;
         list_tracks(&conn, true)?
@@ -4432,7 +4431,12 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     params![now_str, err.to_string(), now_str, repository.id],
                 )?;
             }
-            Ok(runs) => {
+            Ok(mut runs) => {
+                if let Err(error) = producer_sync::reconcile_active_runs(&client, &repository, state, &mut runs).await {
+                    let conn = db(state)?;
+                    conn.execute("UPDATE monitored_repositories SET last_polled_at=?,last_error=?,updated_at=? WHERE id=?",params![now_str,error.to_string(),now_str,repository.id])?;
+                    continue;
+                }
                 let running_count =
                     runs.iter().filter(|r| r.status == "in_progress").count() as i64;
                 let queued_count = runs
@@ -4455,54 +4459,19 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     }
                 }
 
-                match github_repository_responsibility_contracts(&client, &repository.repo).await {
-                    Ok(Some(contracts)) => {
-                        let conn = db(state)?;
-                        replace_repository_responsibility_contracts(
-                            &conn,
-                            repository.id,
-                            &contracts,
-                            &now_str,
-                        )?;
-                        update_repository_responsibility_source(
-                            &conn,
-                            repository.id,
-                            "synced",
-                            &now_str,
-                            None,
-                        )?;
-                    }
-                    Ok(None) => {
-                        let conn = db(state)?;
-                        update_repository_responsibility_source(
-                            &conn,
-                            repository.id,
-                            "not_found",
-                            &now_str,
-                            None,
-                        )?;
-                    }
-                    Err(error) => {
-                        let conn = db(state)?;
-                        let error_text = error.to_string();
-                        update_repository_responsibility_source(
-                            &conn,
-                            repository.id,
-                            "error",
-                            &now_str,
-                            Some(&error_text),
-                        )?;
-                    }
-                }
+                let snapshot = { let conn = db(state)?; producer_sync::load_snapshot(&conn, repository.id)? };
 
                 let fingerprints = {
                     let conn = db(state)?;
                     load_fingerprints(&conn, repository.project_id, repository.id)?
                 };
-                let aliases = {
+                let mut aliases = {
                     let conn = db(state)?;
                     load_project_aliases(&conn, repository.project_id)?
                 };
+                if let Some(snapshot) = &snapshot {
+                    for key in &snapshot.retired_keys { aliases.remove(key); }
+                }
                 let repository_tracks: Vec<Track> = tracks
                     .iter()
                     .filter(|track| track.project_id == repository.project_id)
@@ -4526,7 +4495,7 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     if !should_resolve {
                         continue;
                     }
-                    let resolution = resolve_run(
+                    let mut resolution = resolve_run(
                         &client,
                         &repository.repo,
                         run,
@@ -4540,6 +4509,13 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &mut pr_cache,
                     )
                     .await?;
+                    let mut discarded_marker = false;
+                    if let Some(snapshot) = &snapshot {
+                        discarded_marker = producer_sync::filter_evidence(snapshot, run.path.as_deref(), &run.name, &mut resolution.evidence);
+                        if resolution.status != "project" {
+                            resolution = resolve_evidence(&repository_tracks, &aliases, resolution.evidence);
+                        }
+                    }
                     let (association, explicit_seen) =
                         work_track_association(&repository_tracks, &aliases, &resolution.evidence);
                     let conn = db(state)?;
@@ -4548,7 +4524,7 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &conn,
                         run.id,
                         association,
-                        explicit_seen,
+                        explicit_seen || discarded_marker,
                         &now_str,
                     )?;
                 }
@@ -4565,7 +4541,7 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     if recent_ids.contains(&run.id) {
                         continue;
                     }
-                    let resolution = resolve_run(
+                    let mut resolution = resolve_run(
                         &client,
                         &repository.repo,
                         &run,
@@ -4579,6 +4555,13 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &mut pr_cache,
                     )
                     .await?;
+                    let mut discarded_marker = false;
+                    if let Some(snapshot) = &snapshot {
+                        discarded_marker = producer_sync::filter_evidence(snapshot, run.path.as_deref(), &run.name, &mut resolution.evidence);
+                        if resolution.status != "project" {
+                            resolution = resolve_evidence(&repository_tracks, &aliases, resolution.evidence);
+                        }
+                    }
                     let (association, explicit_seen) =
                         work_track_association(&repository_tracks, &aliases, &resolution.evidence);
                     let conn = db(state)?;
@@ -4593,7 +4576,7 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &conn,
                         run.id,
                         association,
-                        explicit_seen,
+                        explicit_seen || discarded_marker,
                         &now_str,
                     )?;
                 }
@@ -4612,7 +4595,7 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     if recent_ids.contains(&run.id) {
                         continue;
                     }
-                    let evidence = collect_run_evidence(
+                    let mut evidence = collect_run_evidence(
                         &client,
                         &repository.repo,
                         &run,
@@ -4623,6 +4606,10 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &mut pr_cache,
                     )
                     .await?;
+                    let mut discarded_marker = false;
+                    if let Some(snapshot) = &snapshot {
+                        discarded_marker = producer_sync::filter_evidence(snapshot, run.path.as_deref(), &run.name, &mut evidence);
+                    }
                     let (association, explicit_seen) =
                         work_track_association(&repository_tracks, &aliases, &evidence);
                     let conn = db(state)?;
@@ -4630,7 +4617,7 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                         &conn,
                         run.id,
                         association,
-                        explicit_seen,
+                        explicit_seen || discarded_marker,
                         &now_str,
                     )?;
                 }
@@ -5935,13 +5922,24 @@ fn save_track_in_conn(conn: &Connection, input: &TrackInput, now: &str) -> Resul
         return Err(anyhow!("프로젝트를 찾지 못했습니다."));
     }
     let id = if let Some(id) = input.id {
-        conn.execute(
-            "UPDATE watch_tracks SET project_id=?,name=?,track_key=?,long_ci_minutes=?,active=1,updated_at=? WHERE id=?",
-            params![input.project_id, name, track_key, input.long_ci_minutes, now, id],
+        let (old_project_id,old_key): (i64,String) = conn.query_row(
+            "SELECT project_id,track_key FROM watch_tracks WHERE id=?",params![id],|row|Ok((row.get(0)?,row.get(1)?)))?;
+        let tx=conn.unchecked_transaction()?;
+        if old_project_id==input.project_id && old_key!=track_key {
+            let collision: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM track_aliases WHERE project_id=? AND alias_key=? AND track_id<>?)",params![old_project_id,old_key,id],|row|Ok(row.get::<_,i64>(0)?!=0))?;
+            if collision { return Err(anyhow!("기존 key의 별칭이 다른 Track을 가리킵니다. 이력을 보존하려면 별칭 충돌을 먼저 해결하십시오.")); }
+        }
+        tx.execute(
+            "UPDATE watch_tracks SET project_id=?,name=?,track_key=?,long_ci_minutes=?,active=1,updated_at=? WHERE id=? AND project_id=? AND track_key=?",
+            params![input.project_id, name, track_key, input.long_ci_minutes, now, id,old_project_id,old_key],
         )?;
-        if conn.changes() == 0 {
+        if tx.changes() == 0 {
             return Err(anyhow!("수정할 트랙을 찾지 못했습니다."));
         }
+        if old_project_id==input.project_id && old_key!=track_key {
+            tx.execute("INSERT OR IGNORE INTO track_aliases(project_id,alias_key,track_id,active,created_at) VALUES(?,?,?,1,?)",params![old_project_id,old_key,id,now])?;
+        }
+        tx.commit()?;
         id
     } else {
         conn.execute(
@@ -6423,6 +6421,11 @@ fn start_poller(app: &AppHandle) {
 }
 
 pub fn run() {
+    match import_cli::run(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        Ok(true) => return,
+        Ok(false) => {},
+        Err(error) => { eprintln!("{error:#}"); std::process::exit(1); }
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
@@ -6438,6 +6441,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            job_telemetry::get_run_jobs,
             get_dashboard,
             acknowledge_responsibility_escalation,
             suppress_responsibility_escalation,
@@ -6474,3 +6478,5 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod producer_sync_tests;
