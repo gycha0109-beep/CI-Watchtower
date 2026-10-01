@@ -3597,6 +3597,20 @@ fn persist_work_track_association(
     explicit_seen: bool,
     now: &str,
 ) -> Result<()> {
+    let previous: Option<(i64,String,String,i64,String,String,i64)> = conn.query_row(
+        "SELECT rta.track_id,wt.track_key,rta.source,rta.confidence,rta.reason,rta.associated_at,wr.repository_id
+         FROM run_track_associations rta JOIN watch_tracks wt ON wt.id=rta.track_id JOIN workflow_runs wr ON wr.run_id=rta.run_id WHERE rta.run_id=?",
+        params![run_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).optional()?;
+    if let Some((old_id,old_key,old_source,old_confidence,old_reason,old_at,repository_id))=previous {
+        let next_id=association.as_ref().map(|item|item.0);
+        if next_id!=Some(old_id) && (next_id.is_some() || explicit_seen) {
+            let next_key: Option<String>=if let Some(id)=next_id {Some(conn.query_row("SELECT track_key FROM watch_tracks WHERE id=?",params![id],|row|row.get(0))?)} else {None};
+            let previous_evidence=vec![Evidence{track_key:old_key.clone(),signal_type:old_source.clone(),score:old_confidence,value:format!("Track #{old_id}; {old_at}; {old_reason}")}];
+            let next_evidence: Vec<Evidence>=association.as_ref().map(|item|Evidence{track_key:next_key.clone().unwrap_or_default(),signal_type:item.2.clone(),score:item.1,value:item.3.clone()}).into_iter().collect();
+            conn.execute("INSERT INTO resolution_reconciliation_audit(run_id,repository_id,trigger,from_status,from_track_key,from_source,from_confidence,to_status,to_track_key,to_source,to_confidence,to_reason,previous_evidence_json,evidence_json,reconciled_at) VALUES(?,?,'work_track_association','assigned',?,?,?,?,?,?,?,?,?,?,?)",
+                params![run_id,repository_id,old_key,old_source,old_confidence,if next_id.is_some(){"assigned"}else{"unassigned"},next_key,association.as_ref().map(|item|item.2.as_str()),association.as_ref().map(|item|item.1),association.as_ref().map(|item|item.3.as_str()).unwrap_or("현재 명시 근거에 따라 작업 Track 연관 해제"),serde_json::to_string(&previous_evidence)?,serde_json::to_string(&next_evidence)?,now])?;
+        }
+    }
     if let Some((track_id, confidence, source, reason)) = association {
         conn.execute(
             "INSERT INTO run_track_associations(
@@ -5908,13 +5922,24 @@ fn save_track_in_conn(conn: &Connection, input: &TrackInput, now: &str) -> Resul
         return Err(anyhow!("프로젝트를 찾지 못했습니다."));
     }
     let id = if let Some(id) = input.id {
-        conn.execute(
-            "UPDATE watch_tracks SET project_id=?,name=?,track_key=?,long_ci_minutes=?,active=1,updated_at=? WHERE id=?",
-            params![input.project_id, name, track_key, input.long_ci_minutes, now, id],
+        let (old_project_id,old_key): (i64,String) = conn.query_row(
+            "SELECT project_id,track_key FROM watch_tracks WHERE id=?",params![id],|row|Ok((row.get(0)?,row.get(1)?)))?;
+        let tx=conn.unchecked_transaction()?;
+        if old_project_id==input.project_id && old_key!=track_key {
+            let collision: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM track_aliases WHERE project_id=? AND alias_key=? AND track_id<>?)",params![old_project_id,old_key,id],|row|Ok(row.get::<_,i64>(0)?!=0))?;
+            if collision { return Err(anyhow!("기존 key의 별칭이 다른 Track을 가리킵니다. 이력을 보존하려면 별칭 충돌을 먼저 해결하십시오.")); }
+        }
+        tx.execute(
+            "UPDATE watch_tracks SET project_id=?,name=?,track_key=?,long_ci_minutes=?,active=1,updated_at=? WHERE id=? AND project_id=? AND track_key=?",
+            params![input.project_id, name, track_key, input.long_ci_minutes, now, id,old_project_id,old_key],
         )?;
-        if conn.changes() == 0 {
+        if tx.changes() == 0 {
             return Err(anyhow!("수정할 트랙을 찾지 못했습니다."));
         }
+        if old_project_id==input.project_id && old_key!=track_key {
+            tx.execute("INSERT OR IGNORE INTO track_aliases(project_id,alias_key,track_id,active,created_at) VALUES(?,?,?,1,?)",params![old_project_id,old_key,id,now])?;
+        }
+        tx.commit()?;
         id
     } else {
         conn.execute(

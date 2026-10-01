@@ -205,3 +205,39 @@ fn invalid_explicit_pr_cannot_fall_back_to_a_valid_static_workflow_marker() {
     assert!(runs_for_track(&conn,id,30).unwrap().is_empty());
     drop(conn);let _=std::fs::remove_file(path);
 }
+
+#[test]
+fn user_key_rename_keeps_id_history_and_future_producer_evidence_in_same_project() {
+    let (path,conn,repo)=fixture();let now="2026-10-01T00:00:00Z";
+    upsert_run(&conn,repo.id,&run(123),now).unwrap();
+    producer_sync::apply(&conn,&repo,&snapshot(&["actual-work"])).unwrap();
+    let id=list_tracks(&conn,true).unwrap()[0].id;
+    assert_eq!(save_track_in_conn(&conn,&TrackInput{id:Some(id),project_id:repo.project_id,name:"User renamed".into(),track_key:"user-renamed".into(),long_ci_minutes:12},now).unwrap(),id);
+    let aliases=load_project_aliases(&conn,repo.project_id).unwrap();
+    let tracks=list_tracks(&conn,true).unwrap();
+    let (association,explicit)=work_track_association(&tracks,&aliases,&[tests::evidence("actual-work","pr_marker",98)]);
+    persist_work_track_association(&conn,123,association,explicit,now).unwrap();
+    assert_eq!(runs_for_track(&conn,id,30).unwrap().len(),1);
+    assert_eq!(load_run_attribution_detail(&conn,123).unwrap().work_track_key.as_deref(),Some("user-renamed"));
+    assert!(load_project_aliases(&conn,repo.project_id+1).unwrap().is_empty());
+    assert!(!producer_sync::apply(&conn,&repo,&snapshot(&["actual-work"])).unwrap());
+    assert_eq!(list_tracks(&conn,true).unwrap()[0].track_key,"user-renamed");
+    drop(conn);let _=std::fs::remove_file(path);
+}
+
+#[test]
+fn retirement_keeps_original_work_attribution_in_reconciliation_history() {
+    let (path,conn,repo)=fixture();let now="2026-10-01T00:00:00Z";
+    let id=save_track_in_conn(&conn,&TrackInput{id:None,project_id:repo.project_id,name:"Past work".into(),track_key:"retired".into(),long_ci_minutes:8},now).unwrap();
+    upsert_run(&conn,repo.id,&run(123),now).unwrap();
+    persist_work_track_association(&conn,123,Some((id,98,"pr_marker".into(),"original historical work".into())),true,now).unwrap();
+    producer_sync::apply(&conn,&repo,&snapshot(&["retired"])).unwrap();
+    assert!(!list_tracks(&conn,false).unwrap().iter().find(|t|t.id==id).unwrap().active);
+    let detail=load_run_attribution_detail(&conn,123).unwrap();
+    assert!(detail.work_track_key.is_none());
+    let history=detail.reconciliation_history.iter().find(|entry|entry.trigger=="work_track_association").unwrap();
+    assert_eq!(history.from_track_key.as_deref(),Some("retired"));
+    assert_eq!(history.previous_evidence[0].score,98);
+    assert!(history.previous_evidence[0].value.contains("original historical work"));
+    drop(conn);let _=std::fs::remove_file(path);
+}

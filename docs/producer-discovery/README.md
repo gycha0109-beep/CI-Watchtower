@@ -49,6 +49,10 @@ The transaction retains identity/settings/keyring, manual assignments, aliases, 
 
 Track history prefers its separate Work Track association over an automatic static workflow assignment; manual assignment takes precedence over both. Thus a workflow with static trust responsibility can appear in the actual pipeline-reliability PR history without also inflating the trust Work Track history. Primary responsibility and the original attribution records remain stored.
 
+When a user explicitly renames a Track key within the same Project, the save operation retains its ID and records the old key as a Project-scoped alias atomically. This also preserves history on later polling of old PR evidence. Existing aliases are never overwritten; a conflicting alias aborts the rename.
+
+When an automatic Work Track association moves or is cleared (including retirement or invalid/conflicting explicit evidence), its original Track key/ID, source, confidence, reason and timestamp are retained in the existing reconciliation audit. Current attribution can fail closed without erasing historical attribution; the attribution detail shows that audit separately from primary CI responsibility changes.
+
 Normal polling discovers registered repositories automatically. Fresh installation stays empty. There are no MyeongHa/Saju/K_beauty runtime branches. For an existing offline DB, the optional --import-producer-snapshot CLI accepts a generic JSON snapshot, backs up the existing database before migration, and exports the actual dashboard for verification. Snapshot files are operator inputs, never bundled seed data.
 
 The attribution view reads attempt-specific GitHub Job/Step status, conclusion, start/completion timestamps, and runner assignment. Missing timestamps stay missing; elapsed workflow time is not reported as command execution time or an inferred queue cause.
