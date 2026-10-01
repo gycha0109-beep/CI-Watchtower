@@ -3425,6 +3425,7 @@ fn attribution_detail_exposes_final_decision_and_ordered_evidence() {
     assert_eq!(detail.project_id, 1);
     assert_eq!(detail.repository, "example/repo");
     assert_eq!(detail.assigned_track_key.as_deref(), Some("ops"));
+    assert_eq!(detail.work_track_key.as_deref(), Some("ops"));
     assert_eq!(detail.source.as_deref(), Some("manual"));
     assert_eq!(detail.confidence, Some(100));
     assert_eq!(detail.manual, Some(true));

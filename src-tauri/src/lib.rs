@@ -2604,9 +2604,11 @@ fn load_run_attribution_detail(conn: &Connection, run_id: i64) -> Result<RunAttr
         Vec::new()
     };
 
-    let association: Option<(String, String)> = conn.query_row(
+    let association: Option<(String, String)> = if manual == Some(1) {
+        assigned_track_name.clone().zip(assigned_track_key.clone())
+    } else { conn.query_row(
         "SELECT wt.name,wt.track_key FROM run_track_associations rta JOIN watch_tracks wt ON wt.id=rta.track_id WHERE rta.run_id=?", params![run_id],
-        |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+        |row| Ok((row.get(0)?, row.get(1)?))).optional()? };
     let technical_responsibility = producer_sync::load_snapshot(conn, repository_id)?.and_then(|snapshot| snapshot.workflows.into_iter().find(|workflow| workflow.name == workflow_name).map(|workflow| workflow.responsibility));
     Ok(RunAttributionDetail {
         work_track_name: association.as_ref().map(|value| value.0.clone()),
@@ -4375,7 +4377,13 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
         let needs_discovery = { let conn = db(state)?; !producer_sync::applied(&conn, repository.id)? };
         if needs_discovery {
             match producer_sync::discover(&client, &repository.repo).await {
-                Ok(snapshot) => { let conn = db(state)?; producer_sync::apply(&conn, repository, &snapshot)?; }
+                Ok(mut snapshot) => {
+                    if let Err(error) = producer_sync::reconcile_active_runs(&client, repository, state, &mut snapshot.current_runs).await {
+                        let conn = db(state)?; update_repository_responsibility_source(&conn, repository.id, "error", &Utc::now().to_rfc3339(), Some(&error.to_string()))?;
+                        continue;
+                    }
+                    let conn = db(state)?; producer_sync::apply(&conn, repository, &snapshot)?;
+                }
                 Err(error) => { let conn = db(state)?; update_repository_responsibility_source(&conn, repository.id, "error", &Utc::now().to_rfc3339(), Some(&error.to_string()))?; }
             }
         }
@@ -4400,7 +4408,12 @@ async fn poll_all_inner(app: &AppHandle, state: &AppState) -> Result<()> {
                     params![now_str, err.to_string(), now_str, repository.id],
                 )?;
             }
-            Ok(runs) => {
+            Ok(mut runs) => {
+                if let Err(error) = producer_sync::reconcile_active_runs(&client, &repository, state, &mut runs).await {
+                    let conn = db(state)?;
+                    conn.execute("UPDATE monitored_repositories SET last_polled_at=?,last_error=?,updated_at=? WHERE id=?",params![now_str,error.to_string(),now_str,repository.id])?;
+                    continue;
+                }
                 let running_count =
                     runs.iter().filter(|r| r.status == "in_progress").count() as i64;
                 let queued_count = runs

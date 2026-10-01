@@ -127,3 +127,16 @@ fn restart_does_not_resurrect_suppressed_legacy_marker_and_keeps_original_eviden
     assert!(load_run_attribution_detail(&conn,123).unwrap().work_track_key.is_none());
     drop(conn); let _=std::fs::remove_file(path);
 }
+
+#[test]
+fn active_run_outside_recent_window_requires_exact_github_reconciliation() {
+    let (path,conn,repo)=fixture();
+    let mut old=run(123); old.status="queued".into(); old.conclusion=None;
+    upsert_run(&conn,repo.id,&old,"2026-10-01T00:00:00Z").unwrap();
+    assert_eq!(producer_sync::missing_active_run_ids(&conn,repo.id,&[run(124)]).unwrap(),vec![123]);
+    assert!(producer_sync::missing_active_run_ids(&conn,repo.id+1,&[]).unwrap().is_empty());
+    assert!(producer_sync::missing_active_run_ids(&conn,repo.id,&[old]).unwrap().is_empty());
+    upsert_run(&conn,repo.id,&run(123),"2026-10-01T00:01:00Z").unwrap();
+    assert!(producer_sync::missing_active_run_ids(&conn,repo.id,&[]).unwrap().is_empty());
+    drop(conn);let _=std::fs::remove_file(path);
+}

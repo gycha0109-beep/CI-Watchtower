@@ -53,6 +53,23 @@ pub(super) fn applied(conn: &Connection, repository_id: i64) -> Result<bool> {
         params![repository_id, SYNC_VERSION], |row| row.get::<_, i64>(0))? != 0)
 }
 
+pub(super) fn missing_active_run_ids(conn: &Connection, repository_id: i64, runs: &[GithubRun]) -> Result<Vec<i64>> {
+    let seen: HashSet<i64> = runs.iter().map(|run| run.id).collect();
+    let mut stmt = conn.prepare("SELECT run_id FROM workflow_runs WHERE repository_id=? AND status IN ('queued','in_progress','waiting','pending','requested') ORDER BY last_seen_at ASC")?;
+    let rows = stmt.query_map(params![repository_id], |row| row.get::<_, i64>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().filter(|id| !seen.contains(id)).take(100).collect())
+}
+
+pub(super) async fn reconcile_active_runs(client: &Client, repository: &MonitoredRepository, state: &AppState, runs: &mut Vec<GithubRun>) -> Result<()> {
+    let missing = { let conn = db(state)?; missing_active_run_ids(&conn, repository.id, runs)? };
+    // Absence from recent/active lists is not a terminal status. Ask GitHub about the exact run.
+    for id in missing {
+        let run: GithubRun = fetch_json(client, format!("https://api.github.com/repos/{}/actions/runs/{id}", repository.repo), "Stored active Run reconciliation").await?;
+        runs.push(run);
+    }
+    Ok(())
+}
+
 pub(super) fn trailer_keys(text: &str) -> Vec<String> {
     // Retain invalid explicit values as evidence: they must not fall through to heuristics.
     text.lines().filter_map(|line| line.trim().strip_prefix("Watchtower-Track:")

@@ -51,6 +51,8 @@ Normal polling discovers registered repositories automatically. Fresh installati
 
 The attribution view reads attempt-specific GitHub Job/Step status, conclusion, start/completion timestamps, and runner assignment. Missing timestamps stay missing; elapsed workflow time is not reported as command execution time or an inferred queue cause.
 
+The existing DB contained 28 runs still marked active from September 23–26. Exact GitHub run queries confirmed all 28 are completed. Discovery and polling now reconcile stored active runs that fall outside recent/active listing windows by exact run ID; absence never implies completion. A bounded batch prevents unbounded polling work, and unresolved API failures preserve the stored state rather than fabricating a terminal conclusion.
+
 ## Verification
 
 Regression tests cover fresh registries, identity/history preservation, alias ID reuse, inactive retirement, manual assignment/notifications/settings, independent project-wide responsibility and Work Track association, invalid/conflicting explicit values, repository isolation, current map formats, one-shot idempotency, and recovery of fetched historical runs. Frontend production build is required locally; Windows CI runs Rust tests and builds NSIS/MSI plus the portable EXE. Existing-user DB verification uses a separate SQLite backup before applying the same executable to the original database. See the PR and final verification report for exact current CI results.

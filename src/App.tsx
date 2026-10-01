@@ -1822,7 +1822,7 @@ function App() {
                     {jobsError && <p className="muted-copy">Job 조회 실패: {jobsError}</p>}
                     {!jobsError && !jobsLoaded && <p className="muted-copy">Job 정보를 조회하는 중입니다.</p>}
                     {jobsLoaded && !jobsError && auditJobs.length === 0 && <p className="muted-copy">이 실행 시도에 조회 가능한 Job이 없습니다.</p>}
-                    {auditJobs.map(job => <details key={job.id} className="rule-item">
+                    {auditJobs.map(job => <details key={job.id} className="rule-item workflow-job">
                       <summary>{job.name} · {job.status} / {job.conclusion ?? '—'} · {job.runnerId ? job.runnerName : 'runner 미배정'}</summary>
                       <p className="muted-copy">시작 {job.startedAt ?? '—'} · 완료 {job.completedAt ?? '—'}</p>
                       {job.steps.map(step => <p key={step.number} className="muted-copy">{step.number}. {step.name} · {step.status} / {step.conclusion ?? '—'} · {step.startedAt ?? '—'} → {step.completedAt ?? '—'}</p>)}
