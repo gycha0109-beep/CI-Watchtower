@@ -2681,13 +2681,16 @@ fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<Wo
            SELECT ra.run_id,ra.source,ra.reason,ra.confidence
            FROM run_assignments ra
            WHERE ra.track_id=?
+             AND (ra.manual=1 OR NOT EXISTS(
+               SELECT 1 FROM run_track_associations rta WHERE rta.run_id=ra.run_id
+             ))
            UNION ALL
            SELECT rta.run_id,rta.source,rta.reason,rta.confidence
            FROM run_track_associations rta
            WHERE rta.track_id=?
              AND NOT EXISTS(
                SELECT 1 FROM run_assignments ra
-               WHERE ra.run_id=rta.run_id AND ra.track_id=?
+               WHERE ra.run_id=rta.run_id AND ra.manual=1
              )
          ),
          ranked AS (
@@ -2712,7 +2715,7 @@ fn runs_for_track(conn: &Connection, track_id: i64, limit: i64) -> Result<Vec<Wo
          WHERE repository_rank<=?
          ORDER BY created_at DESC",
     )?;
-    let rows = stmt.query_map(params![track_id, track_id, track_id, limit], |row| {
+    let rows = stmt.query_map(params![track_id, track_id, limit], |row| {
         run_summary_from_row(row, now)
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

@@ -47,6 +47,8 @@ A generic registered-repository importer pins metadata to its current default SH
 
 The transaction retains identity/settings/keyring, manual assignments, aliases, notifications, existing runs and historical evidence. Explicit retired rows become inactive, never deleted. PR evidence backfills Work Track associations independently of project-wide primary responsibility. Invalid explicit keys fail closed; conflicting explicit keys stay unresolved. Metadata/rules and marker suppression are repository scoped. Technical domains and retired workflow markers cannot create ghost tracks.
 
+Track history prefers its separate Work Track association over an automatic static workflow assignment; manual assignment takes precedence over both. Thus a workflow with static trust responsibility can appear in the actual pipeline-reliability PR history without also inflating the trust Work Track history. Primary responsibility and the original attribution records remain stored.
+
 Normal polling discovers registered repositories automatically. Fresh installation stays empty. There are no MyeongHa/Saju/K_beauty runtime branches. For an existing offline DB, the optional --import-producer-snapshot CLI accepts a generic JSON snapshot, backs up the existing database before migration, and exports the actual dashboard for verification. Snapshot files are operator inputs, never bundled seed data.
 
 The attribution view reads attempt-specific GitHub Job/Step status, conclusion, start/completion timestamps, and runner assignment. Missing timestamps stay missing; elapsed workflow time is not reported as command execution time or an inferred queue cause.

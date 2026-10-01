@@ -165,3 +165,39 @@ fn producer_confirmed_old_migration_retirement_is_repaired_without_overriding_us
     assert!(!list_tracks(&conn,false).unwrap().iter().find(|t|t.id==ids[1]).unwrap().active);
     drop(conn);let _=std::fs::remove_file(path);
 }
+
+#[test]
+fn track_history_prefers_work_association_over_technical_assignment_and_manual_over_both() {
+    let (path,conn,repo)=fixture();let now="2026-10-01T00:00:00Z";
+    let mut ids=Vec::new();
+    for key in ["technical","actual-work"] {
+        ids.push(save_track_in_conn(&conn,&TrackInput{id:None,project_id:repo.project_id,name:key.into(),track_key:key.into(),long_ci_minutes:8},now).unwrap());
+    }
+    upsert_run(&conn,repo.id,&run(123),now).unwrap();
+    conn.execute("INSERT INTO run_assignments(run_id,track_id,confidence,source,reason,manual,assigned_at) VALUES(123,?,100,'run_name','static responsibility',0,?)",params![ids[0],now]).unwrap();
+    persist_work_track_association(&conn,123,Some((ids[1],98,"pr_marker".into(),"actual PR work".into())),true,now).unwrap();
+    assert!(runs_for_track(&conn,ids[0],30).unwrap().is_empty());
+    assert_eq!(runs_for_track(&conn,ids[1],30).unwrap().len(),1);
+    conn.execute("UPDATE run_assignments SET manual=1,source='manual' WHERE run_id=123",[]).unwrap();
+    assert_eq!(runs_for_track(&conn,ids[0],30).unwrap().len(),1);
+    assert!(runs_for_track(&conn,ids[1],30).unwrap().is_empty());
+    drop(conn);let _=std::fs::remove_file(path);
+}
+
+#[test]
+fn invalid_explicit_pr_cannot_fall_back_to_a_valid_static_workflow_marker() {
+    let (path,conn,repo)=fixture();let now="2026-10-01T00:00:00Z";
+    let id=save_track_in_conn(&conn,&TrackInput{id:None,project_id:repo.project_id,name:"Technical".into(),track_key:"technical".into(),long_ci_minutes:8},now).unwrap();
+    let mut github_run=run(123);github_run.name="Database".into();github_run.path=Some(".github/workflows/db.yml".into());github_run.display_title=Some("[WT:technical] Database".into());
+    upsert_run(&conn,repo.id,&github_run,now).unwrap();
+    conn.execute("INSERT INTO run_evidence(run_id,track_key,signal_type,score,value,created_at) VALUES(123,'technical','run_name',100,'[WT:technical] Database',?)",params![now]).unwrap();
+    let mut data=snapshot(&["unknown&key"]);
+    data.workflows=vec![ProducerWorkflow{path:".github/workflows/db.yml".into(),name:"Database".into(),binding:"static:technical".into(),responsibility:"database-verification".into(),source:RESPONSIBILITY_MAP_PATH.into()}];
+    producer_sync::apply(&conn,&repo,&data).unwrap();
+    let detail=load_run_attribution_detail(&conn,123).unwrap();
+    assert_eq!(detail.resolution_status,"unassigned");
+    assert!(detail.work_track_key.is_none());
+    assert_eq!(detail.technical_responsibility.as_deref(),Some("database-verification"));
+    assert!(runs_for_track(&conn,id,30).unwrap().is_empty());
+    drop(conn);let _=std::fs::remove_file(path);
+}

@@ -225,7 +225,9 @@ pub(super) fn filter_evidence(snapshot: &ProducerSnapshot, path: Option<&str>, n
     let workflow = snapshot.workflows.iter().find(|workflow| Some(workflow.path.as_str()) == path)
         .or_else(|| snapshot.workflows.iter().find(|workflow| workflow.name == name));
     let metadata_binding = workflow.is_some_and(|workflow| workflow.source != ".github/workflows (default branch inventory)");
+    let pr_declared = evidence.iter().any(|item| item.signal_type == "pr_marker");
     evidence.retain(|item| !(item.signal_type == "run_name" && (snapshot.retired_keys.contains(&item.track_key)
+        || pr_declared
         || (metadata_binding && workflow.is_some_and(|workflow| !workflow.binding.starts_with("static:"))))));
     evidence.len() != original_len
 }
