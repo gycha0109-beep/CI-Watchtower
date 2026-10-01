@@ -17,9 +17,11 @@ import type {
   RunAttributionDetail,
   Settings,
   TrackInput,
+  WorkflowJob,
 } from './types';
 
 export const api = {
+  getRunJobs: (runId: number) => invoke<WorkflowJob[]>('get_run_jobs', { runId }),
   getDashboard: () => invoke<Dashboard>('get_dashboard'),
   acknowledgeResponsibilityEscalation: (input: ResponsibilityEscalationOperatorInput) =>
     invoke<ResponsibilityEscalationOperatorResult>('acknowledge_responsibility_escalation', { input }),

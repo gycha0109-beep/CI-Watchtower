@@ -136,6 +136,9 @@ export interface ReconciliationAuditEntry {
 }
 
 export interface RunAttributionDetail {
+  workTrackName: string | null;
+  workTrackKey: string | null;
+  technicalResponsibility: string | null;
   runId: number;
   projectId: number;
   repositoryId: number;
@@ -163,6 +166,18 @@ export type TrackHealth =
   | 'green'
   | 'red'
   | 'completed_other';
+
+export interface WorkflowJob {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  runnerId: number | null;
+  runnerName: string | null;
+  steps: { name: string; status: string; conclusion: string | null; number: number; startedAt: string | null; completedAt: string | null }[];
+}
 
 export interface DashboardTrack {
   track: Track;

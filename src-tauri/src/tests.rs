@@ -1,6 +1,6 @@
 use super::*;
 
-fn legacy_v02_db_path(label: &str) -> std::path::PathBuf {
+pub(super) fn legacy_v02_db_path(label: &str) -> std::path::PathBuf {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -210,7 +210,7 @@ fn seed_legacy_v02_database(path: &Path) {
         .unwrap();
 }
 
-fn track(id: i64, key: &str) -> Track {
+pub(super) fn track(id: i64, key: &str) -> Track {
     Track {
         id,
         project_id: 1,
@@ -286,7 +286,7 @@ fn legacy_known_tracks_keep_stable_keys() {
     assert_eq!(legacy_compat::legacy_track_key("관상 연구 및 검증 2", 3), "face-research");
 }
 
-fn evidence(key: &str, signal_type: &str, score: i64) -> Evidence {
+pub(super) fn evidence(key: &str, signal_type: &str, score: i64) -> Evidence {
     Evidence {
         track_key: key.into(),
         signal_type: signal_type.into(),
