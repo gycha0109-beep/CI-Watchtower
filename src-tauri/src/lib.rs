@@ -1379,18 +1379,6 @@ fn extract_marker(text: &str) -> Option<String> {
     normalize_evidence_key(&tail[..end])
 }
 
-fn extract_track_trailer(text: &str) -> Option<String> {
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(value) = trimmed.strip_prefix("Watchtower-Track:") {
-            if let Some(key) = normalize_evidence_key(value) {
-                return Some(key);
-            }
-        }
-    }
-    None
-}
-
 fn branch_has_key(branch: &str, key: &str) -> bool {
     let normalized_branch = branch.to_lowercase();
     normalized_branch == key
@@ -1601,6 +1589,7 @@ fn responsibility_map_source_statuses(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+#[cfg(test)]
 fn replace_repository_responsibility_contracts(
     conn: &Connection,
     repository_id: i64,
