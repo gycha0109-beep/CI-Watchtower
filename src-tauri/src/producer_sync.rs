@@ -95,7 +95,7 @@ pub(super) async fn discover(client: &Client, repo: &str) -> Result<ProducerSnap
         if count < 100 { break; }
     }
     let map = content(client, repo, RESPONSIBILITY_MAP_PATH, sha).await?.unwrap_or(Value::Null);
-    let retired_keys = map["authority"]["deprecatedWorkTrackKeys"].as_array()
+    let retired_keys: Vec<String> = map["authority"]["deprecatedWorkTrackKeys"].as_array()
         .map(|values| values.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
     let mut workflows = Vec::new();
     for file in roster {
@@ -236,12 +236,13 @@ fn backfill(conn: &Connection, repository: &MonitoredRepository, snapshot: &Prod
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         let discovered = pull_evidence(snapshot, &sha, branch.as_deref());
-        if !discovered.is_empty() { evidence.retain(|item| item.signal_type != "pr_marker"); evidence.extend(discovered); }
+        let recovered_pr = !discovered.is_empty();
+        if recovered_pr { evidence.retain(|item| item.signal_type != "pr_marker"); evidence.extend(discovered); }
         let discarded_marker = filter_evidence(snapshot, path.as_deref(), &name, &mut evidence);
         let (association, explicit) = work_track_association(&tracks, &aliases, &evidence);
         persist_work_track_association(conn, run_id, association, explicit || discarded_marker, now)?;
         let project = project_rule_matches(&rules, repository.project_id, repository.id, &name);
-        if project || matches!(status.as_str(), "unassigned" | "conflict") {
+        if project || recovered_pr || discarded_marker || matches!(status.as_str(), "unassigned" | "conflict") {
             let resolution = if project { Resolution { status: "project".into(), track_id: None, confidence: Some(100), source: Some("project_workflow".into()), reason: Some(format!("프로젝트 공용 CI: {name}")), evidence } }
                 else { resolve_evidence(&tracks, &aliases, evidence) };
             persist_resolution_with_trigger(conn, run_id, &resolution, now, Some("producer_discovery"))?;
