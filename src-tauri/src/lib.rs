@@ -21,6 +21,7 @@ mod legacy_compat;
 mod producer_sync;
 mod job_telemetry;
 mod import_cli;
+mod autopilot_bridge;
 
 const KEYRING_SERVICE: &str = "ci-watchtower";
 const KEYRING_ACCOUNT: &str = "github-pat";
@@ -6431,6 +6432,7 @@ pub fn run() {
         .setup(|app| {
             let db_path = app.path().app_data_dir()?.join("ci-watchtower.sqlite3");
             init_db(&db_path)?;
+            autopilot_bridge::start(db_path.clone());
             app.manage(AppState {
                 db_path,
                 poll_in_flight: AtomicBool::new(false),
