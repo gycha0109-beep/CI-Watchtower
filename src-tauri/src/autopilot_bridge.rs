@@ -501,4 +501,144 @@ mod tests {
         let past=(now-chrono::Duration::seconds(400)).to_rfc3339();
         assert_eq!(freshness(now,true,Some(&past),None,&past,180,true),"STALE");
     }
+
+    #[tokio::test]
+    async fn api_authentication_rejects_missing_credentials_and_browser_origin() {
+        use tower::ServiceExt;
+        let app = router(Arc::new(BridgeState {
+            db_path:PathBuf::from("not-accessed-for-health.sqlite3"),
+            token:"test-token".to_string(),
+        }));
+        let request = |authorization:Option<&str>,origin:Option<&str>| {
+            let mut builder = axum::http::Request::builder()
+                .method("GET").uri("/v1/health")
+                .header(HOST,format!("127.0.0.1:{PORT}"));
+            if let Some(auth)=authorization { builder=builder.header(AUTHORIZATION,auth); }
+            if let Some(origin)=origin { builder=builder.header(ORIGIN,origin); }
+            builder.body(axum::body::Body::empty()).unwrap()
+        };
+        let unauthenticated=app.clone().oneshot(request(None,None)).await.unwrap();
+        assert_eq!(unauthenticated.status(),StatusCode::UNAUTHORIZED);
+        let browser=app.clone().oneshot(request(Some("Bearer test-token"),Some("https://attacker.invalid"))).await.unwrap();
+        assert_eq!(browser.status(),StatusCode::FORBIDDEN);
+        let authorized=app.clone().oneshot(request(Some("Bearer test-token"),None)).await.unwrap();
+        assert_eq!(authorized.status(),StatusCode::OK);
+        assert!(authorized.headers().contains_key(CACHE_CONTROL));
+        let unbound=app.oneshot(axum::http::Request::builder().uri("/v1/health")
+            .header(HOST,"evil.example").header(AUTHORIZATION,"Bearer test-token")
+            .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(unbound.status(),StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn bridge_reads_existing_registry_and_scoped_runs_without_mutation() {
+        let suffix=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!("watchtower-bridge-{}-{}.sqlite3",std::process::id(),suffix));
+        init_db(&path).unwrap();
+        let conn=Connection::open(&path).unwrap();
+        let now=Utc::now().to_rfc3339();
+        let old=(Utc::now()-chrono::Duration::hours(3)).to_rfc3339();
+        let sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        conn.execute(
+            "INSERT INTO projects(name,project_key,created_at,updated_at)
+             VALUES('Test','test-project',?,?)",params![now,now],
+        ).unwrap();
+        let project_id=conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO monitored_repositories(project_id,repo,enabled,created_at,updated_at,last_polled_at,last_successful_poll_at)
+             VALUES(?,'owner/repo',1,?,?,?,?)",params![project_id,now,now,now,now],
+        ).unwrap();
+        let repository_id=conn.last_insert_rowid();
+        let mut track_ids=Vec::new();
+        for key in ["character-memory","ops"] {
+            conn.execute(
+                "INSERT INTO watch_tracks(project_id,name,track_key,long_ci_minutes,active,created_at,updated_at)
+                 VALUES(?,?,?,8,1,?,?)",params![project_id,key,key,now,now],
+            ).unwrap();
+            track_ids.push(conn.last_insert_rowid());
+        }
+        conn.execute(
+            "INSERT INTO project_workflow_rules(project_id,repository_id,workflow_name,active,created_at)
+             VALUES(?,?,'CI',1,?)",params![project_id,repository_id,now],
+        ).unwrap();
+        for (run_id,status,conclusion,last_seen,resolution) in [
+            (7001_i64,"completed","success",now.as_str(),"project"),
+            (7002,"completed","failure",now.as_str(),"assigned"),
+            (7003,"completed","success",now.as_str(),"conflict"),
+            (7004,"completed","success",old.as_str(),"project"),
+            (7005,"completed","success",now.as_str(),"project"),
+            (7006,"queued","",now.as_str(),"project"),
+        ] {
+            conn.execute(
+                "INSERT INTO workflow_runs(
+                   run_id,repository_id,workflow_id,workflow_name,workflow_path,
+                   display_title,event,head_branch,head_sha,run_number,run_attempt,status,
+                   conclusion,html_url,created_at,updated_at,last_seen_at,resolution_status
+                 ) VALUES(?,?,1,'CI','.github/workflows/ci.yml','CI test',
+                          'pull_request','feat/bridge',?,1,1,?,?,?,?,?,?,?)",
+                params![run_id,repository_id,sha,status,
+                    if conclusion.is_empty(){None}else{Some(conclusion)},format!("https://example/{run_id}"),
+                    now,now,last_seen,resolution],
+            ).unwrap();
+        }
+        for (run_id,track_id) in [(7001,track_ids[0]),(7002,track_ids[1])] {
+            conn.execute(
+                "INSERT INTO run_track_associations(run_id,track_id,confidence,source,reason,associated_at)
+                 VALUES(?,?,98,'pr_marker','PR explicit',?)",
+                params![run_id,track_id,now],
+            ).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO run_attempts(run_id,run_attempt,status,conclusion,updated_at)
+             VALUES(7005,2,'completed','failure',?)",params![now],
+        ).unwrap();
+
+        let read=read_connection(&path).unwrap();
+        assert!(read.execute("DELETE FROM watch_tracks",[]).is_err());
+        let records=registry(&read,&Scope{project_id:Some(project_id),..Scope::default()}).unwrap();
+        assert_eq!(records["projects"].as_array().unwrap().len(),1);
+        assert_eq!(records["tracks"].as_array().unwrap().len(),2);
+
+        let filter=Scope{
+            repository_id:Some(repository_id),
+            track_key:Some("character-memory".to_string()),
+            head_sha:Some(sha.to_string()),
+            attempt:Some(1),
+            ..Scope::default()
+        };
+        let runs=query_runs(&read,&filter,None).unwrap();
+        assert_eq!(runs.len(),1);
+        assert_eq!(runs[0].run_id,7001);
+        assert_eq!(runs[0].ci_state,"SUCCESS");
+        assert_eq!(runs[0].evidence_state,"FRESH");
+        assert_eq!(runs[0].responsibility_kind,"project-wide");
+        assert_eq!(runs[0].work_track_key.as_deref(),Some("character-memory"));
+        assert!(runs[0].target_verified);
+        assert!(!runs[0].safe_to_advance);
+        let others=query_runs(&read,&Scope{repository_id:Some(repository_id),
+            track_key:Some("ops".into()),..Scope::default()},None).unwrap();
+        assert_eq!(others.len(),1);
+        assert_eq!(others[0].ci_state,"FAILURE");
+
+        let all=query_runs(&read,&Scope{repository_id:Some(repository_id),..Scope::default()},None).unwrap();
+        let get=|id|all.iter().find(|r|r.run_id==id).unwrap();
+        assert_eq!(get(7003).decision_state,"CONFLICT");
+        assert_eq!(get(7004).decision_state,"STALE");
+        assert_eq!(get(7005).latest_known_attempt,2);
+        assert_eq!(get(7005).decision_state,"STALE");
+        assert_eq!(get(7006).ci_state,"QUEUED");
+        drop(read);
+        conn.execute("UPDATE monitored_repositories SET last_error='HTTP 401' WHERE id=?",
+            params![repository_id]).unwrap();
+        let read=read_connection(&path).unwrap();
+        let all=query_runs(&read,&Scope{repository_id:Some(repository_id),..Scope::default()},None).unwrap();
+        assert!(all.iter().all(|run|run.evidence_state=="POLL_ERROR"));
+        assert!(all.iter().all(|run|run.poll_error_code==Some("GITHUB_AUTH_OR_PERMISSION")));
+        drop(read);
+        drop(conn);
+        let _=std::fs::remove_file(&path);
+        let _=std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _=std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
 }
