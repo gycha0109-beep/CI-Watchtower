@@ -25,7 +25,7 @@ struct BridgeState {
     token: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 struct Scope {
     project_id: Option<i64>,
     repository_id: Option<i64>,
@@ -398,12 +398,21 @@ async fn single_run_endpoint(
 ) -> Response {
     if run_id <= 0 { return api_error(StatusCode::BAD_REQUEST, "INVALID_RUN_ID"); }
     if let Err(err) = validate_scope(&scope, false) { return err; }
-    match read_connection(&state.db_path).and_then(|c| query_runs(&c,&scope,Some(run_id))) {
+    // Select the exact ID first, then compare expected SHA/attempt. A mismatch is
+    // a conflict, not an absent run or permission to reuse an older GREEN.
+    let mut lookup_scope = scope.clone();
+    lookup_scope.head_sha = None;
+    match read_connection(&state.db_path).and_then(|c| query_runs(&c,&lookup_scope,Some(run_id))) {
         Ok(mut runs) => {
-            let Some(run) = runs.pop() else { return api_error(StatusCode::NOT_FOUND, "RUN_NOT_FOUND"); };
-            if scope.attempt.is_some_and(|v|v != run.run_attempt || run.latest_known_attempt != run.run_attempt) {
+            let Some(mut run) = runs.pop() else { return api_error(StatusCode::NOT_FOUND, "RUN_NOT_FOUND"); };
+            if scope.head_sha.as_ref().is_some_and(|sha| sha != &run.head_sha) {
+                return api_error(StatusCode::CONFLICT, "HEAD_SHA_MISMATCH");
+            }
+            if scope.attempt.is_some_and(|v| v != run.run_attempt || run.latest_known_attempt != run.run_attempt) {
                 return api_error(StatusCode::CONFLICT, "RUN_ATTEMPT_MISMATCH");
             }
+            run.target_verified = scope.head_sha.is_some() && scope.attempt == Some(run.run_attempt)
+                && run.latest_known_attempt == run.run_attempt;
             response(json!({"run":run}))
         },
         Err(_) => api_error(StatusCode::SERVICE_UNAVAILABLE, "DATABASE_UNAVAILABLE"),
