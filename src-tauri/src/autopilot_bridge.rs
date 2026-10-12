@@ -265,8 +265,8 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
                 mr.last_polled_at,mr.last_successful_poll_at,mr.last_error,
                 ra.track_id,assigned.track_key,ra.source,ra.manual,
                 assoc.track_id,work.track_key,assoc.source,
-                COALESCE((SELECT MAX(attempt.run_attempt) FROM run_attempts attempt
-                          WHERE attempt.run_id=wr.run_id),wr.run_attempt),
+                MAX(wr.run_attempt,COALESCE((SELECT MAX(attempt.run_attempt) FROM run_attempts attempt
+                          WHERE attempt.run_id=wr.run_id),0)),
                 COALESCE(CASE WHEN ra.manual=1 THEN assigned.active
                               WHEN assoc.run_id IS NOT NULL THEN work.active
                               ELSE assigned.active END,0)
@@ -640,6 +640,16 @@ mod tests {
         let all=query_runs(&read,&Scope{repository_id:Some(repository_id),..Scope::default()},None).unwrap();
         assert!(all.iter().all(|run|run.evidence_state=="POLL_ERROR"));
         assert!(all.iter().all(|run|run.poll_error_code==Some("GITHUB_AUTH_OR_PERMISSION")));
+        drop(read);
+        conn.execute("UPDATE monitored_repositories SET last_error=NULL WHERE id=?",
+            params![repository_id]).unwrap();
+        conn.execute("UPDATE watch_tracks SET active=0 WHERE id=?",
+            params![track_ids[0]]).unwrap();
+        let read=read_connection(&path).unwrap();
+        let runs=query_runs(&read,&filter,None).unwrap();
+        assert_eq!(runs.len(),1);
+        assert!(!runs[0].work_track_active);
+        assert_eq!(runs[0].decision_state,"UNKNOWN");
         drop(read);
         drop(conn);
         let _=std::fs::remove_file(&path);
