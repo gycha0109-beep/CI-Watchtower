@@ -92,6 +92,7 @@ struct BridgeRun {
     resolution_status: String,
     work_track_id: Option<i64>,
     work_track_key: Option<String>,
+    work_track_active: bool,
     work_track_source: Option<String>,
     assignment_track_id: Option<i64>,
     assignment_track_key: Option<String>,
@@ -265,7 +266,10 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
                 ra.track_id,assigned.track_key,ra.source,ra.manual,
                 assoc.track_id,work.track_key,assoc.source,
                 COALESCE((SELECT MAX(attempt.run_attempt) FROM run_attempts attempt
-                          WHERE attempt.run_id=wr.run_id),wr.run_attempt)
+                          WHERE attempt.run_id=wr.run_id),wr.run_attempt),
+                COALESCE(CASE WHEN ra.manual=1 THEN assigned.active
+                              WHEN assoc.run_id IS NOT NULL THEN work.active
+                              ELSE assigned.active END,0)
          FROM workflow_runs wr
          JOIN monitored_repositories mr ON mr.id=wr.repository_id
          JOIN projects p ON p.id=mr.project_id
@@ -300,7 +304,7 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
                 r.get::<_,Option<i64>>(21)?,r.get::<_,Option<String>>(22)?,
                 r.get::<_,Option<String>>(23)?,r.get::<_,Option<i64>>(24)?,
                 r.get::<_,Option<i64>>(25)?,r.get::<_,Option<String>>(26)?,
-                r.get::<_,Option<String>>(27)?,r.get::<_,i64>(28)?,
+                r.get::<_,Option<String>>(27)?,r.get::<_,i64>(28)?,r.get::<_,i64>(29)?,
             ))
         }
     )?;
@@ -310,7 +314,7 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
             workflow_name,workflow_path,head_sha,head_branch,run_attempt,status,conclusion,
             resolution_status,created_at,updated_at,last_seen_at,last_polled_at,
             last_success,last_error,assigned_id,assigned_key,assignment_source,manual,
-            association_id,association_key,association_source,latest_known_attempt) = row?;
+            association_id,association_key,association_source,latest_known_attempt,work_track_active) = row?;
         let manual = manual == Some(1);
         let work_track_id = if manual { assigned_id } else { association_id.or(assigned_id) };
         let work_track_key = if manual { assigned_key.clone() } else { association_key.or(assigned_key.clone()) };
@@ -347,6 +351,7 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
         let ci = ci_state(&status, conclusion.as_deref());
         let conflict = resolution_status == "conflict";
         let decision_state = if conflict { "CONFLICT" }
+            else if work_track_id.is_some() && work_track_active == 0 { "UNKNOWN" }
             else if evidence_state != "FRESH" { evidence_state }
             else { ci };
         out.push(BridgeRun {
@@ -354,7 +359,7 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
             workflow_id,workflow_name,workflow_path,head_sha,head_branch,run_attempt,
             latest_known_attempt,status,conclusion,ci_state:ci,decision_state,evidence_state,
             responsibility_kind,technical_responsibility:producer.map(|p|p.responsibility),
-            resolution_status,work_track_id,work_track_key,work_track_source,
+            resolution_status,work_track_id,work_track_key,work_track_active:work_track_active != 0,work_track_source,
             assignment_track_id:assigned_id,assignment_track_key:assigned_key,
             assignment_source,attribution_conflict:conflict,
             created_at,updated_at,last_seen_at,last_poll_attempt_at:last_polled_at,
