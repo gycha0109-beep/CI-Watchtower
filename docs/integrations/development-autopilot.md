@@ -63,7 +63,7 @@ Values above are illustrative, not actual local observations.
       "ciState": "SUCCESS", "decisionState": "SUCCESS", "evidenceState": "FRESH",
       "responsibilityKind": "project-wide", "technicalResponsibility": "project-wide-ci",
       "resolutionStatus": "project", "workTrackId": 3, "workTrackKey": "example-work",
-      "workTrackSource": "pr_marker", "assignmentTrackId": null,
+      "workTrackSource": "pr_marker", "workTrackActive": true, "assignmentTrackId": null,
       "assignmentTrackKey": null, "assignmentSource": null,
       "attributionConflict": false,
       "createdAt": "2026-10-13T00:00:00Z",
@@ -82,7 +82,7 @@ Values above are illustrative, not actual local observations.
 - `evidenceState`: `FRESH`, `STALE`, `UNKNOWN`, `POLL_ERROR`. A repository GitHub authentication/rate-limit error is exposed as `pollErrorCode` without raw API error text or tokens.
 - `decisionState`: `CONFLICT` when primary attribution is conflicted; otherwise `STALE`, `POLL_ERROR` or `UNKNOWN` override raw `ciState`. Only when fresh/non-conflicting does it agree with `ciState`.
 - `responsibilityKind`: `project-wide`, `dynamic`, `track-owned`, `unknown`. Sourced from WatchTower rules and producer snapshot. A work-track link **does not** transform a Project-wide CI into a track-owned workflow.
-- `workTrackId/Key/Source` represent the work association; `assignmentTrackId/Key/Source` represent the separate primary assignment. Manual assignments override derived work association.
+- `workTrackActive=false` makes `decisionState=UNKNOWN` for a formerly linked but now-retired track.\n- `workTrackId/Key/Source` represent the work association; `assignmentTrackId/Key/Source` represent the separate primary assignment. Manual assignments override derived work association.
 - `targetVerified` is true only if the caller provided matching exact SHA **and** run attempt and the latest stored attempt agrees. It does *not* prove that this is the latest PR head on GitHub.
 - `safeToAdvance` is **always false by contract**: the WatchTower bridge alone cannot prove required-check coverage, PR head, merge state or human approvals. Autopilot must compose independent GitHub verification and local policy.
 - `GET /v1/runs` wraps records in `data.runs` and sets `data.completeCoverage=false`. Empty list ≠ all checks passed; out-of-scope runs must not satisfy this Work Track's requirements.
