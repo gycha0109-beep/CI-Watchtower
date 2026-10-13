@@ -733,3 +733,34 @@ select:focus { border-color: #4a73ee; box-shadow: 0 0 0 3px rgba(74,115,238,.12)
 .empty-onboarding { display: grid; justify-items: start; gap: 10px; padding: 34px; margin-bottom: 18px; }
 .empty-onboarding h2 { margin: 0; font-size: 20px; }
 .empty-onboarding p:not(.eyebrow) { margin: 0 0 6px; color: #8390ab; font-size: 12px; }
+
+/* Action-scoped confirmations: readable in place without scrolling to the page banner. */
+.action-submit-row, .action-item-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.action-submit-row > button { flex: 0 0 auto; }
+.action-item-controls { justify-content: flex-end; }
+.action-feedback {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  font-weight: 600;
+  letter-spacing: normal;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.action-feedback.pending { color: #a9bdf2; }
+.action-feedback.success { color: #8de0b0; }
+.action-feedback.error { color: #ff9dac; }
+.action-section-feedback:not(:empty) { margin: 8px 0 2px; }
+.row-actions .action-feedback { flex: 1 1 240px; }
+.repo-item .row-actions { align-items: center; justify-content: flex-end; }
+.repo-item .row-actions .action-feedback { flex: 1 1 180px; }
+.managed-track-actions { flex-wrap: wrap; align-items: center; }
