@@ -382,6 +382,10 @@ Release installer:
 npm run tauri build
 ```
 
+## Development Autopilot read-only bridge (v1)
+
+The installed app exposes an authenticated read-only status bridge on `127.0.0.1:48765` with a distinct per-user Windows Credential Manager secret. See [contract](docs/integrations/development-autopilot.md) and the [Windows P1 acceptance procedure](docs/integrations/windows-bridge-acceptance.md) (`tools/Test-WatchTowerBridge.ps1`). **PR/main CI success does not demonstrate an actual installed Windows/Autopilot connection.** Bridge evidence never authorizes automatic CI advancement or merging.
+
 ## Real-use Acceptance Smoke
 
 현재 core의 최소 실사용 경로는 [docs/acceptance-smoke.md](docs/acceptance-smoke.md)에 고정합니다. 자동 gate는 fresh DB에서 Project → Repository → Track → Run 저장 → 명시 귀속 → 실패/장기 CI 알림 dedupe → Unassigned/Responsibility Drift → Dashboard 노출까지 검증합니다. OS 알림 표시와 로컬 PAT/실제 GitHub 연결은 desktop live-smoke 경계로 분리합니다.
