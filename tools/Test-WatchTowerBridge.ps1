@@ -63,11 +63,20 @@ function Invoke-Bridge([string]$Path, [string]$Token = '', [string]$HostOverride
         $json = $null
         try { $json = ConvertFrom-Json -InputObject $body -ErrorAction Stop }
         catch { }
+        # Successful responses have `data`, not `error`. StrictMode throws
+        # when a non-existent PSCustomObject property is dereferenced.
+        $errorCode = ''
+        if ($null -ne $json -and $null -ne $json.PSObject.Properties['error']) {
+            $errorObject = $json.error
+            if ($null -ne $errorObject -and $null -ne $errorObject.PSObject.Properties['code']) {
+                $errorCode = [string]$errorObject.code
+            }
+        }
         return [pscustomobject]@{
             status = [int]$response.StatusCode
             body = $json
             cache = [string]$response.Headers['Cache-Control']
-            code = $(if ($null -ne $json -and $null -ne $json.error) { [string]$json.error.code } else { '' })
+            code = $errorCode
         }
     }
     finally { if ($null -ne $response) { $response.Dispose() } }
