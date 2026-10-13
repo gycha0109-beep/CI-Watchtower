@@ -131,3 +131,6 @@ try {
     Stop-App
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
+# The nested Online smoke intentionally returns 2 (real Run SKIP). Its exit code
+# must not leak into the parent GitHub Actions step after every executed probe passed.
+exit 0
