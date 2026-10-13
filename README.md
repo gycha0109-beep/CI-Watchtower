@@ -241,6 +241,7 @@ v0.3.30까지 누적된 Responsibility 운영 기능을 삭제하지 않고 UI�
 - **Advanced**: Project/Track/Repository registry, Project-wide/Dynamic rule, GitHub PAT, polling 및 Responsibility SLA 정책을 관리합니다.
 - Dashboard의 미귀속 요약이나 Run 귀속 근거에서 Issues로 직접 이동합니다.
 - Track 수정은 Advanced로 이동해 registry 편집과 일상 CI 관측을 분리합니다.
+- **v0.3.40**: Advanced의 등록·수정·삭제 및 PAT/Settings 작업 결과를 **해당 버튼 옆**에 표시합니다. 에러 메시지는 API가 반환한 이유를 보여주며, 삭제된 항목은 목록 근처에 성공 결과가 남습니다. 이전 v0.3.39 설치본 위에 업데이트하려면 v0.3.40 EXE/MSI를 사용합니다.
 - backend schema, resolver, responsibility lifecycle, audit history, migration 데이터는 삭제하거나 재해석하지 않습니다.
 - v0.3.31부터 Responsibility/SLA 계층은 신규 제품 축으로 확장하지 않고 고급 진단/운영 기능으로 유지합니다.
 
