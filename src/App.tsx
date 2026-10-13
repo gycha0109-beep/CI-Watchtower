@@ -21,6 +21,24 @@ type ViewFilter = 'all' | 'project' | 'unassigned' | number;
 type ScopeFilter = 'all' | number;
 type ResolutionHistoryFilter = 'all' | 'resolved' | 'deferred' | 'blocked' | 'stale_rejected' | 'still_open' | 'failed';
 type AppSurface = 'dashboard' | 'issues' | 'advanced';
+type ActionResult = { kind: 'pending' | 'success' | 'error'; message: string };
+
+function ActionFeedback({ result }: { result?: ActionResult }) {
+  if (!result) return null;
+  return (
+    <span
+      className={`action-feedback ${result.kind}`}
+      role={result.kind === 'error' ? 'alert' : 'status'}
+      aria-live={result.kind === 'error' ? 'assertive' : 'polite'}
+    >
+      {result.message}
+    </span>
+  );
+}
+
+function actionErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 const emptyTrack = (projectId = 0): TrackFormState => ({
   projectId,
@@ -230,6 +248,8 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<Record<string, ActionResult>>({});
+  const pendingActionKeys = useRef(new Set<string>());
   const [auditRun, setAuditRun] = useState<WorkflowRunSummary | null>(null);
   const [auditDetail, setAuditDetail] = useState<RunAttributionDetail | null>(null);
   const [auditJobs, setAuditJobs] = useState<WorkflowJob[]>([]);
@@ -545,16 +565,46 @@ function App() {
     [dashboard, selectedProject],
   );
 
-  const act = async (work: () => Promise<unknown>, message?: string, poll = false) => {
+  const reportAction = (key: string, kind: ActionResult['kind'], message: string) => {
+    setActionFeedback(previous => ({ ...previous, [key]: { kind, message } }));
+  };
+
+  const act = async (
+    work: () => Promise<unknown>,
+    message?: string,
+    poll = false,
+    feedbackKey?: string,
+    successKey = feedbackKey,
+  ) => {
+    if (feedbackKey && pendingActionKeys.current.has(feedbackKey)) return;
+    if (feedbackKey) {
+      pendingActionKeys.current.add(feedbackKey);
+      reportAction(feedbackKey, 'pending', '처리 중…');
+    }
     try {
       setError(null);
       setNotice(null);
       await work();
       if (message) setNotice(message);
+      if (feedbackKey) {
+        const destination = successKey ?? feedbackKey;
+        setActionFeedback(previous => ({
+          ...previous,
+          [feedbackKey]: { kind: 'success', message: destination === feedbackKey ? message ?? '완료했습니다.' : '' },
+          [destination]: { kind: 'success', message: message ?? '완료했습니다.' },
+        }));
+      }
       await refresh(poll);
     } catch (e) {
       setError(String(e));
+      if (feedbackKey) reportAction(feedbackKey, 'error', `처리에 실패했습니다: ${actionErrorMessage(e)}`);
+    } finally {
+      if (feedbackKey) pendingActionKeys.current.delete(feedbackKey);
     }
+  };
+
+  const rejectForm = (feedbackKey: string, reason: string) => {
+    reportAction(feedbackKey, 'error', reason);
   };
 
   const updateEscalationOperatorState = async (
@@ -688,7 +738,10 @@ function App() {
     e.preventDefault();
     const name = projectName.trim();
     const key = projectKey.trim().toLowerCase();
-    if (!name || !key) return;
+    if (!name || !key) {
+      rejectForm('project-form', '등록 실패: 프로젝트 이름과 Project Key를 입력하십시오.');
+      return;
+    }
     await act(async () => {
       const id = await api.saveProject({ name, projectKey: key });
       setProjectName('');
@@ -698,7 +751,7 @@ function App() {
       setSelectedView('all');
       setTrackForm(emptyTrack(id));
       setRepoProjectId(id);
-    }, '프로젝트를 추가했습니다.');
+    }, '프로젝트를 추가했습니다.', false, 'project-form');
   };
 
   const submitTrack = async (e: FormEvent) => {
@@ -710,30 +763,39 @@ function App() {
       trackKey: trackForm.trackKey.trim().toLowerCase(),
       longCiMinutes: Number(trackForm.longCiMinutes),
     };
-    if (!payload.projectId || !payload.name || !payload.trackKey || payload.longCiMinutes <= 0) return;
+    if (!payload.projectId || !payload.name || !payload.trackKey || !Number.isFinite(payload.longCiMinutes) || payload.longCiMinutes <= 0) {
+      rejectForm('track-form', '저장 실패: 프로젝트·트랙 이름·Track Key와 1분 이상의 장기 CI 기준시간이 필요합니다.');
+      return;
+    }
     await act(async () => {
       const savedId = await api.saveTrack(payload);
       setTrackForm(emptyTrack(payload.projectId));
       setEditingId(null);
       setSelectedProject(payload.projectId);
       setSelectedView(savedId);
-    }, editingId ? '트랙을 수정했습니다.' : '트랙을 추가했습니다.', true);
+    }, editingId ? '트랙을 수정했습니다.' : '트랙을 추가했습니다.', true, 'track-form');
   };
 
   const submitRepository = async (e: FormEvent) => {
     e.preventDefault();
     const repo = repoInput.trim();
-    if (!repo || !repoProjectId) return;
+    if (!repo || !repoProjectId) {
+      rejectForm('repo-form', '등록 실패: 프로젝트를 선택하고 owner/repository를 입력하십시오.');
+      return;
+    }
     await act(async () => {
       await api.saveRepository({ projectId: repoProjectId, repo, enabled: true });
       setRepoInput('');
       setSelectedProject(repoProjectId);
-    }, '감시 저장소를 추가했습니다.', true);
+    }, '감시 저장소를 추가했습니다.', true, 'repo-form');
   };
 
   const submitRule = async (e: FormEvent) => {
     e.preventDefault();
-    if (!ruleName.trim() || !selectedProjectId) return;
+    if (!ruleName.trim() || !selectedProjectId) {
+      rejectForm('rule-form', '등록 실패: 프로젝트와 Workflow 이름을 확인하십시오.');
+      return;
+    }
     await act(async () => {
       await api.saveProjectWorkflowRule({
         projectId: selectedProjectId,
@@ -744,12 +806,15 @@ function App() {
       setRuleRepositoryId('all');
       setSelectedProject(selectedProjectId);
       setSelectedView('project');
-    }, '공용 CI 규칙을 추가했습니다.', true);
+    }, '공용 CI 규칙을 추가했습니다.', true, 'rule-form');
   };
 
   const submitDynamicRule = async (e: FormEvent) => {
     e.preventDefault();
-    if (!dynamicRuleName.trim() || !selectedProjectId) return;
+    if (!dynamicRuleName.trim() || !selectedProjectId) {
+      rejectForm('dynamic-rule-form', '등록 실패: 프로젝트와 Workflow 이름을 확인하십시오.');
+      return;
+    }
     await act(async () => {
       await api.saveDynamicWorkflowRule({
         projectId: selectedProjectId,
@@ -759,11 +824,12 @@ function App() {
       setDynamicRuleName('');
       setDynamicRuleRepositoryId('all');
       setSelectedProject(selectedProjectId);
-    }, 'Dynamic Workflow 규칙을 추가했습니다.', true);
+    }, 'Dynamic Workflow 규칙을 추가했습니다.', true, 'dynamic-rule-form');
   };
 
   const editTrack = (item: DashboardTrack) => {
     setActiveSurface('advanced');
+    setActionFeedback(previous => { const next = { ...previous }; delete next['track-form']; return next; });
     setEditingId(item.track.id);
     setTrackForm({
       id: item.track.id,
@@ -785,27 +851,30 @@ function App() {
         setTrackForm(emptyTrack(item.track.projectId));
       }
       if (selectedView === item.track.id) setSelectedView('all');
-    }, `${item.track.name} 트랙을 삭제했습니다.`);
+    }, `${item.track.name} 트랙을 삭제했습니다.`, false, `track-row:${item.track.id}`, 'track-list');
   };
 
   const removeProject = async (project: Project) => {
     if (!window.confirm(`"${project.name}" 프로젝트를 삭제하시겠습니까? 저장소/트랙이 남아 있으면 삭제되지 않습니다.`)) return;
-    await act(() => api.deleteProject(project.id), `${project.name} 프로젝트를 삭제했습니다.`);
+    await act(() => api.deleteProject(project.id), `${project.name} 프로젝트를 삭제했습니다.`, false, `project-row:${project.id}`, 'project-list');
   };
 
   const saveToken = async (e: FormEvent) => {
     e.preventDefault();
-    if (!token.trim()) return;
+    if (!token.trim()) {
+      rejectForm('token-form', '저장 실패: GitHub PAT를 입력하십시오.');
+      return;
+    }
     await act(async () => {
       await api.setGithubToken(token.trim());
       setToken('');
-    }, 'PAT 저장 및 재조회 검증을 완료했습니다.', true);
+    }, 'PAT 저장 및 재조회 검증을 완료했습니다.', true, 'token-form');
   };
 
   const updateSettings = async (patch: Partial<Settings>) => {
     if (!dashboard) return;
     const next = { ...dashboard.settings, ...patch };
-    await act(() => api.saveSettings(next));
+    await act(() => api.saveSettings(next), '감시 설정을 저장했습니다.', false, 'settings');
   };
 
   const updateResponsibilityPolicy = async (
@@ -816,6 +885,8 @@ function App() {
     await act(
       () => api.saveResponsibilityReviewPolicy(next),
       'Responsibility Review SLA 정책을 저장했습니다.',
+      false,
+      'policy',
     );
   };
 
