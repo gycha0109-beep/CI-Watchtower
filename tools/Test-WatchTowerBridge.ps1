@@ -147,6 +147,9 @@ if ($WriteBaseline -and (!$BaselinePath -or $Mode -ne 'Online')) {
 if ($RunId -gt 0 -and (!$HeadSha -or $Attempt -lt 1 -or $RepositoryId -lt 1)) {
     throw 'For exact Run acceptance supply -RepositoryId, -RunId, -HeadSha and -Attempt together.'
 }
+if ($RunId -eq 0 -and ($HeadSha -or $Attempt -gt 0 -or $TrackKey)) {
+    throw 'A HeadSha, Attempt, or TrackKey requires an explicit RunId and RepositoryId; implicit sample selection is unsafe.'
+}
 if ($HeadSha -and $HeadSha -notmatch '^[0-9a-fA-F]{40}$') { throw 'HeadSha must be a 40-character hexadecimal SHA.' }
 if ($TrackKey -and $TrackKey -notmatch '^[a-z0-9-]{1,100}$') { throw 'TrackKey must be a canonical key.' }
 
@@ -230,16 +233,13 @@ try {
             if (!(Assert-Http 'repository-runs-readable' $list 200)) { throw 'Repository run list failed.' }
             Add-Probe 'bounded-sample-not-complete-coverage' $(if ($list.body.data.completeCoverage -ceq $false) { 'PASS' } else { 'FAIL' })
             Add-Probe 'run-list-never-authorizes-advance' $(if (@($list.body.data.runs | Where-Object { $_.safeToAdvance -ne $false }).Count -eq 0) { 'PASS' } else { 'FAIL' })
+            # Never infer the intended PR Run from a bounded local sample.
             $selectedRun = $null
             if ($RunId -gt 0) {
                 $selectedRun = [pscustomobject]@{ runId = $RunId; headSha = $HeadSha; runAttempt = $Attempt }
             }
-            else {
-                $selectedRun = @($list.body.data.runs | Where-Object { $_.runAttempt -eq $_.latestKnownAttempt } | Select-Object -First 1)
-                if ($selectedRun.Count -gt 0) { $selectedRun = $selectedRun[0] } else { $selectedRun = $null }
-            }
             if ($null -eq $selectedRun) {
-                Add-Probe 'exact-run-with-attempt' 'SKIP' 'No observed run with a current attempt; real Run evidence still required.'
+                Add-Probe 'exact-run-with-attempt' 'SKIP' 'Supply explicit -RepositoryId -RunId -HeadSha -Attempt from the current GitHub PR; a sampled run is not proof.'
             }
             else {
                 $rid = [long]$selectedRun.runId
