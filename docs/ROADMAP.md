@@ -107,6 +107,8 @@ P1~P3가 **지금의 주 작업축**이다. P4~P6는 장기 계획이며 앞 단
 
 **P1 검증 도구 (실행 준비):** [Windows bridge acceptance](integrations/windows-bridge-acceptance.md) 및 `tools/Test-WatchTowerBridge.ps1`. 인증/HTTP 오류·실 Run SHA/Attempt·트레이/종료/재시작·Registry identity baseline을 사용자 Windows에서 검사한다. Rust HTTP 계약 회귀·실제 loopback TCP/Windows CI의 격리된 Credential Manager canary·PowerShell 구문 검증은 CI에서 수행하지만 사용자의 Credential Manager·PAT·기존 DB 복구를 대체하지 않는다. **실사용 증거가 없으면 P1은 `CODE COMPLETE · LIVE PENDING`으로 유지한다.**
 
+**SQLite 보존 Acceptance:** `tools/verify_watchtower_db.py`는 종료된 기존 DB를 읽기 전용으로 검사하고, Registry·Alias·수동 귀속·Run/Attempt·notification dedupe의 기존 레코드가 재실행 이후에도 유지되는지 검증한다. CI의 합성 DB fixture는 도구 자체의 검증이지 사용자의 실제 DB 무결성 증거가 아니다. 사용자 PC에서 사전/사후 비교할 때까지 P1 종료 조건은 미충족이다.
+
 ### P2 — 브리지 계약의 실제 결함 보완 (P1 발견사항 우선)
 
 - `docs/integrations/development-autopilot.md`와 실제 응답/오류 코드를 1:1 비교하고 샘플 코드로 계약 테스트 수행.
