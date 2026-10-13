@@ -727,7 +727,7 @@ mod tests {
              StatusCode::NOT_FOUND, Some("RUN_NOT_FOUND")),
         ];
         for (uri, status, error) in cases {
-            let request = axum::http::Request::builder().uri(&uri)
+            let request = axum::http::Request::builder().uri(uri.as_str())
                 .header(HOST, format!("127.0.0.1:{PORT}"))
                 .header(AUTHORIZATION, "Bearer test-token")
                 .body(axum::body::Body::empty()).unwrap();
