@@ -1,6 +1,6 @@
 # P1 Windows bridge acceptance — live execution record
 
-The **installed WatchTower app**, not CI's Windows runner, must pass this gate. The tool in [tools/Test-WatchTowerBridge.ps1](../../tools/Test-WatchTowerBridge.ps1) is read-only: no SQLite write, registry change, PAT access, credential export, or bridge API mutation. It uses Windows PowerShell 5.1+ and the current user's Windows Credential Manager via CredReadW.
+The **installed WatchTower app**, not CI's Windows runner, must pass this gate. The **Online/Offline** modes of [tools/Test-WatchTowerBridge.ps1](../../tools/Test-WatchTowerBridge.ps1) are read-only: no WatchTower SQLite/Registry changes, PAT access, credential export, or bridge API mutation. An explicitly selected **WindowsCanary** mode writes and deletes only a unique test credential in the isolated CI runner; do not invoke that mode as part of the user's installed-app live smoke. The script uses Windows PowerShell 5.1+ and CredReadW.
 
 ## Baseline and provenance
 
