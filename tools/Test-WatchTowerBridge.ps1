@@ -6,6 +6,7 @@
   Retrieves the bridge credential from the current Windows user's Credential Manager.
   Never prints, exports, rotates, or persists credentials; does not write to WatchTower's DB.
   Run Online before/after restarting WatchTower and Offline after fully exiting it.
+  SelfTest validates the keyring UTF-16LE decoder without accessing OS credentials.
 .EXAMPLE
   .\tools\Test-WatchTowerBridge.ps1 -Mode Online -RepositoryId 2 -RunId 12345 -HeadSha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -Attempt 1
 .EXAMPLE
@@ -15,7 +16,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Online', 'Offline')][string]$Mode = 'Online',
+    [ValidateSet('Online', 'Offline', 'SelfTest')][string]$Mode = 'Online',
     [ValidateRange(0, 2147483647)][int]$RepositoryId = 0,
     [ValidateRange(0, 9223372036854775807)][long]$RunId = 0,
     [string]$HeadSha,
@@ -87,28 +88,11 @@ function Get-RegistryIdentity($Registry) {
     }
 }
 
-if ($WriteBaseline -and (!$BaselinePath -or $Mode -ne 'Online')) {
-    throw 'WriteBaseline requires -Mode Online and -BaselinePath.'
-}
-if ($RunId -gt 0 -and (!$HeadSha -or $Attempt -lt 1 -or $RepositoryId -lt 1)) {
-    throw 'For exact Run acceptance supply -RepositoryId, -RunId, -HeadSha and -Attempt together.'
-}
-if ($HeadSha -and $HeadSha -notmatch '^[0-9a-fA-F]{40}$') { throw 'HeadSha must be a 40-character hexadecimal SHA.' }
-if ($TrackKey -and $TrackKey -notmatch '^[a-z0-9-]{1,100}$') { throw 'TrackKey must be a canonical key.' }
-
-try {
-    if ($Mode -eq 'Offline') {
-        $offline = Invoke-Bridge -Path '/v1/health'
-        Add-Probe 'process-exit-means-unavailable' $(if ($offline.status -eq 0) { 'PASS' } else { 'FAIL' }) "HTTP $($offline.status)"
-    }
-    else {
-        $noAuth = Invoke-Bridge -Path '/v1/health'
-        $reachable = Assert-Http 'unauthenticated-rejected' $noAuth 401 'UNAUTHORIZED'
-        if (!$reachable -and $noAuth.status -eq 0) { throw 'Bridge is not listening; launch WatchTower under the same Windows account.' }
-
+function Initialize-CredentialReader {
+    if ($null -ne ('WatchTowerCredentialReader' -as [type])) { return }
         # keyring 3 Windows-native: target_name = account + "." + service
         # service=ci-watchtower, account=development-autopilot-bridge-v1
-        Add-Type -TypeDefinition @'
+    Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 [StructLayout(LayoutKind.Sequential)]
@@ -131,21 +115,71 @@ public static class WatchTowerCredentialReader {
     static extern bool CredRead(string target, UInt32 type, UInt32 flags, out IntPtr credential);
     [DllImport("advapi32.dll", EntryPoint = "CredFree")]
     static extern void CredFree(IntPtr credential);
+    public static string DecodePassword(byte[] bytes) {
+        if (bytes == null || bytes.Length != 128)
+            throw new InvalidOperationException("Expected a 128-byte UTF-16LE bridge credential");
+        var password = System.Text.Encoding.Unicode.GetString(bytes);
+        if (password.Length != 64 || !System.Text.RegularExpressions.Regex.IsMatch(password, @"\A[0-9a-fA-F]{64}\z"))
+            throw new InvalidOperationException("Invalid bridge credential encoding or format");
+        return password;
+    }
     public static string ReadPassword(string target) {
         IntPtr pointer;
         if (!CredRead(target, 1, 0, out pointer))
             throw new InvalidOperationException("Credential Manager lookup failed: Windows error " + Marshal.GetLastWin32Error());
         try {
             var credential = (WatchTowerNativeCredential)Marshal.PtrToStructure(pointer, typeof(WatchTowerNativeCredential));
-            if (credential.CredentialBlobSize != 64) throw new InvalidOperationException("Unexpected bridge credential length");
+            // keyring::Entry::set_password stores the 64-character token as UTF-16LE.
+            if (credential.CredentialBlobSize != 128) throw new InvalidOperationException("Unexpected bridge credential length");
             var bytes = new byte[credential.CredentialBlobSize];
             Marshal.Copy(credential.CredentialBlob, bytes, 0, bytes.Length);
-            try { return System.Text.Encoding.UTF8.GetString(bytes); }
+            try { return DecodePassword(bytes); }
             finally { Array.Clear(bytes, 0, bytes.Length); }
         } finally { CredFree(pointer); }
     }
 }
 '@ -ErrorAction Stop
+}
+
+if ($WriteBaseline -and (!$BaselinePath -or $Mode -ne 'Online')) {
+    throw 'WriteBaseline requires -Mode Online and -BaselinePath.'
+}
+if ($RunId -gt 0 -and (!$HeadSha -or $Attempt -lt 1 -or $RepositoryId -lt 1)) {
+    throw 'For exact Run acceptance supply -RepositoryId, -RunId, -HeadSha and -Attempt together.'
+}
+if ($HeadSha -and $HeadSha -notmatch '^[0-9a-fA-F]{40}$') { throw 'HeadSha must be a 40-character hexadecimal SHA.' }
+if ($TrackKey -and $TrackKey -notmatch '^[a-z0-9-]{1,100}$') { throw 'TrackKey must be a canonical key.' }
+
+try {
+    if ($Mode -eq 'SelfTest') {
+        # CI-only local encoding check. No Credential Manager or HTTP access.
+        Initialize-CredentialReader
+        $sample = '0123456789abcdef' * 4
+        $encoded = [System.Text.Encoding]::Unicode.GetBytes($sample)
+        try {
+            $decoded = [WatchTowerCredentialReader]::DecodePassword($encoded)
+            Add-Probe 'keyring-utf16le-token-decoding' $(if ($decoded -ceq $sample) { 'PASS' } else { 'FAIL' })
+            $rejected = $false
+            try { [WatchTowerCredentialReader]::DecodePassword([System.Text.Encoding]::UTF8.GetBytes($sample)) | Out-Null }
+            catch [System.InvalidOperationException] { $rejected = $true }
+            Add-Probe 'utf8-token-blob-rejected' $(if ($rejected) { 'PASS' } else { 'FAIL' })
+            $rejected = $false
+            try { [WatchTowerCredentialReader]::DecodePassword([System.Text.Encoding]::Unicode.GetBytes(('g' * 64))) | Out-Null }
+            catch [System.InvalidOperationException] { $rejected = $true }
+            Add-Probe 'non-hex-token-rejected' $(if ($rejected) { 'PASS' } else { 'FAIL' })
+        }
+        finally { [System.Array]::Clear($encoded, 0, $encoded.Length) }
+    }
+    elseif ($Mode -eq 'Offline') {
+        $offline = Invoke-Bridge -Path '/v1/health'
+        Add-Probe 'process-exit-means-unavailable' $(if ($offline.status -eq 0) { 'PASS' } else { 'FAIL' }) "HTTP $($offline.status)"
+    }
+    else {
+        $noAuth = Invoke-Bridge -Path '/v1/health'
+        $reachable = Assert-Http 'unauthenticated-rejected' $noAuth 401 'UNAUTHORIZED'
+        if (!$reachable -and $noAuth.status -eq 0) { throw 'Bridge is not listening; launch WatchTower under the same Windows account.' }
+
+        Initialize-CredentialReader
         $token = [WatchTowerCredentialReader]::ReadPassword('development-autopilot-bridge-v1.ci-watchtower')
         if ($token -notmatch '^[0-9a-fA-F]{64}$') { throw 'Bridge credential has an invalid format.' }
         Add-Probe 'same-user-os-credential' 'PASS' 'separate bridge credential read; secret redacted'
