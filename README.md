@@ -1,5 +1,7 @@
 # CI Watchtower
 
+> 개발 진행 기준: [운영·Autopilot 연동 로드맵](docs/ROADMAP.md) · [Autopilot 브리지 계약](docs/integrations/development-autopilot.md)
+
 Windows 시스템 트레이에서 GitHub Actions를 **Project → Track → Repository** 단위로 분류하고 감시하는 로컬 데스크톱 앱입니다.
 
 ## 구조
