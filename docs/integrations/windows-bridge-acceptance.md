@@ -46,6 +46,14 @@ Start WatchTower again as the **same OS account**, then repeat the original onli
 
 The process returns `0` when its executable probes pass, `1` on failure, and `2` when a live Run/Repository probe is skipped. A zero exit code **does not** mean the entire P1 gate has passed; it means only the probes executed by this invocation passed.
 
+## Additional Windows CI gates (not user's live installation)
+
+The Windows GitHub runner now executes:
+- Rust's `real_loopback_http_enforces_bridge_auth_and_shutdown`: a real TCP listener on `127.0.0.1` using an OS-selected ephemeral port with the production router and synthetic token. It checks 401/403, successful authenticated health, no-store response, and that stopping the listener makes requests fail.
+- `-Mode WindowsCanary`: creates a **unique synthetic Windows Generic Credential** under the `ci-watchtower-p1-canary-*` namespace with session-only persistence, reads it using the same CredReadW/UTF-16LE code as the Online probe, and deletes it in a `finally` block. No production target/PAT/SQLite is opened by this mode. This mode is intended only for an isolated Windows CI runner, not routine use on the user's real PC.
+
+These gates establish Windows OS API/TCP interoperability, but do **not** establish installed WatchTower lifecycle, the real user's credential continuity or Autopilot client behavior. Until an installed PC provides evidence, P1 remains **EXTERNAL VALIDATION REQUIRED**.
+
 ## What the automated live script actually checks
 
 | Probe | Expected observation | Boundary |
