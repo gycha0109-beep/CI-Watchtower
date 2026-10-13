@@ -105,7 +105,7 @@ P1~P3가 **지금의 주 작업축**이다. P4~P6는 장기 계획이며 앞 단
 
 **Exit:** 설치된 Windows에서 정상 연결 + 인증 거부 + 재시작/실패 복구의 증거가 있고 **기존 데이터가 보존**됨. 사용자 OS 실행 권한이 없어 수행하지 못한 항목은 **EXTERNAL VALIDATION REQUIRED**로 남긴다. 추측으로 PASS 처리 금지.
 
-**P1 검증 도구 (실행 준비):** [Windows bridge acceptance](integrations/windows-bridge-acceptance.md) 및 `tools/Test-WatchTowerBridge.ps1`. 인증/HTTP 오류·실 Run SHA/Attempt·트레이/종료/재시작·Registry identity baseline을 사용자 Windows에서 검사한다. Rust HTTP 계약 회귀/PowerShell 구문 검증은 CI에서 수행하지만 사용자의 Credential Manager·PAT·기존 DB 복구를 대체하지 않는다. **실사용 증거가 없으면 P1은 `CODE COMPLETE · LIVE PENDING`으로 유지한다.**
+**P1 검증 도구 (실행 준비):** [Windows bridge acceptance](integrations/windows-bridge-acceptance.md) 및 `tools/Test-WatchTowerBridge.ps1`. 인증/HTTP 오류·실 Run SHA/Attempt·트레이/종료/재시작·Registry identity baseline을 사용자 Windows에서 검사한다. Rust HTTP 계약 회귀·실제 loopback TCP/Windows CI의 격리된 Credential Manager canary·PowerShell 구문 검증은 CI에서 수행하지만 사용자의 Credential Manager·PAT·기존 DB 복구를 대체하지 않는다. **실사용 증거가 없으면 P1은 `CODE COMPLETE · LIVE PENDING`으로 유지한다.**
 
 ### P2 — 브리지 계약의 실제 결함 보완 (P1 발견사항 우선)
 
