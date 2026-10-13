@@ -9,6 +9,7 @@ The **installed WatchTower app**, not CI's Windows runner, must pass this gate. 
 - The local HTTP contract is [development-autopilot.md](development-autopilot.md) v1.0. The account-specific Windows credential target is `development-autopilot-bridge-v1.ci-watchtower` (keyring 3 Windows-native maps `account.service`).
 - Do **not** run a credential export or paste the token into the terminal. The script reads it from the OS and does not print or write it.
 - The script never claims that HTTP responses verify all GitHub required checks, a current PR Head SHA, approval policy, or actual AI/PR execution permission.
+- The Rust `keyring` writes `Entry::set_password` to Windows Generic Credentials as **UTF-16LE** (64 hex characters = 128 bytes). The credential reader decodes UTF-16LE; `-Mode SelfTest` verifies positive and malformed-token paths without OS credential access. Parsing the PowerShell script alone is not a runtime check.
 
 ## Prerequisites / data preservation
 
@@ -59,7 +60,7 @@ The process returns `0` when its executable probes pass, `1` on failure, and `2`
 | Lifecycle | Tray preserves listener; process exit -> unavailable; restart preserves credential and identity | Credential rotation / corrupt DB must be reported |
 | CI state | Current queued/running/success/failure/cancelled/timed_out etc. only when actually observed | Deterministic Rust fixtures cover unreproducible cases |
 
-For exact run verification the script uses a supplied run ID or, when omitted, one of the latest locally observed runs with a matching stored latest attempt. **An automatic sample is not proof that the intended Autopilot PR is covered.** Supply the exact PR-linked values for acceptance.
+For exact Run verification, **the script requires an explicitly supplied RepositoryId + RunId + HeadSha + Attempt**. If these are missing, it records `SKIP` and returns exit 2, even when sampled runs exist. A bounded local run list never proves that the intended Autopilot PR was covered.
 
 ## Manual acceptance items (cannot be inferred from script success)
 
