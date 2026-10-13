@@ -382,6 +382,10 @@ Release installer:
 npm run tauri build
 ```
 
+## Windows P1 existing-data preservation
+
+For non-destructive **existing SQLite** retention evidence, see [Windows acceptance procedure](docs/integrations/windows-bridge-acceptance.md) and `tools/verify_watchtower_db.py`. The script reads a fully stopped app's database, creates a private salted-fingerprint baseline, and verifies pre-existing identity/alias/manual assignment/history/dedupe rows after restart; it never substitutes for a real backup. Windows CI exercises synthetic DB fixtures only. **Installed user Windows acceptance remains external.**
+
 ## Development Autopilot read-only bridge (v1)
 
 The installed app exposes an authenticated read-only status bridge on `127.0.0.1:48765` with a distinct per-user Windows Credential Manager secret. See [contract](docs/integrations/development-autopilot.md) and the [Windows P1 acceptance procedure](docs/integrations/windows-bridge-acceptance.md) (`tools/Test-WatchTowerBridge.ps1`). **PR/main CI success does not demonstrate an actual installed Windows/Autopilot connection.** Bridge evidence never authorizes automatic CI advancement or merging.

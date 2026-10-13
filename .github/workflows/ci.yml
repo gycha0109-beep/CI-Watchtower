@@ -27,6 +27,14 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Setup Python for preservation regression
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: SQLite preservation fixture tests
+        run: python -m unittest discover -s tools -p 'test_verify_watchtower_db.py' -v
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
