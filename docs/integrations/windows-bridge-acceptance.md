@@ -9,6 +9,7 @@ The **installed WatchTower app**, not CI's Windows runner, must pass this gate. 
 - The local HTTP contract is [development-autopilot.md](development-autopilot.md) v1.0. The account-specific Windows credential target is `development-autopilot-bridge-v1.ci-watchtower` (keyring 3 Windows-native maps `account.service`).
 - Do **not** run a credential export or paste the token into the terminal. The script reads it from the OS and does not print or write it.
 - The script never claims that HTTP responses verify all GitHub required checks, a current PR Head SHA, approval policy, or actual AI/PR execution permission.
+- The Rust `keyring` writes `Entry::set_password` to Windows Generic Credentials as **UTF-16LE** (64 hex characters = 128 bytes). The credential reader decodes UTF-16LE; `-Mode SelfTest` verifies positive and malformed-token paths without OS credential access. Parsing the PowerShell script alone is not a runtime check.
 
 ## Prerequisites / data preservation
 
