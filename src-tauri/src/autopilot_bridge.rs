@@ -656,4 +656,96 @@ mod tests {
         let _=std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _=std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
+
+    #[tokio::test]
+    async fn api_scope_and_unavailable_database_return_contract_errors() {
+        use tower::ServiceExt;
+        let app = router(Arc::new(BridgeState {
+            db_path: PathBuf::from("missing-bridge-test-database.sqlite3"),
+            token: "test-token".into(),
+        }));
+        for (uri, status, code) in [
+            ("/v1/runs", StatusCode::BAD_REQUEST, "REPOSITORY_SCOPE_REQUIRED"),
+            ("/v1/registry?project_id=-1", StatusCode::BAD_REQUEST, "INVALID_SCOPE"),
+            ("/v1/runs?repository_id=1&limit=101", StatusCode::BAD_REQUEST, "INVALID_SCOPE"),
+            ("/v1/runs/0", StatusCode::BAD_REQUEST, "INVALID_RUN_ID"),
+            ("/v1/runs?repository_id=1", StatusCode::SERVICE_UNAVAILABLE, "DATABASE_UNAVAILABLE"),
+        ] {
+            let request = axum::http::Request::builder().uri(uri)
+                .header(HOST, format!("127.0.0.1:{PORT}"))
+                .header(AUTHORIZATION, "Bearer test-token")
+                .body(axum::body::Body::empty()).unwrap();
+            let actual = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(actual.status(), status, "{uri}");
+            let body = axum::body::to_bytes(actual.into_body(), usize::MAX).await.unwrap();
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["contractVersion"], CONTRACT_VERSION);
+            assert_eq!(payload["error"]["code"], code, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_exact_run_rejects_different_head_and_old_attempt() {
+        use tower::ServiceExt;
+        let suffix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "watchtower-http-bridge-{}-{}.sqlite3", std::process::id(), suffix
+        ));
+        init_db(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let now = Utc::now().to_rfc3339();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        conn.execute("INSERT INTO projects(name,project_key,created_at,updated_at)
+                      VALUES('HTTP test','http-test',?,?)", params![now, now]).unwrap();
+        let project_id = conn.last_insert_rowid();
+        conn.execute("INSERT INTO monitored_repositories(
+                      project_id,repo,enabled,created_at,updated_at,last_polled_at,last_successful_poll_at)
+                      VALUES(?,'test/http-repo',1,?,?,?,?)",
+                     params![project_id, now, now, now, now]).unwrap();
+        let repository_id = conn.last_insert_rowid();
+        conn.execute("INSERT INTO workflow_runs(
+                      run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,
+                      event,head_branch,head_sha,run_number,run_attempt,status,conclusion,
+                      html_url,created_at,updated_at,last_seen_at,resolution_status)
+                      VALUES(12345,?,1,'CI','.github/workflows/ci.yml','CI HTTP test',
+                             'pull_request','test/bridge',?,1,2,'completed','success',
+                             'https://github.invalid/12345',?,?,?,'project')",
+                     params![repository_id, sha, now, now, now]).unwrap();
+        conn.execute("INSERT INTO run_attempts(run_id,run_attempt,status,conclusion,updated_at)
+                      VALUES(12345,1,'completed','failure',?)", params![now]).unwrap();
+        let app = router(Arc::new(BridgeState { db_path: path.clone(), token: "test-token".into() }));
+        let cases = [
+            (format!("/v1/runs/12345?repository_id={repository_id}&head_sha={sha}&attempt=2"),
+             StatusCode::OK, None),
+            (format!("/v1/runs/12345?repository_id={repository_id}&head_sha={sha}&attempt=1"),
+             StatusCode::CONFLICT, Some("RUN_ATTEMPT_MISMATCH")),
+            (format!("/v1/runs/12345?repository_id={repository_id}&head_sha={}&attempt=2",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+             StatusCode::CONFLICT, Some("HEAD_SHA_MISMATCH")),
+            (format!("/v1/runs/12346?repository_id={repository_id}&head_sha={sha}&attempt=2"),
+             StatusCode::NOT_FOUND, Some("RUN_NOT_FOUND")),
+        ];
+        for (uri, status, error) in cases {
+            let request = axum::http::Request::builder().uri(uri.as_str())
+                .header(HOST, format!("127.0.0.1:{PORT}"))
+                .header(AUTHORIZATION, "Bearer test-token")
+                .body(axum::body::Body::empty()).unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), status, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            if let Some(code) = error {
+                assert_eq!(payload["error"]["code"], code, "{uri}");
+            } else {
+                assert_eq!(payload["data"]["run"]["runAttempt"], 2);
+                assert_eq!(payload["data"]["run"]["targetVerified"], true);
+                assert_eq!(payload["data"]["run"]["safeToAdvance"], false);
+            }
+        }
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
 }

@@ -36,3 +36,7 @@ The automated gate intentionally does not fake operating-system notification del
 ## Exit rule
 
 PASS requires the automated gate to be green in both PR CI and merged-main CI. The live desktop boundary is recorded separately because CI cannot prove native notification presentation or a user's local credential store. Any failure found there should produce a narrow bug fix, not a new governance subsystem.
+
+## Development Autopilot local bridge (P1)
+
+This acceptance scope predates the v1 read-only bridge. For its separate Windows authentication, exact Run/Head/Attempt and lifecycle smoke, use [Windows bridge acceptance](integrations/windows-bridge-acceptance.md) and `tools/Test-WatchTowerBridge.ps1`. Passing the deterministic Rust gate above does **not** prove a live bridge, credential persistence, installed Windows UI or consumer-side `WATCHTOWER_UNAVAILABLE` decision.
