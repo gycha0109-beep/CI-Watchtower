@@ -588,11 +588,12 @@ function App() {
       if (message) setNotice(message);
       if (feedbackKey) {
         const destination = successKey ?? feedbackKey;
-        setActionFeedback(previous => ({
-          ...previous,
-          [feedbackKey]: { kind: 'success', message: destination === feedbackKey ? message ?? '완료했습니다.' : '' },
-          [destination]: { kind: 'success', message: message ?? '완료했습니다.' },
-        }));
+        setActionFeedback(previous => {
+          const next = { ...previous };
+          if (destination !== feedbackKey) delete next[feedbackKey];
+          next[destination] = { kind: 'success', message: message ?? '완료했습니다.' };
+          return next;
+        });
       }
       await refresh(poll);
     } catch (e) {
@@ -1651,15 +1652,22 @@ function App() {
           <form onSubmit={submitProject} className="stack-form">
             <label>프로젝트 이름<input value={projectName} onChange={e => setProjectName(e.target.value)} placeholder="예: 제품 운영" /></label>
             <label>Project Key<input value={projectKey} onChange={e => setProjectKey(e.target.value)} placeholder="product-app" /></label>
-            <button className="primary" type="submit">프로젝트 추가</button>
+            <div className="action-submit-row">
+              <button className="primary" type="submit" disabled={actionFeedback['project-form']?.kind === 'pending'}>프로젝트 추가</button>
+              <ActionFeedback result={actionFeedback['project-form']} />
+            </div>
           </form>
+          <div className="action-section-feedback"><ActionFeedback result={actionFeedback['project-list']} /></div>
           <div className="project-manager-list">
             {dashboard?.projects.map(project => (
               <div className="project-manager-item" key={project.id}>
                 <button className="managed-track-main" onClick={() => selectProject(project.id)}>
                   <span className="managed-track-copy"><b>{project.name}</b><small className="mono">{project.projectKey}</small></span>
                 </button>
-                <button className="danger-ghost tiny" onClick={() => void removeProject(project)}>삭제</button>
+                <div className="action-item-controls">
+                  <button className="danger-ghost tiny" disabled={actionFeedback[`project-row:${project.id}`]?.kind === 'pending'} onClick={() => void removeProject(project)}>삭제</button>
+                  <ActionFeedback result={actionFeedback[`project-row:${project.id}`]} />
+                </div>
               </div>
             ))}
           </div>
@@ -1676,13 +1684,15 @@ function App() {
             <label>Track Key<input value={trackForm.trackKey} onChange={e => setTrackForm({ ...trackForm, trackKey: e.target.value })} placeholder="frontend-integration" /></label>
             <label>장기 CI 기준시간<input type="number" min="1" step="1" value={trackForm.longCiMinutes} onChange={e => setTrackForm({ ...trackForm, longCiMinutes: e.target.value === '' ? '' : Number(e.target.value) })} placeholder="8" /></label>
             <div className="row-actions">
-              <button className="primary" type="submit">{editingId ? '수정 저장' : '트랙 추가'}</button>
+              <button className="primary" type="submit" disabled={actionFeedback['track-form']?.kind === 'pending'}>{editingId ? '수정 저장' : '트랙 추가'}</button>
               {editingId && <button type="button" className="ghost" onClick={() => { setEditingId(null); setTrackForm(emptyTrack(trackForm.projectId)); }}>취소</button>}
+              <ActionFeedback result={actionFeedback['track-form']} />
             </div>
           </form>
 
           <div className="sidebar-section track-manager">
             <div className="sidebar-section-head"><h2>등록된 트랙</h2><span>{tracksInProject.length}</span></div>
+            <div className="action-section-feedback"><ActionFeedback result={actionFeedback['track-list']} /></div>
             <div className="managed-track-list">
               {tracksInProject.map(item => {
                 const [label, cls] = statusLabel(item);
@@ -1694,7 +1704,8 @@ function App() {
                     </button>
                     <div className="managed-track-actions">
                       <button className="ghost tiny" onClick={() => editTrack(item)}>수정</button>
-                      <button className="danger-ghost tiny" onClick={() => void removeTrack(item)}>삭제</button>
+                      <button className="danger-ghost tiny" disabled={actionFeedback[`track-row:${item.track.id}`]?.kind === 'pending'} onClick={() => void removeTrack(item)}>삭제</button>
+                      <ActionFeedback result={actionFeedback[`track-row:${item.track.id}`]} />
                     </div>
                   </div>
                 );
@@ -1711,15 +1722,20 @@ function App() {
               </select>
             </label>
             <label>Repository<input value={repoInput} onChange={e => setRepoInput(e.target.value)} placeholder="owner/repository" /></label>
-            <button className="primary" type="submit">저장소 추가</button>
+            <div className="action-submit-row">
+              <button className="primary" type="submit" disabled={actionFeedback['repo-form']?.kind === 'pending'}>저장소 추가</button>
+              <ActionFeedback result={actionFeedback['repo-form']} />
+            </div>
           </form>
+          <div className="action-section-feedback"><ActionFeedback result={actionFeedback['repo-list']} /></div>
           <div className="repo-list">
             {dashboard?.repositories.filter(repo => selectedProject === 'all' || repo.projectId === selectedProject).map(repo => (
               <div className="repo-item" key={repo.id}>
                 <div><b>{repo.repo}</b><span>{projectById.get(repo.projectId)?.name ?? '—'} · <span className={repo.lastError ? 'repo-error' : ''}>{repositoryState(repo)}</span></span></div>
                 <div className="row-actions">
-                  <button className="ghost small" onClick={() => void act(() => api.saveRepository({ id: repo.id, projectId: repo.projectId, repo: repo.repo, enabled: !repo.enabled }), undefined, true)}>{repo.enabled ? '중지' : '감시'}</button>
-                  <button className="danger-ghost small" onClick={() => void act(() => api.deleteRepository(repo.id))}>삭제</button>
+                  <button className="ghost small" disabled={actionFeedback[`repo-row:${repo.id}`]?.kind === 'pending'} onClick={() => void act(() => api.saveRepository({ id: repo.id, projectId: repo.projectId, repo: repo.repo, enabled: !repo.enabled }), repo.enabled ? '저장소 감시를 중지했습니다.' : '저장소 감시를 재개했습니다.', true, `repo-row:${repo.id}`)}>{repo.enabled ? '중지' : '감시'}</button>
+                  <button className="danger-ghost small" disabled={actionFeedback[`repo-row:${repo.id}`]?.kind === 'pending'} onClick={() => void act(() => api.deleteRepository(repo.id), '감시 저장소를 삭제했습니다.', false, `repo-row:${repo.id}`, 'repo-list')}>삭제</button>
+                  <ActionFeedback result={actionFeedback[`repo-row:${repo.id}`]} />
                 </div>
               </div>
             ))}
@@ -1736,13 +1752,20 @@ function App() {
                 {selectedProjectRepos.map(repo => <option key={repo.id} value={repo.id}>{repo.repo}</option>)}
               </select>
             </label>
-            <button className="primary" type="submit" disabled={!selectedProjectId}>공용 규칙 추가</button>
+            <div className="action-submit-row">
+              <button className="primary" type="submit" disabled={!selectedProjectId || actionFeedback['rule-form']?.kind === 'pending'}>공용 규칙 추가</button>
+              <ActionFeedback result={actionFeedback['rule-form']} />
+            </div>
           </form>
+          <div className="action-section-feedback"><ActionFeedback result={actionFeedback['rule-list']} /></div>
           <div className="rule-list">
             {dashboard?.projectWorkflowRules.filter(rule => selectedProject === 'all' || rule.projectId === selectedProject).map(rule => (
               <div className="rule-item" key={rule.id}>
                 <div><b>{rule.workflowName}</b><span>{rule.repositoryId ? dashboard.repositories.find(repo => repo.id === rule.repositoryId)?.repo : '프로젝트 전체'}</span></div>
-                <button className="danger-ghost tiny" onClick={() => void act(() => api.deleteProjectWorkflowRule(rule.id), '공용 CI 규칙을 삭제했습니다.', true)}>삭제</button>
+                <div className="action-item-controls">
+                  <button className="danger-ghost tiny" disabled={actionFeedback[`rule-row:${rule.id}`]?.kind === 'pending'} onClick={() => void act(() => api.deleteProjectWorkflowRule(rule.id), '공용 CI 규칙을 삭제했습니다.', true, `rule-row:${rule.id}`, 'rule-list')}>삭제</button>
+                  <ActionFeedback result={actionFeedback[`rule-row:${rule.id}`]} />
+                </div>
               </div>
             ))}
           </div>
@@ -1758,8 +1781,12 @@ function App() {
                 {selectedProjectRepos.map(repo => <option key={repo.id} value={repo.id}>{repo.repo}</option>)}
               </select>
             </label>
-            <button className="primary" type="submit" disabled={!selectedProjectId}>Dynamic 규칙 추가</button>
+            <div className="action-submit-row">
+              <button className="primary" type="submit" disabled={!selectedProjectId || actionFeedback['dynamic-rule-form']?.kind === 'pending'}>Dynamic 규칙 추가</button>
+              <ActionFeedback result={actionFeedback['dynamic-rule-form']} />
+            </div>
           </form>
+          <div className="action-section-feedback"><ActionFeedback result={actionFeedback['dynamic-rule-list']} /></div>
           <div className="rule-list">
             {dashboard?.dynamicWorkflowRules.filter(rule => selectedProject === 'all' || rule.projectId === selectedProject).map(rule => (
               <div className="rule-item" key={rule.id}>
@@ -1767,14 +1794,17 @@ function App() {
                   <b>{rule.workflowName}</b>
                   <span>{rule.repositoryId ? dashboard.repositories.find(repo => repo.id === rule.repositoryId)?.repo : '프로젝트 전체'}{rule.protected ? ' · 기본 계약' : ''}</span>
                 </div>
-                <button
-                  className="danger-ghost tiny"
-                  disabled={rule.protected}
-                  title={rule.protected ? '기본 Dynamic Workflow 계약은 삭제할 수 없습니다.' : undefined}
-                  onClick={() => void act(() => api.deleteDynamicWorkflowRule(rule.id), 'Dynamic Workflow 규칙을 삭제했습니다.', true)}
-                >
-                  {rule.protected ? '고정' : '삭제'}
-                </button>
+                <div className="action-item-controls">
+                  <button
+                    className="danger-ghost tiny"
+                    disabled={rule.protected || actionFeedback[`dynamic-rule-row:${rule.id}`]?.kind === 'pending'}
+                    title={rule.protected ? '기본 Dynamic Workflow 계약은 삭제할 수 없습니다.' : undefined}
+                    onClick={() => void act(() => api.deleteDynamicWorkflowRule(rule.id), 'Dynamic Workflow 규칙을 삭제했습니다.', true, `dynamic-rule-row:${rule.id}`, 'dynamic-rule-list')}
+                  >
+                    {rule.protected ? '고정' : '삭제'}
+                  </button>
+                  <ActionFeedback result={actionFeedback[`dynamic-rule-row:${rule.id}`]} />
+                </div>
               </div>
             ))}
           </div>
@@ -1784,8 +1814,9 @@ function App() {
           <form onSubmit={saveToken} className="stack-form">
             <label>Fine-grained PAT<input type="password" value={token} onChange={e => setToken(e.target.value)} placeholder="github_pat_..." autoComplete="off" /></label>
             <div className="row-actions">
-              <button className="primary" type="submit">PAT 저장</button>
-              {dashboard?.tokenConfigured && <button type="button" className="danger-ghost" onClick={() => void act(() => api.clearGithubToken())}>삭제</button>}
+              <button className="primary" type="submit" disabled={actionFeedback['token-form']?.kind === 'pending'}>PAT 저장</button>
+              {dashboard?.tokenConfigured && <button type="button" className="danger-ghost" disabled={actionFeedback['token-form']?.kind === 'pending'} onClick={() => void act(() => api.clearGithubToken(), 'GitHub PAT를 삭제했습니다.', false, 'token-form')}>삭제</button>}
+              <ActionFeedback result={actionFeedback['token-form']} />
             </div>
           </form>
 
@@ -1796,6 +1827,7 @@ function App() {
             <label>활성 Polling(초)<input type="number" min="10" value={dashboard.settings.activePollSeconds} onBlur={e => void updateSettings({ activePollSeconds: Number(e.target.value) })} onChange={e => setDashboard({ ...dashboard, settings: { ...dashboard.settings, activePollSeconds: Number(e.target.value) } })} /></label>
             <label>유휴 Polling(초)<input type="number" min="30" value={dashboard.settings.idlePollSeconds} onBlur={e => void updateSettings({ idlePollSeconds: Number(e.target.value) })} onChange={e => setDashboard({ ...dashboard, settings: { ...dashboard.settings, idlePollSeconds: Number(e.target.value) } })} /></label>
           </div>}
+          <div className="action-section-feedback"><ActionFeedback result={actionFeedback['settings']} /></div>
           <hr />
           <h2>Responsibility Review SLA</h2>
           {selectedResponsibilityPolicy ? (
@@ -1815,6 +1847,7 @@ function App() {
           ) : (
             <small className="muted-copy">Project를 하나 선택하면 해당 Project의 SLA/알림 정책을 편집할 수 있습니다.</small>
           )}
+          <div className="action-section-feedback"><ActionFeedback result={actionFeedback['policy']} /></div>
         </section>
         )}
 
