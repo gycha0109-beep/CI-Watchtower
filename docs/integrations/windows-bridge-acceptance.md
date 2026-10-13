@@ -1,6 +1,6 @@
 # P1 Windows bridge acceptance — live execution record
 
-The **installed WatchTower app**, not CI's Windows runner, must pass this gate. The tool in [tools/Test-WatchTowerBridge.ps1](../../tools/Test-WatchTowerBridge.ps1) is read-only: no SQLite write, registry change, PAT access, credential export, or bridge API mutation. It uses Windows PowerShell 5.1+ and the current user's Windows Credential Manager via CredReadW.
+The **installed WatchTower app**, not CI's Windows runner, must pass this gate. The **Online/Offline** modes of [tools/Test-WatchTowerBridge.ps1](../../tools/Test-WatchTowerBridge.ps1) are read-only: no WatchTower SQLite/Registry changes, PAT access, credential export, or bridge API mutation. An explicitly selected **WindowsCanary** mode writes and deletes only a unique test credential in the isolated CI runner; do not invoke that mode as part of the user's installed-app live smoke. The script uses Windows PowerShell 5.1+ and CredReadW.
 
 ## Baseline and provenance
 
@@ -45,6 +45,14 @@ Fully exit WatchTower and verify that a local request is no longer served:
 Start WatchTower again as the **same OS account**, then repeat the original online command **without** `-WriteBaseline`. This validates reuse of the existing OS credential and non-destructive Project / Repository / Track identity. A separate DB-level comparison is still necessary for aliases, manual assignments, notification dedupe, and retained run history because v1 bridge does not expose all those tables.
 
 The process returns `0` when its executable probes pass, `1` on failure, and `2` when a live Run/Repository probe is skipped. A zero exit code **does not** mean the entire P1 gate has passed; it means only the probes executed by this invocation passed.
+
+## Additional Windows CI gates (not user's live installation)
+
+The Windows GitHub runner now executes:
+- Rust's `real_loopback_http_enforces_bridge_auth_and_shutdown`: a real TCP listener on `127.0.0.1` using an OS-selected ephemeral port with the production router and synthetic token. It checks 401/403, successful authenticated health, no-store response, and that stopping the listener rejects **new TCP connections**. A reused keep-alive connection is not a process-exit test.
+- `-Mode WindowsCanary`: creates a **unique synthetic Windows Generic Credential** under the `ci-watchtower-p1-canary-*` namespace with session-only persistence, reads it using the same CredReadW/UTF-16LE code as the Online probe, and deletes it in a `finally` block. No production target/PAT/SQLite is opened by this mode. This mode is intended only for an isolated Windows CI runner, not routine use on the user's real PC.
+
+These gates establish Windows OS API/TCP interoperability, but do **not** establish installed WatchTower lifecycle, the real user's credential continuity or Autopilot client behavior. Until an installed PC provides evidence, P1 remains **EXTERNAL VALIDATION REQUIRED**.
 
 ## What the automated live script actually checks
 

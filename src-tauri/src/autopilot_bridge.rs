@@ -748,4 +748,58 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
+
+    #[tokio::test]
+    async fn real_loopback_http_enforces_bridge_auth_and_shutdown() {
+        // Unlike Router::oneshot tests, this exercises a real Windows/Linux TCP socket.
+        // Dynamic port prevents interfering with a user's installed WatchTower.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        assert!(address.ip().is_loopback());
+        let task = tokio::spawn(async move {
+            let app = router(Arc::new(BridgeState {
+                db_path: PathBuf::from("no-database-required-for-health.sqlite3"),
+                token: "synthetic-http-test-token".to_string(),
+            }));
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build().unwrap();
+        let url = format!("http://127.0.0.1:{}/v1/health", address.port());
+        let host = format!("127.0.0.1:{PORT}");
+        let rejected = client.get(&url).header(reqwest::header::HOST, host.as_str())
+            .send().await.unwrap();
+        assert_eq!(rejected.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(rejected.json::<Value>().await.unwrap()["error"]["code"], "UNAUTHORIZED");
+
+        let denied_origin = client.get(&url).header(reqwest::header::HOST, host.as_str())
+            .header(reqwest::header::AUTHORIZATION, "Bearer synthetic-http-test-token")
+            .header(reqwest::header::ORIGIN, "https://untrusted.invalid")
+            .send().await.unwrap();
+        assert_eq!(denied_origin.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let denied_host = client.get(&url).header(reqwest::header::HOST, "localhost:48765")
+            .header(reqwest::header::AUTHORIZATION, "Bearer synthetic-http-test-token")
+            .send().await.unwrap();
+        assert_eq!(denied_host.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let accepted = client.get(&url).header(reqwest::header::HOST, host)
+            .header(reqwest::header::AUTHORIZATION, "Bearer synthetic-http-test-token")
+            .send().await.unwrap();
+        assert_eq!(accepted.status(), reqwest::StatusCode::OK);
+        assert_eq!(accepted.headers().get(reqwest::header::CACHE_CONTROL).unwrap(), "no-store");
+        let data = accepted.json::<Value>().await.unwrap();
+        assert_eq!(data["contractVersion"], "1.0");
+        assert_eq!(data["data"]["bridge"], "connected");
+
+        task.abort();
+        let _ = task.await;
+        // reqwest can reuse a live keep-alive connection from an Axum task that
+        // outlives the listener. Probe a NEW TCP socket instead of its connection pool.
+        // The installed desktop's full process exit is a separate Windows live gate.
+        let stopped = tokio::net::TcpStream::connect(address).await;
+        assert!(stopped.is_err(), "a stopped listener must reject a new TCP connection");
+    }
 }

@@ -6,7 +6,8 @@
   Retrieves the bridge credential from the current Windows user's Credential Manager.
   Never prints, exports, rotates, or persists credentials; does not write to WatchTower's DB.
   Run Online before/after restarting WatchTower and Offline after fully exiting it.
-  SelfTest validates the keyring UTF-16LE decoder without accessing OS credentials.
+  SelfTest validates keyring UTF-16LE decoding without accessing OS credentials.
+  WindowsCanary writes and deletes ONLY a randomly named temporary CI credential.
 .EXAMPLE
   .\tools\Test-WatchTowerBridge.ps1 -Mode Online -RepositoryId 2 -RunId 12345 -HeadSha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -Attempt 1
 .EXAMPLE
@@ -16,7 +17,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Online', 'Offline', 'SelfTest')][string]$Mode = 'Online',
+    [ValidateSet('Online', 'Offline', 'SelfTest', 'WindowsCanary')][string]$Mode = 'Online',
     [ValidateRange(0, 2147483647)][int]$RepositoryId = 0,
     [ValidateRange(0, 9223372036854775807)][long]$RunId = 0,
     [string]$HeadSha,
@@ -115,6 +116,10 @@ public static class WatchTowerCredentialReader {
     static extern bool CredRead(string target, UInt32 type, UInt32 flags, out IntPtr credential);
     [DllImport("advapi32.dll", EntryPoint = "CredFree")]
     static extern void CredFree(IntPtr credential);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CredWriteW")]
+    static extern bool CredWrite(ref WatchTowerNativeCredential credential, UInt32 flags);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CredDeleteW")]
+    static extern bool CredDelete(string target, UInt32 type, UInt32 flags);
     public static string DecodePassword(byte[] bytes) {
         if (bytes == null || bytes.Length != 128)
             throw new InvalidOperationException("Expected a 128-byte UTF-16LE bridge credential");
@@ -136,6 +141,45 @@ public static class WatchTowerCredentialReader {
             try { return DecodePassword(bytes); }
             finally { Array.Clear(bytes, 0, bytes.Length); }
         } finally { CredFree(pointer); }
+    }
+
+    public static bool TestIsolatedWindowsCanary(string testPassword) {
+        // Unique per invocation; never use production bridge or PAT target names.
+        var target = "ci-watchtower-p1-canary-" + Guid.NewGuid().ToString("N");
+        var blobBytes = System.Text.Encoding.Unicode.GetBytes(testPassword);
+        IntPtr namePtr = IntPtr.Zero;
+        IntPtr userPtr = IntPtr.Zero;
+        IntPtr blobPtr = IntPtr.Zero;
+        bool written = false;
+        try {
+            namePtr = Marshal.StringToHGlobalUni(target);
+            userPtr = Marshal.StringToHGlobalUni("ci-watchtower-p1-canary");
+            blobPtr = Marshal.AllocHGlobal(blobBytes.Length);
+            Marshal.Copy(blobBytes, 0, blobPtr, blobBytes.Length);
+            var credential = new WatchTowerNativeCredential {
+                Type = 1, // CRED_TYPE_GENERIC
+                TargetName = namePtr,
+                UserName = userPtr,
+                CredentialBlobSize = (UInt32)blobBytes.Length,
+                CredentialBlob = blobPtr,
+                Persist = 1 // CRED_PERSIST_SESSION: never persist across logoff
+            };
+            if (!CredWrite(ref credential, 0)) {
+                throw new InvalidOperationException("Isolated test credential write failed: Windows error " + Marshal.GetLastWin32Error());
+            }
+            written = true;
+            return String.Equals(ReadPassword(target), testPassword, StringComparison.Ordinal);
+        } finally {
+            bool cleanupFailed = written && !CredDelete(target, 1, 0);
+            Array.Clear(blobBytes, 0, blobBytes.Length);
+            if (blobPtr != IntPtr.Zero) {
+                Marshal.Copy(new byte[128], 0, blobPtr, 128);
+                Marshal.FreeHGlobal(blobPtr);
+            }
+            if (namePtr != IntPtr.Zero) Marshal.FreeHGlobal(namePtr);
+            if (userPtr != IntPtr.Zero) Marshal.FreeHGlobal(userPtr);
+            if (cleanupFailed) throw new InvalidOperationException("Failed to delete isolated test credential");
+        }
     }
 }
 '@ -ErrorAction Stop
@@ -172,6 +216,13 @@ try {
             Add-Probe 'non-hex-token-rejected' $(if ($rejected) { 'PASS' } else { 'FAIL' })
         }
         finally { [System.Array]::Clear($encoded, 0, $encoded.Length) }
+    }
+    elseif ($Mode -eq 'WindowsCanary') {
+        # Isolated Windows runner canary; no WatchTower DB, PAT, or production target touched.
+        Initialize-CredentialReader
+        $sample = '0123456789abcdef' * 4
+        $verified = [WatchTowerCredentialReader]::TestIsolatedWindowsCanary($sample)
+        Add-Probe 'isolated-windows-credential-write-read-delete' $(if ($verified) { 'PASS' } else { 'FAIL' }) 'session canary target only; no real bridge credential accessed'
     }
     elseif ($Mode -eq 'Offline') {
         $offline = Invoke-Bridge -Path '/v1/health'
