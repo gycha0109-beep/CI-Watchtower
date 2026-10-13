@@ -46,6 +46,29 @@ Start WatchTower again as the **same OS account**, then repeat the original onli
 
 The process returns `0` when its executable probes pass, `1` on failure, and `2` when a live Run/Repository probe is skipped. A zero exit code **does not** mean the entire P1 gate has passed; it means only the probes executed by this invocation passed.
 
+## Preserved SQLite history: read-only before/after proof
+
+The bridge `/v1/registry` exposes identities only; it cannot establish Alias, manual assignment, historical Run/Attempt, notification dedupe, or responsibility delivery preservation. Use the **standard-library Python 3.13** tool [verify_watchtower_db.py](../../tools/verify_watchtower_db.py) as an additional **read-only** check. Python is necessary only for this local preservation probe; no external Python packages are installed.
+
+**Both captures must be performed with WatchTower fully exited**, not minimized to tray. First create a **separate tested backup** of the complete SQLite database/WAL/SHM with the process stopped; the proof file is **not a DB backup** and cannot restore lost records. Locate the actual installed app's data path rather than using a guessed path. Example from the repository root:
+
+```powershell
+# Replace this with the actual existing installed DB path; do not infer it from the example.
+$Db = 'C:\ACTUAL-APP-DATA-PATH\ci-watchtower.sqlite3'
+$Proof = Join-Path $env:TEMP 'ci-watchtower-p1-private-proof.json'
+
+# WatchTower fully exited and backed up BEFORE this command.
+python .\tools\verify_watchtower_db.py capture --db "$Db" --proof "$Proof"
+
+# Start WatchTower, run authenticated smoke, close to tray, fully exit.
+# Only after a full stop, verify the same DB against the original baseline.
+python .\tools\verify_watchtower_db.py verify --db "$Db" --proof "$Proof"
+```
+
+The tool opens the **existing database with SQLite `mode=ro`**, checks integrity with `quick_check`, and examines a fixed allowlist. Its proof contains only salted per-row cryptographic fingerprints and counts, never plaintext values or PAT/bridge credentials. It fails if required tables/columns are missing or if an earlier record or protected field disappears/changes. **Additive polling rows and evolving Run/Attempt statuses are allowed.** A changed manual assignment, registry identity, alias, head SHA, historical Run/Attempt identity, notification dedupe key, or workflow rule fails the proof. Neither a missing DB nor an existing proof is overwritten. Exit code `0` means the examined row-preservation invariants passed; `1` indicates mismatch or missing evidence.
+
+Treat the proof as **private local metadata**: do not commit or upload it or share the database. Only share pass/fail totals in the acceptance record. This comparison is evidence of row retention across the test window, **not a transaction-level SQLite audit or proof of no unexpected new rows**. If a mismatch occurs, stop P1, preserve the backup, and investigate before any further migration/restart.
+
 ## Additional Windows CI gates (not user's live installation)
 
 The Windows GitHub runner now executes:
@@ -78,7 +101,7 @@ For exact Run verification, **the script requires an explicitly supplied Reposit
 - [ ] Confirm a Project-wide workflow is not converted into track-owned CI and unrelated Work Track results are not reused.
 - [ ] Confirm unassigned/conflict, stale, GitHub poll/auth error and cancelled/timed-out states fail closed. If not reproducible live, cite deterministic Rust fixture/test instead and mark the **live case unobserved**.
 - [ ] Confirm an offline/network failure or port collision leads to `WATCHTOWER_UNAVAILABLE` in the **Autopilot client**; WatchTower alone cannot prove the client's decision.
-- [ ] Independently compare the original and post-test DB for Project/Repository/Track IDs, aliases, manual assignments, historical runs/attempts, and notification dedupe records; allow legitimate additive poll writes. Do not compare raw SQLite file hashes during active polling.
+- [ ] Run the **read-only DB preservation proof** before and after the same installed-app restart, with the process fully exited both times. Verify all protected rows retained; investigate any fail before proceeding. A separate restorable backup remains mandatory.
 - [ ] Confirm no token/PAT is present in console output, JSON reports, application logs, or committed artifacts.
 - [ ] Record any actual Windows notification behavior separately from deterministic notification dedupe tests.
 
