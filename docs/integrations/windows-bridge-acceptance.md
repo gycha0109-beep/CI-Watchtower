@@ -4,9 +4,9 @@ The **installed WatchTower app**, not CI's Windows runner, must pass this gate. 
 
 ## Baseline and provenance
 
-- Starting source baseline: WatchTower v0.3.39, \`main\` \`0d28e4e116c5d1c41ddd099c391734bd8d059055\` after PR #58.
+- Starting source baseline: WatchTower v0.3.39, `main` `0d28e4e116c5d1c41ddd099c391734bd8d059055` after PR #58.
 - Actual executing installer commit/build, Windows account, date, and GitHub PR/Head SHA must be recorded in the **private** acceptance notes at execution time. Do not treat the starting baseline as the live installed build.
-- The local HTTP contract is [development-autopilot.md](development-autopilot.md) v1.0. The account-specific Windows credential target is \`development-autopilot-bridge-v1.ci-watchtower\` (keyring 3 Windows-native maps \`account.service\`).
+- The local HTTP contract is [development-autopilot.md](development-autopilot.md) v1.0. The account-specific Windows credential target is `development-autopilot-bridge-v1.ci-watchtower` (keyring 3 Windows-native maps `account.service`).
 - Do **not** run a credential export or paste the token into the terminal. The script reads it from the OS and does not print or write it.
 - The script never claims that HTTP responses verify all GitHub required checks, a current PR Head SHA, approval policy, or actual AI/PR execution permission.
 
@@ -16,34 +16,34 @@ The **installed WatchTower app**, not CI's Windows runner, must pass this gate. 
 2. Fully exit WatchTower (not just close to tray), then take a verified, restorable copy of its existing SQLite database and related WAL/SHM files with the app stopped. Record the real app data path rather than guessing it. Do not reset the DB.
 3. Record an existing run's **repository ID**, **GitHub Run ID**, **current PR Head SHA**, and **latest Run Attempt** from GitHub. A SHA from a prior PR revision is not acceptable.
 4. Start WatchTower under the **same Windows user** that will run the script and Autopilot. Confirm the GitHub PAT is still usable in the WatchTower UI without reading/exporting the PAT.
-5. Confirm port \`127.0.0.1:48765\` is free before starting, or identify the owner of a collision. Do not kill unknown listeners.
+5. Confirm port `127.0.0.1:48765` is free before starting, or identify the owner of a collision. Do not kill unknown listeners.
 6. Use Windows PowerShell with the script checked out/downloaded from the exact tested commit. Do not execute arbitrary remote script content.
 
 ## Live invocation (PowerShell, repository root)
 
 Capture the non-secret identity baseline while WatchTower is running:
 
-\`\`\`powershell
-.\tools\Test-WatchTowerBridge.ps1 -Mode Online \`
-  -RepositoryId 2 -RunId 12345 \`
-  -HeadSha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -Attempt 1 \`
-  -BaselinePath "$env:TEMP\watchtower-p1-baseline.json" -WriteBaseline \`
+```powershell
+.\tools\Test-WatchTowerBridge.ps1 -Mode Online `
+  -RepositoryId 2 -RunId 12345 `
+  -HeadSha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -Attempt 1 `
+  -BaselinePath "$env:TEMP\watchtower-p1-baseline.json" -WriteBaseline `
   -ReportPath "$env:TEMP\watchtower-p1-online.json"
-\`\`\`
+```
 
-**Replace all sample IDs/SHA/Attempt with current real evidence.** Optionally add \`-TrackKey ops\` only when the source evidence establishes that exact Work Track; Project-wide CI responsibility is a separate dimension.
+**Replace all sample IDs/SHA/Attempt with current real evidence.** Optionally add `-TrackKey ops` only when the source evidence establishes that exact Work Track; Project-wide CI responsibility is a separate dimension.
 
-While WatchTower remains running, close its window to the tray and run the same \`-Mode Online\` command **without** \`-WriteBaseline\`. Confirm that authenticated access remains available and stable IDs/keys compare. This does not test OS notification delivery.
+While WatchTower remains running, close its window to the tray and run the same `-Mode Online` command **without** `-WriteBaseline`. Confirm that authenticated access remains available and stable IDs/keys compare. This does not test OS notification delivery.
 
 Fully exit WatchTower and verify that a local request is no longer served:
 
-\`\`\`powershell
+```powershell
 .\tools\Test-WatchTowerBridge.ps1 -Mode Offline -ReportPath "$env:TEMP\watchtower-p1-stopped.json"
-\`\`\`
+```
 
-Start WatchTower again as the **same OS account**, then repeat the original online command **without** \`-WriteBaseline\`. This validates reuse of the existing OS credential and non-destructive Project / Repository / Track identity. A separate DB-level comparison is still necessary for aliases, manual assignments, notification dedupe, and retained run history because v1 bridge does not expose all those tables.
+Start WatchTower again as the **same OS account**, then repeat the original online command **without** `-WriteBaseline`. This validates reuse of the existing OS credential and non-destructive Project / Repository / Track identity. A separate DB-level comparison is still necessary for aliases, manual assignments, notification dedupe, and retained run history because v1 bridge does not expose all those tables.
 
-The process returns \`0\` when its executable probes pass, \`1\` on failure, and \`2\` when a live Run/Repository probe is skipped. A zero exit code **does not** mean the entire P1 gate has passed; it means only the probes executed by this invocation passed.
+The process returns `0` when its executable probes pass, `1` on failure, and `2` when a live Run/Repository probe is skipped. A zero exit code **does not** mean the entire P1 gate has passed; it means only the probes executed by this invocation passed.
 
 ## What the automated live script actually checks
 
@@ -51,10 +51,10 @@ The process returns \`0\` when its executable probes pass, \`1\` on failure, and
 |---|---|---|
 | OS credential | Bridge token read from current Windows Credential Manager and format checked | Does not expose value or test another Windows account |
 | Auth / locality | No credential or wrong credential -> 401, nonmatching Host / any Origin -> 403 | No browser CORS bypass assumption |
-| Health | Authorized 200, contract 1.0, \`Cache-Control: no-store\` | Listener liveness, not GitHub freshness |
+| Health | Authorized 200, contract 1.0, `Cache-Control: no-store` | Listener liveness, not GitHub freshness |
 | Registry | Project / Repository / Track identities read, baseline comparison possible | Alias and dedupe tables intentionally not in API |
-| Runs list | Repository-scoped 200, \`completeCoverage=false\`, all \`safeToAdvance=false\` | Empty list is never a required-check PASS |
-| Exact run | Explicit Head SHA + latest Attempt match -> \`targetVerified=true\`; always \`safeToAdvance=false\` | Caller must independently prove current PR SHA and required checks |
+| Runs list | Repository-scoped 200, `completeCoverage=false`, all `safeToAdvance=false` | Empty list is never a required-check PASS |
+| Exact run | Explicit Head SHA + latest Attempt match -> `targetVerified=true`; always `safeToAdvance=false` | Caller must independently prove current PR SHA and required checks |
 | Contradictions | Different SHA -> 409, different Attempt -> 409, nonexistent Run -> 404 | Not a green status |
 | Lifecycle | Tray preserves listener; process exit -> unavailable; restart preserves credential and identity | Credential rotation / corrupt DB must be reported |
 | CI state | Current queued/running/success/failure/cancelled/timed_out etc. only when actually observed | Deterministic Rust fixtures cover unreproducible cases |
@@ -68,7 +68,7 @@ For exact run verification the script uses a supplied run ID or, when omitted, o
 - [ ] Confirm a real PR's current Head SHA and latest Attempt match both GitHub and bridge; queued/running/completed transitions and work association are correctly represented.
 - [ ] Confirm a Project-wide workflow is not converted into track-owned CI and unrelated Work Track results are not reused.
 - [ ] Confirm unassigned/conflict, stale, GitHub poll/auth error and cancelled/timed-out states fail closed. If not reproducible live, cite deterministic Rust fixture/test instead and mark the **live case unobserved**.
-- [ ] Confirm an offline/network failure or port collision leads to \`WATCHTOWER_UNAVAILABLE\` in the **Autopilot client**; WatchTower alone cannot prove the client's decision.
+- [ ] Confirm an offline/network failure or port collision leads to `WATCHTOWER_UNAVAILABLE` in the **Autopilot client**; WatchTower alone cannot prove the client's decision.
 - [ ] Independently compare the original and post-test DB for Project/Repository/Track IDs, aliases, manual assignments, historical runs/attempts, and notification dedupe records; allow legitimate additive poll writes. Do not compare raw SQLite file hashes during active polling.
 - [ ] Confirm no token/PAT is present in console output, JSON reports, application logs, or committed artifacts.
 - [ ] Record any actual Windows notification behavior separately from deterministic notification dedupe tests.
