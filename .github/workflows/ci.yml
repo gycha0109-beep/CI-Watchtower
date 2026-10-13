@@ -57,14 +57,17 @@ jobs:
         run: |
           $tokens = $null
           $parseErrors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path 'tools/Test-WatchTowerBridge.ps1').Path,
-            [ref]$tokens, [ref]$parseErrors
-          ) | Out-Null
-          if ($parseErrors.Count -gt 0) {
-            $parseErrors | ForEach-Object { Write-Error $_.ToString() }
-            exit 1
+          foreach ($script in @('tools/Test-WatchTowerBridge.ps1', 'tools/Test-WatchTowerPackagedExe.ps1')) {
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script).Path,
+              [ref]$tokens, [ref]$parseErrors
+            ) | Out-Null
+            if ($parseErrors.Count -gt 0) {
+              $parseErrors | ForEach-Object { Write-Error $_.ToString() }
+              exit 1
+            }
           }
+
 
       - name: Execute bridge credential decoder regression
         shell: pwsh
@@ -80,6 +83,14 @@ jobs:
 
       - name: Build Windows installer
         run: npm run tauri build
+
+      - name: Smoke actual packaged Windows EXE bridge lifecycle
+        shell: pwsh
+        run: |
+          & .\tools\Test-WatchTowerPackagedExe.ps1 `
+            -Executable 'src-tauri/target/release/ci-watchtower.exe' `
+            -SmokeScript 'tools/Test-WatchTowerBridge.ps1'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload installer artifacts
         if: success()
