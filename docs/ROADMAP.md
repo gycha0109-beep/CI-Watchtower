@@ -105,7 +105,7 @@ P1~P3가 **지금의 주 작업축**이다. P4~P6는 장기 계획이며 앞 단
 
 **Exit:** 설치된 Windows에서 정상 연결 + 인증 거부 + 재시작/실패 복구의 증거가 있고 **기존 데이터가 보존**됨. 사용자 OS 실행 권한이 없어 수행하지 못한 항목은 **EXTERNAL VALIDATION REQUIRED**로 남긴다. 추측으로 PASS 처리 금지.
 
-**P1 검증 도구 (실행 준비):** [Windows bridge acceptance](integrations/windows-bridge-acceptance.md) 및 `tools/Test-WatchTowerBridge.ps1`. 인증/HTTP 오류·실 Run SHA/Attempt·트레이/종료/재시작·Registry identity baseline을 사용자 Windows에서 검사한다. Rust HTTP 계약 회귀·실제 loopback TCP/Windows CI의 격리된 Credential Manager canary·PowerShell 구문 검증은 CI에서 수행하지만 사용자의 Credential Manager·PAT·기존 DB 복구를 대체하지 않는다. **실사용 증거가 없으면 P1은 `CODE COMPLETE · LIVE PENDING`으로 유지한다.**
+**P1 검증 도구 (실행 준비):** [Windows bridge acceptance](integrations/windows-bridge-acceptance.md) 및 `tools/Test-WatchTowerBridge.ps1`. 인증/HTTP 오류·실 Run SHA/Attempt·트레이/종료/재시작·Registry identity baseline을 사용자 Windows에서 검사한다. Rust HTTP 계약 회귀·실제 loopback TCP·Windows CI의 격리된 Credential Manager canary·빌드된 Tauri EXE 실행/인증/중지/재시작 smoke·PowerShell 구문 검증은 CI에서 수행하지만 사용자의 Credential Manager·PAT·기존 DB 복구를 대체하지 않는다. **실사용 증거가 없으면 P1은 `CODE COMPLETE · LIVE PENDING`으로 유지한다.**
 
 **SQLite 보존 Acceptance:** `tools/verify_watchtower_db.py`는 종료된 기존 DB를 읽기 전용으로 검사하고, Registry·Alias·수동 귀속·Run/Attempt·notification dedupe의 기존 레코드가 재실행 이후에도 유지되는지 검증한다. CI의 합성 DB fixture는 도구 자체의 검증이지 사용자의 실제 DB 무결성 증거가 아니다. 사용자 PC에서 사전/사후 비교할 때까지 P1 종료 조건은 미충족이다.
 
