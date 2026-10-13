@@ -796,7 +796,10 @@ mod tests {
 
         task.abort();
         let _ = task.await;
-        let stopped = client.get(&url).send().await;
-        assert!(stopped.is_err(), "fully stopped listener must not serve stale health");
+        // reqwest can reuse a live keep-alive connection from an Axum task that
+        // outlives the listener. Probe a NEW TCP socket instead of its connection pool.
+        // The installed desktop's full process exit is a separate Windows live gate.
+        let stopped = tokio::net::TcpStream::connect(address).await;
+        assert!(stopped.is_err(), "a stopped listener must reject a new TCP connection");
     }
 }
