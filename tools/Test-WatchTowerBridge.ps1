@@ -161,11 +161,11 @@ try {
             Add-Probe 'keyring-utf16le-token-decoding' $(if ($decoded -ceq $sample) { 'PASS' } else { 'FAIL' })
             $rejected = $false
             try { [WatchTowerCredentialReader]::DecodePassword([System.Text.Encoding]::UTF8.GetBytes($sample)) | Out-Null }
-            catch [System.InvalidOperationException] { $rejected = $true }
+            catch { $rejected = $_.Exception.ToString().Contains('Expected a 128-byte UTF-16LE bridge credential') }
             Add-Probe 'utf8-token-blob-rejected' $(if ($rejected) { 'PASS' } else { 'FAIL' })
             $rejected = $false
             try { [WatchTowerCredentialReader]::DecodePassword([System.Text.Encoding]::Unicode.GetBytes(('g' * 64))) | Out-Null }
-            catch [System.InvalidOperationException] { $rejected = $true }
+            catch { $rejected = $_.Exception.ToString().Contains('Invalid bridge credential encoding or format') }
             Add-Probe 'non-hex-token-rejected' $(if ($rejected) { 'PASS' } else { 'FAIL' })
         }
         finally { [System.Array]::Clear($encoded, 0, $encoded.Length) }
