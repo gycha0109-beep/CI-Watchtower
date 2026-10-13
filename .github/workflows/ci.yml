@@ -64,6 +64,12 @@ jobs:
           & .\tools\Test-WatchTowerBridge.ps1 -Mode SelfTest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Validate isolated Windows Credential Manager roundtrip
+        shell: pwsh
+        run: |
+          & .\tools\Test-WatchTowerBridge.ps1 -Mode WindowsCanary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build Windows installer
         run: npm run tauri build
 
