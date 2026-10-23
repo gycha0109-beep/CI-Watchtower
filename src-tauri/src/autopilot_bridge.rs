@@ -903,4 +903,130 @@ mod tests {
         let stopped = tokio::net::TcpStream::connect(address).await;
         assert!(stopped.is_err(), "a stopped listener must reject a new TCP connection");
     }
+
+    #[test]
+    fn multi_pr_multi_repo_integration_observation_never_claims_baseline_verification() {
+        assert_eq!(ci_kind(Some(".github/workflows/ci.yml")),"general");
+        assert_eq!(ci_kind(Some(".github/workflows/ci-integration.yml")),"integration");
+        assert_eq!(ci_kind(Some(".github/workflows/production-calculation-container.yml")),"other");
+        assert_eq!(ci_kind(None),"unknown");
+        let a="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(integration_candidate(Some(".github/workflows/ci-integration.yml"),
+            &format!("Integration PR #123 at {a}")),Some((123,a.to_string())));
+        assert!(integration_candidate(Some(".github/workflows/ci.yml"),
+            &format!("Integration PR #123 at {a}")).is_none());
+        assert!(integration_candidate(Some(".github/workflows/ci-integration.yml"),
+            "Integration PR #0 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_none());
+        assert!(integration_candidate(Some(".github/workflows/ci-integration.yml"),
+            "Integration PR #123 at not-a-sha").is_none());
+        let suffix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!("watchtower-ci-pr-fixture-{}-{suffix}.sqlite3",std::process::id()));
+        init_db(&path).unwrap();
+        let conn=Connection::open(&path).unwrap();
+        let now=Utc::now().to_rfc3339();
+        conn.execute("INSERT INTO projects(name,project_key,created_at,updated_at) VALUES('P','p',?,?)",
+            params![now,now]).unwrap();
+        let project_id=conn.last_insert_rowid();
+        let mut repos=Vec::new();
+        for repo in ["test/myeongha","test/saju"] {
+            conn.execute("INSERT INTO monitored_repositories(project_id,repo,enabled,created_at,updated_at,last_polled_at,last_successful_poll_at)
+                VALUES(?,?,1,?,?,?,?)",params![project_id,repo,now,now,now,now]).unwrap();
+            repos.push(conn.last_insert_rowid());
+        }
+        let c="cccccccccccccccccccccccccccccccccccccccc";
+        let b="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut run = |id:i64,repo:i64,workflow:&str,title:&str,head:&str,
+                        prs:Vec<i64>,attempt:i64,status:&str,conclusion:Option<&str>| {
+            let github = GithubRun {
+                id,workflow_id:if workflow.contains("integration") { 2 } else { 1 },
+                name:if workflow.contains("integration") { "CI Integration".into() } else { "CI".into() },
+                path:Some(format!(".github/workflows/{workflow}")),display_title:Some(title.into()),
+                event:if workflow.contains("integration") { "workflow_dispatch".into() } else { "pull_request".into() },
+                head_branch:Some("main".into()),head_sha:head.into(),run_number:1,
+                run_attempt:attempt,status:status.into(),conclusion:conclusion.map(str::to_string),
+                html_url:format!("https://example.invalid/runs/{id}"),
+                created_at:now.clone(),run_started_at:Some(now.clone()),updated_at:now.clone(),
+                pull_requests:prs.into_iter().map(|number| GithubPullRef { number }).collect()
+            };
+            upsert_run(&conn,repo,&github,&now).unwrap();
+        };
+        run(91001,repos[0],"ci.yml","CI #123",a,vec![123],1,"completed",Some("success"));
+        run(91002,repos[0],"ci-integration.yml",&format!("Integration PR #123 at {a}"),
+            c,vec![],1,"completed",Some("success"));
+        run(91003,repos[0],"ci-integration.yml",&format!("Integration PR #124 at {b}"),
+            c,vec![],1,"queued",None);
+        run(91004,repos[0],"ci.yml","CI #123 rerun",a,vec![123],2,"completed",Some("failure"));
+        conn.execute("INSERT INTO run_attempts(run_id,run_attempt,status,conclusion,updated_at)
+            VALUES(91004,1,'completed','success',?)",params![now]).unwrap();
+        run(91005,repos[1],"ci.yml","Saju CI #123",a,vec![123],1,"completed",Some("success"));
+        run(91006,repos[0],"ci-integration.yml",&format!("Integration PR #123 at {a}"),
+            c,vec![124],1,"completed",Some("success"));
+        let read=read_connection(&path).unwrap();
+        let scope=Scope {repository_id:Some(repos[0]),pr_number:Some(123),limit:Some(100),..Scope::default()};
+        let result=query_runs(&read,&scope,None).unwrap();
+        let ids:Vec<i64>=result.iter().map(|r|r.run_id).collect();
+        assert!(ids.contains(&91001) && ids.contains(&91002) && ids.contains(&91004));
+        assert!(!ids.contains(&91003) && !ids.contains(&91005) && !ids.contains(&91006));
+        let integration=result.iter().find(|r|r.run_id==91002).unwrap();
+        assert_eq!(integration.ci_kind,"integration");
+        assert_eq!(integration.pr_number,Some(123));
+        assert_eq!(integration.head_sha,c); // dispatch run SHA is NOT the candidate PR HEAD
+        assert_eq!(integration.integration_candidate_head_sha.as_deref(),Some(a));
+        assert_eq!(integration.integration_candidate_base_sha,None);
+        assert!(!integration.integration_baseline_verified);
+        assert_eq!(integration.pr_identity_source,"integration_title");
+        assert!(!integration.safe_to_advance);
+        let general=result.iter().find(|r|r.run_id==91001).unwrap();
+        assert_eq!(general.ci_kind,"general");
+        assert_eq!(general.pr_identity_source,"github_pull_requests");
+        assert_eq!(general.responsibility_kind,"unknown"); // no ownership invented
+        assert_eq!(result.iter().find(|r|r.run_id==91004).unwrap().ci_state,"FAILURE");
+        let missing=query_runs(&read,&Scope{repository_id:Some(repos[0]),pr_number:Some(999),
+            ..Scope::default()},None).unwrap();
+        assert!(missing.is_empty()); // never treat empty as green
+        let cross=query_runs(&read,&Scope{repository_id:Some(repos[1]),pr_number:Some(123),
+            ..Scope::default()},None).unwrap();
+        assert_eq!(cross.len(),1);
+        assert_eq!(cross[0].run_id,91005);
+        let conflicted=query_runs(&read,&Scope{repository_id:Some(repos[0]),..Scope::default()},Some(91006)).unwrap();
+        assert_eq!(conflicted[0].decision_state,"CONFLICT");
+        assert_eq!(conflicted[0].pr_number,None);
+        drop(read);
+        drop(run);
+        drop(conn);
+        let _=std::fs::remove_file(&path);
+        let _=std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _=std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn scoped_job_endpoint_requires_pr_sha_attempt_and_never_fetches_unscoped() {
+        use tower::ServiceExt;
+        let app=router(Arc::new(BridgeState {
+            db_path:PathBuf::from("not-accessed-for-invalid-scope.sqlite3"),
+            token:"test-token".into()
+        }));
+        for uri in [
+            "/v1/runs/100/jobs",
+            "/v1/runs/100/jobs?repository_id=1",
+            "/v1/runs/100/jobs?repository_id=1&head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&attempt=1",
+        ] {
+            let resp=app.clone().oneshot(axum::http::Request::builder().uri(uri)
+                .header(HOST,format!("127.0.0.1:{PORT}"))
+                .header(AUTHORIZATION,"Bearer test-token")
+                .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(resp.status(),StatusCode::BAD_REQUEST, "{uri}");
+        }
+        let skipped:job_telemetry::GithubJob = serde_json::from_value(json!({
+            "id":8,"name":"CI Tests (2/16)","status":"completed","conclusion":"skipped",
+            "started_at":null,"completed_at":null,"runner_id":null,"runner_name":null,
+            "steps":[{"name":"Test","number":1,"status":"completed","conclusion":"skipped",
+                      "started_at":null,"completed_at":null}]
+        })).unwrap();
+        let value=serde_json::to_value(skipped).unwrap();
+        assert_eq!(value["conclusion"],"skipped");
+        assert_eq!(value["steps"][0]["conclusion"],"skipped");
+        assert_ne!(value["conclusion"],"success");
+    }
 }
