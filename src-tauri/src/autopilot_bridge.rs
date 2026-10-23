@@ -339,15 +339,18 @@ fn annotate_superseded_runs(runs: &mut [BridgeRun]) {
                 newer_order_verified(&runs[old_idx], &runs[new_idx])
         });
         let Some(idx) = replacement else { continue; };
-        let candidate = &runs[idx];
-        if candidate.repository_enabled &&
-            candidate.latest_known_attempt == candidate.run_attempt &&
-            candidate.evidence_state == "FRESH" &&
-            candidate.decision_state == candidate.ci_state &&
-            matches!(candidate.ci_state, "SUCCESS" | "FAILURE" | "RUNNING" | "QUEUED")
-        {
+        let (successor_id, verified) = {
+            let candidate = &runs[idx];
+            (candidate.run_id,
+                candidate.repository_enabled &&
+                candidate.latest_known_attempt == candidate.run_attempt &&
+                candidate.evidence_state == "FRESH" &&
+                candidate.decision_state == candidate.ci_state &&
+                matches!(candidate.ci_state, "SUCCESS" | "FAILURE" | "RUNNING" | "QUEUED"))
+        };
+        if verified {
             runs[old_idx].historical_disposition = "SUPERSEDED";
-            runs[old_idx].superseded_by_run_id = Some(candidate.run_id);
+            runs[old_idx].superseded_by_run_id = Some(successor_id);
         }
     }
 }
