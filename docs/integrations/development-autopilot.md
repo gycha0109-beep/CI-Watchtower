@@ -194,6 +194,23 @@ Returns `{"contractVersion":"1.0","data":{"run":{...},"jobs":[{"id":1,"name":"CI
 - A PR has 0 or more general, integration or ancillary workflows. No integration run means `NOT_OBSERVED`, **not** `FAILURE`; Autopilot decides by phase and GitHub required checks whether it is required.
 - `safeToAdvance=false` remains true to its existing invariant; **never** auto-progress solely from `decisionState=SUCCESS` or a named `CI Integration Verify` job without the PR/SHA/base/required checks.
 
+### Cancelled Run supersession (additive historical metadata, W-01)
+
+A cancelled historical Run can be followed by another GitHub Actions Run on the **same repository, PR, workflow identity/path and tested candidate HEAD SHA**. Saju [PR #2704](https://github.com/gycha0109-beep/Saju/pull/2704) supplies an observed regression: PIE `39906779844` was cancelled and later PIE `39906837903` succeeded with the same candidate SHA.
+
+**New additive fields on Run DTOs:**
+
+- `historicalDisposition`: `SUPERSEDED` only for a cancelled Run when a newer, fresh, unambiguous, latest-attempt successor has been observed in the PR-scoped list. `UNRESOLVED` for a cancelled Run with no *proven* successor **in this observation**, and `NOT_APPLICABLE` for other conclusions. `UNRESOLVED` is **not** proof there is no later Run.
+- `supersededByRunId`: the verified successor Run ID for a `SUPERSEDED` historical record; `null` otherwise.
+
+These are **historical relationship annotations, not terminal CI conclusions**. Original `conclusion=cancelled`, `ciState=OTHER_TERMINAL`, immutable identity, Attempt, Job/Step history and `safeToAdvance=false` are unchanged. GitHub will continue showing the original cancelled X. There is no database rewrite or attempt to edit GitHub checks.
+
+The candidate identity is `headSha` for normal/other PR workflows (including PIE) and **`integrationCandidateHeadSha`** for an integration dispatch workflow. A newer Run must match the same unambiguous PR number, repository, workflow ID/path and candidate SHA. The newest matching successor is considered: `SUCCESS` / `FAILURE` / `QUEUED` / `RUNNING` can supersede old cancellation **only when** its latest Attempt, CI decision and freshness are verified. A newer stale/conflicting/unverified Run never licenses fallback to an older success. Incomplete PR history cannot prove the globally latest Run.
+
+For a **PR-scoped** `/v1/runs` list, annotations use the newest-first, bounded results returned by the query. Any newer successor to a **returned** cancelled Run appears earlier in that same prefix; this preserves the existing efficient `limit` behavior. A truncated or incomplete list never proves the absence of a newer Run. Single exact `/v1/runs/{id}` remains a raw historical lookup and does **not** claim complete supersession relationships; its cancelled Run normally reports `UNRESOLVED`. Other unscoped historical lists likewise do not claim the relation. Consumers must use a fresh PR-scoped listing and independently verify GitHub required checks/current PR HEAD before selecting an effective per-workflow result.
+
+**Important:** WatchTower still advertises `completeCoverage=false` and does not return PR-wide GREEN, run a recovery script, send messages, or approve a merge. The downstream Autopilot must combine actual latest Check Runs, branch/ruleset requirements, integration base evidence and the existing approval gate. PIE itself does not need workflow changes for this behavior.
+
 ### Multi-repository and lifecycle semantics
 
 - **MyeongHa:** `ci.yml` is standard PR verification and `ci-integration.yml` is separately admitted integration verification. Both can relate to the **same PR** without claiming the integration workflow is Track-owned.

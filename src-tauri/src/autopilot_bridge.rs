@@ -118,6 +118,11 @@ struct BridgeRun {
     freshness_limit_seconds: i64,
     target_verified: bool,
     safe_to_advance: bool,
+    // Observational history only: never overrides ci_state/decision_state or grants advance.
+    // SUPERSEDED requires a verified newer same-PR, same-candidate workflow Run.
+    // UNRESOLVED means that a cancelled Run has no proven replacement in this sample.
+    historical_disposition: &'static str,
+    superseded_by_run_id: Option<i64>,
 }
 
 fn api_error(status: StatusCode, code: &'static str) -> Response {
@@ -283,6 +288,73 @@ fn freshness(
     "FRESH"
 }
 
+// This is a relation between immutable historical records, not a CI conclusion.
+// Run lists are bounded and can never establish the complete required-check set.
+fn supersession_candidate(run: &BridgeRun) -> Option<&str> {
+    if run.ci_kind == "integration" {
+        run.integration_candidate_head_sha.as_deref()
+    } else {
+        Some(&run.head_sha)
+    }
+}
+
+fn same_pr_workflow_candidate(older: &BridgeRun, newer: &BridgeRun) -> bool {
+    let (Some(pr), Some(path), Some(candidate)) = (
+        older.pr_number,
+        older.workflow_path.as_deref(),
+        supersession_candidate(older),
+    ) else { return false; };
+    let trusted_pr_identity = |run: &BridgeRun| {
+        !run.pr_identity_conflict && !run.attribution_conflict &&
+        run.pr_identity_source != "unknown" && run.pr_identity_source != "conflict"
+    };
+    trusted_pr_identity(older) && trusted_pr_identity(newer) &&
+        newer.repository_id == older.repository_id &&
+        newer.repository == older.repository &&
+        newer.pr_number == Some(pr) &&
+        newer.workflow_id == older.workflow_id &&
+        newer.workflow_path.as_deref() == Some(path) &&
+        newer.ci_kind == older.ci_kind &&
+        supersession_candidate(newer)
+            .is_some_and(|head|head.eq_ignore_ascii_case(candidate))
+}
+
+fn newer_order_verified(older: &BridgeRun, newer: &BridgeRun) -> bool {
+    let parse = |value: &str| DateTime::parse_from_rfc3339(value).ok();
+    match (parse(&older.created_at), parse(&newer.created_at)) {
+        (Some(a), Some(b)) => b > a || (b == a && newer.run_id > older.run_id),
+        _ => false,
+    }
+}
+
+// The query's candidates are sorted descending by created_at + run_id.
+// A cancelled Run is superseded only when its newest OBSERVED successor is
+// independently eligible. Never fall back past a newer stale/failed Run to a
+// historical GREEN, and never treat absence in this limited list as success.
+fn annotate_superseded_runs(runs: &mut [BridgeRun]) {
+    for old_idx in 0..runs.len() {
+        if runs[old_idx].conclusion.as_deref() != Some("cancelled") { continue; }
+        let replacement = (0..old_idx).find(|&new_idx| {
+            same_pr_workflow_candidate(&runs[old_idx], &runs[new_idx]) &&
+                newer_order_verified(&runs[old_idx], &runs[new_idx])
+        });
+        let Some(idx) = replacement else { continue; };
+        let (successor_id, verified) = {
+            let candidate = &runs[idx];
+            (candidate.run_id,
+                candidate.repository_enabled &&
+                candidate.latest_known_attempt == candidate.run_attempt &&
+                candidate.evidence_state == "FRESH" &&
+                candidate.decision_state == candidate.ci_state &&
+                matches!(candidate.ci_state, "SUCCESS" | "FAILURE" | "RUNNING" | "QUEUED"))
+        };
+        if verified {
+            runs[old_idx].historical_disposition = "SUPERSEDED";
+            runs[old_idx].superseded_by_run_id = Some(successor_id);
+        }
+    }
+}
+
 fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Result<Vec<BridgeRun>> {
     let now = Utc::now();
     let (active, idle): (i64,i64) = conn.query_row(
@@ -415,6 +487,7 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
             &last_seen_at,freshness_limit_seconds,latest_known_attempt == run_attempt,
         );
         let ci = ci_state(&status, conclusion.as_deref());
+        let was_cancelled = conclusion.as_deref() == Some("cancelled");
         let conflict = resolution_status == "conflict" || pr_identity_conflict;
         let decision_state = if conflict { "CONFLICT" }
             else if work_track_id.is_some() && work_track_active == 0 { "UNKNOWN" }
@@ -438,8 +511,18 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
             target_verified:scope.head_sha.is_some() && scope.attempt == Some(run_attempt)
                 && latest_known_attempt == run_attempt,
             safe_to_advance:false,
+            historical_disposition:if was_cancelled {
+                "UNRESOLVED"
+            } else { "NOT_APPLICABLE" },
+            superseded_by_run_id:None,
         });
+        // Preserve #67's efficient bounded scan. Rows are ordered newest
+        // first, so any successor to a returned cancelled Run is already in
+        // this retained prefix; an older excluded row cannot replace it.
         if out.len() >= limit as usize { break; }
+    }
+    if scope.pr_number.is_some() && exact_run_id.is_none() {
+        annotate_superseded_runs(&mut out);
     }
     Ok(out)
 }
@@ -969,6 +1052,44 @@ mod tests {
         run(91005,repos[1],"ci.yml","Saju CI #123",a,vec![123],1,"completed",Some("success"));
         run(91006,repos[0],"ci-integration.yml",&format!("Integration PR #123 at {a}"),
             c,vec![124],1,"completed",Some("success"));
+
+        // Real-world-shaped regression: Saju PR #2704 ran PIE twice on the
+        // same candidate HEAD. Run 39906779844 was cancelled, while the later
+        // 39906837903 succeeded. Preserve the cancellation in history.
+        let pie_sha="dddddddddddddddddddddddddddddddddddddddd";
+        run(39906779844,repos[1],"pie-prospective.yml","PIE #2704",pie_sha,
+            vec![2704],1,"completed",Some("cancelled"));
+        run(39906837903,repos[1],"pie-prospective.yml","PIE #2704 rerun",pie_sha,
+            vec![2704],1,"completed",Some("success"));
+        // A later run from another SHA/PR/workflow cannot supersede the PIE.
+        run(39906837904,repos[1],"pie-prospective.yml","PIE different SHA",b,
+            vec![2704],1,"completed",Some("success"));
+        run(39906837905,repos[1],"pie-prospective.yml","PIE another PR",pie_sha,
+            vec![2705],1,"completed",Some("success"));
+        run(39906837906,repos[1],"ci.yml","CI same PR",pie_sha,
+            vec![2704],1,"completed",Some("success"));
+        // A newer cancelled Run cannot reuse the older successful Run.
+        run(39906837907,repos[1],"pie-prospective.yml","PIE #2706",pie_sha,
+            vec![2706],1,"completed",Some("success"));
+        run(39906837908,repos[1],"pie-prospective.yml","PIE #2706 cancelled",pie_sha,
+            vec![2706],1,"completed",Some("cancelled"));
+        // A new run with an unobserved newest attempt is NOT a replacement.
+        run(39906837909,repos[1],"pie-prospective.yml","PIE #2707 cancelled",pie_sha,
+            vec![2707],1,"completed",Some("cancelled"));
+        run(39906837910,repos[1],"pie-prospective.yml","PIE #2707 stale",pie_sha,
+            vec![2707],1,"completed",Some("success"));
+        conn.execute("INSERT INTO run_attempts(run_id,run_attempt,status,conclusion,updated_at)
+            VALUES(39906837910,2,'queued',NULL,?)",params![now]).unwrap();
+        // A successor's genuine failure or pending state is preserved, not
+        // collapsed into historical cancellation or mistaken for GREEN.
+        run(39906837911,repos[1],"pie-prospective.yml","PIE #2708 cancelled",pie_sha,
+            vec![2708],1,"completed",Some("cancelled"));
+        run(39906837912,repos[1],"pie-prospective.yml","PIE #2708 failed",pie_sha,
+            vec![2708],1,"completed",Some("failure"));
+        run(39906837913,repos[1],"pie-prospective.yml","PIE #2709 cancelled",pie_sha,
+            vec![2709],1,"completed",Some("cancelled"));
+        run(39906837914,repos[1],"pie-prospective.yml","PIE #2709 running",pie_sha,
+            vec![2709],1,"in_progress",None);
         let read=read_connection(&path).unwrap();
         let scope=Scope {repository_id:Some(repos[0]),pr_number:Some(123),limit:Some(100),..Scope::default()};
         let result=query_runs(&read,&scope,None).unwrap();
@@ -1006,6 +1127,55 @@ mod tests {
         let conflicted=query_runs(&read,&Scope{repository_id:Some(repos[0]),..Scope::default()},Some(91006)).unwrap();
         assert_eq!(conflicted[0].decision_state,"CONFLICT");
         assert_eq!(conflicted[0].pr_number,None);
+
+        let pie_scope=Scope{repository_id:Some(repos[1]),pr_number:Some(2704),
+            limit:Some(100),..Scope::default()};
+        let pie=query_runs(&read,&pie_scope,None).unwrap();
+        let cancelled=pie.iter().find(|r|r.run_id==39906779844).unwrap();
+        assert_eq!(cancelled.ci_kind,"other"); // no PIE-specific hardcode
+        assert_eq!(cancelled.conclusion.as_deref(),Some("cancelled"));
+        assert_eq!(cancelled.ci_state,"OTHER_TERMINAL");
+        assert_eq!(cancelled.historical_disposition,"SUPERSEDED");
+        assert_eq!(cancelled.superseded_by_run_id,Some(39906837903));
+        assert!(!cancelled.safe_to_advance);
+        let successful=pie.iter().find(|r|r.run_id==39906837903).unwrap();
+        assert_eq!(successful.ci_state,"SUCCESS");
+        assert_eq!(successful.historical_disposition,"NOT_APPLICABLE");
+        assert_eq!(successful.superseded_by_run_id,None);
+        // Even a cancelled job in history does not turn the newer PIE RED.
+        // Limited results do not claim complete required-check coverage.
+        let single=query_runs(&read,&Scope{repository_id:Some(repos[1]),
+            pr_number:Some(2706),limit:Some(1),..Scope::default()},None).unwrap();
+        assert_eq!(single.len(),1);
+        assert_eq!(single[0].run_id,39906837908);
+        assert_eq!(single[0].historical_disposition,"UNRESOLVED");
+        assert_eq!(single[0].superseded_by_run_id,None);
+        assert_eq!(single[0].ci_state,"OTHER_TERMINAL");
+        // PR #2707's newest run is stale due to a newer unobserved attempt:
+        // the older cancellation must remain unresolved.
+        let stale=query_runs(&read,&Scope{repository_id:Some(repos[1]),
+            pr_number:Some(2707),limit:Some(100),..Scope::default()},None).unwrap();
+        assert_eq!(stale.iter().find(|r|r.run_id==39906837909).unwrap()
+            .historical_disposition,"UNRESOLVED");
+        assert_eq!(stale.iter().find(|r|r.run_id==39906837910).unwrap()
+            .decision_state,"STALE");
+        for (pr,old_id,new_id,wanted_state) in [
+            (2708,39906837911,39906837912,"FAILURE"),
+            (2709,39906837913,39906837914,"RUNNING"),
+        ] {
+            let history=query_runs(&read,&Scope{repository_id:Some(repos[1]),
+                pr_number:Some(pr),limit:Some(10),..Scope::default()},None).unwrap();
+            assert_eq!(history.iter().find(|r|r.run_id==old_id).unwrap()
+                .superseded_by_run_id,Some(new_id));
+            assert_eq!(history.iter().find(|r|r.run_id==new_id).unwrap()
+                .ci_state,wanted_state);
+        }
+        // The exact single-Run API is raw observation, not a historical
+        // completeness claim. List-level supersession never edits stored rows.
+        let exact=query_runs(&read,&Scope{repository_id:Some(repos[1]),
+            pr_number:Some(2704),..Scope::default()},Some(39906779844)).unwrap();
+        assert_eq!(exact[0].ci_state,"OTHER_TERMINAL");
+        assert_eq!(exact[0].historical_disposition,"UNRESOLVED");
         drop(read);
         drop(run);
         drop(conn);
