@@ -30,6 +30,7 @@ struct Scope {
     project_id: Option<i64>,
     repository_id: Option<i64>,
     track_key: Option<String>,
+    pr_number: Option<i64>,
     head_sha: Option<String>,
     attempt: Option<i64>,
     limit: Option<i64>,
@@ -78,6 +79,15 @@ struct BridgeRun {
     workflow_id: i64,
     workflow_name: String,
     workflow_path: Option<String>,
+    ci_kind: &'static str,
+    ci_kind_source: &'static str,
+    pr_number: Option<i64>,
+    observed_pr_numbers: Vec<i64>,
+    pr_identity_source: &'static str,
+    pr_identity_conflict: bool,
+    integration_candidate_head_sha: Option<String>,
+    integration_candidate_base_sha: Option<String>,
+    integration_baseline_verified: bool,
     head_sha: String,
     head_branch: Option<String>,
     run_attempt: i64,
@@ -141,6 +151,7 @@ fn validate_scope(scope: &Scope, require_repo: bool) -> std::result::Result<(), 
     }
     if scope.project_id.is_some_and(|v| v <= 0)
         || scope.repository_id.is_some_and(|v| v <= 0)
+        || scope.pr_number.is_some_and(|v| v <= 0)
         || scope.attempt.is_some_and(|v| v <= 0)
         || scope.limit.is_some_and(|v| !(1..=100).contains(&v))
         || scope.track_key.as_deref().is_some_and(|v| !valid_key(v))
@@ -226,6 +237,29 @@ fn ci_state(status: &str, conclusion: Option<&str>) -> &'static str {
     }
 }
 
+// A CI class is established by the workflow file, never just the human-readable name.
+// Producers with other naming conventions remain "other" instead of guessed integration.
+fn ci_kind(path: Option<&str>) -> &'static str {
+    match path.and_then(|p| p.strip_prefix(".github/workflows/")) {
+        Some("ci.yml" | "ci.yaml") => "general",
+        Some("ci-integration.yml" | "ci-integration.yaml") => "integration",
+        Some(_) => "other",
+        None => "unknown",
+    }
+}
+
+// Only the known integration workflow run-name contract may carry candidate identity.
+// Never infer a baseline SHA from today's PR base: the pinned admission base is not persisted.
+fn integration_candidate(path: Option<&str>, title: &str) -> Option<(i64, String)> {
+    if ci_kind(path) != "integration" { return None; }
+    let value = title.strip_prefix("Integration PR #")?;
+    let (number, head) = value.split_once(" at ")?;
+    if number.starts_with('0') || !number.bytes().all(|b| b.is_ascii_digit()) { return None; }
+    let number = number.parse::<i64>().ok().filter(|v| *v > 0)?;
+    if head.len()!=40 || !head.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+    Some((number, head.to_ascii_lowercase()))
+}
+
 fn freshness(
     now: DateTime<Utc>,
     enabled: bool,
@@ -269,7 +303,8 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
                           WHERE attempt.run_id=wr.run_id),0)),
                 COALESCE(CASE WHEN ra.manual=1 THEN assigned.active
                               WHEN assoc.run_id IS NOT NULL THEN work.active
-                              ELSE assigned.active END,0)
+                              ELSE assigned.active END,0),
+                wr.pr_numbers_json, wr.display_title
          FROM workflow_runs wr
          JOIN monitored_repositories mr ON mr.id=wr.repository_id
          JOIN projects p ON p.id=mr.project_id
@@ -286,11 +321,17 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
                 (ra.manual=1 AND assigned.track_key=?5)
                 OR (ra.manual IS NOT 1 AND work.track_key=?5)
                 OR (assoc.run_id IS NULL AND assigned.track_key=?5))
+           AND (?6 IS NULL
+                OR EXISTS (SELECT 1 FROM json_each(wr.pr_numbers_json) pr WHERE pr.value=?6)
+                OR (wr.workflow_path IN ('.github/workflows/ci-integration.yml','.github/workflows/ci-integration.yaml')
+                    AND wr.display_title LIKE ?7))
          ORDER BY wr.created_at DESC,wr.run_id DESC
-         LIMIT ?6",
+         LIMIT ?8",
     )?;
+    let candidate_title_prefix = scope.pr_number.map(|pr| format!("Integration PR #{pr} at %"));
     let rows = stmt.query_map(
-        params![scope.repository_id, scope.project_id, exact_run_id, scope.head_sha, scope.track_key, limit],
+        params![scope.repository_id, scope.project_id, exact_run_id, scope.head_sha,
+                scope.track_key, scope.pr_number, candidate_title_prefix, limit],
         |r| {
             Ok((
                 r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,
@@ -305,6 +346,7 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
                 r.get::<_,Option<String>>(23)?,r.get::<_,Option<i64>>(24)?,
                 r.get::<_,Option<i64>>(25)?,r.get::<_,Option<String>>(26)?,
                 r.get::<_,Option<String>>(27)?,r.get::<_,i64>(28)?,r.get::<_,i64>(29)?,
+                r.get::<_,String>(30)?,r.get::<_,String>(31)?,
             ))
         }
     )?;
@@ -314,7 +356,25 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
             workflow_name,workflow_path,head_sha,head_branch,run_attempt,status,conclusion,
             resolution_status,created_at,updated_at,last_seen_at,last_polled_at,
             last_success,last_error,assigned_id,assigned_key,assignment_source,manual,
-            association_id,association_key,association_source,latest_known_attempt,work_track_active) = row?;
+            association_id,association_key,association_source,latest_known_attempt,work_track_active,
+            observed_pr_json,display_title) = row?;
+        let observed_pr_numbers:Vec<i64> = serde_json::from_str(&observed_pr_json).unwrap_or_default();
+        let candidate = integration_candidate(workflow_path.as_deref(),&display_title);
+        let ci_kind = ci_kind(workflow_path.as_deref());
+        let candidate_pr = candidate.as_ref().map(|v|v.0);
+        let pr_identity_conflict = observed_pr_numbers.len()>1
+            || candidate_pr.is_some_and(|pr| !observed_pr_numbers.is_empty() && !observed_pr_numbers.contains(&pr));
+        let pr_number = if pr_identity_conflict { None } else {
+            candidate_pr.or_else(|| observed_pr_numbers.first().copied())
+        };
+        let pr_identity_source = if pr_identity_conflict { "conflict" }
+            else if candidate_pr.is_some() && !observed_pr_numbers.is_empty() { "github_and_integration_title" }
+            else if candidate_pr.is_some() { "integration_title" }
+            else if !observed_pr_numbers.is_empty() { "github_pull_requests" }
+            else { "unknown" };
+        // The GitHub action's pull_requests[].head.sha may be today's PR head,
+        // not the run's historical head. We never substitute it for wr.head_sha.
+        if scope.pr_number.is_some_and(|v|pr_number!=Some(v)) { continue; }
         let manual = manual == Some(1);
         let work_track_id = if manual { assigned_id } else { association_id.or(assigned_id) };
         let work_track_key = if manual { assigned_key.clone() } else { association_key.or(assigned_key.clone()) };
@@ -349,14 +409,18 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
             &last_seen_at,freshness_limit_seconds,latest_known_attempt == run_attempt,
         );
         let ci = ci_state(&status, conclusion.as_deref());
-        let conflict = resolution_status == "conflict";
+        let conflict = resolution_status == "conflict" || pr_identity_conflict;
         let decision_state = if conflict { "CONFLICT" }
             else if work_track_id.is_some() && work_track_active == 0 { "UNKNOWN" }
             else if evidence_state != "FRESH" { evidence_state }
             else { ci };
         out.push(BridgeRun {
             run_id,project_id,project_key,repository_id,repository,repository_enabled:enabled!=0,
-            workflow_id,workflow_name,workflow_path,head_sha,head_branch,run_attempt,
+            workflow_id,workflow_name,workflow_path,ci_kind,ci_kind_source:"workflow_path",
+            pr_number,observed_pr_numbers,pr_identity_source,pr_identity_conflict,
+            integration_candidate_head_sha:candidate.map(|v|v.1),
+            integration_candidate_base_sha:None,integration_baseline_verified:false,
+            head_sha,head_branch,run_attempt,
             latest_known_attempt,status,conclusion,ci_state:ci,decision_state,evidence_state,
             responsibility_kind,technical_responsibility:producer.map(|p|p.responsibility),
             resolution_status,work_track_id,work_track_key,work_track_active:work_track_active != 0,work_track_source,
@@ -407,9 +471,13 @@ async fn single_run_endpoint(
     // a conflict, not an absent run or permission to reuse an older GREEN.
     let mut lookup_scope = scope.clone();
     lookup_scope.head_sha = None;
+    lookup_scope.pr_number = None;
     match read_connection(&state.db_path).and_then(|c| query_runs(&c,&lookup_scope,Some(run_id))) {
         Ok(mut runs) => {
             let Some(mut run) = runs.pop() else { return api_error(StatusCode::NOT_FOUND, "RUN_NOT_FOUND"); };
+            if scope.pr_number.is_some_and(|pr|run.pr_number!=Some(pr)) {
+                return api_error(StatusCode::CONFLICT, "PR_NUMBER_MISMATCH");
+            }
             if scope.head_sha.as_ref().is_some_and(|sha| sha != &run.head_sha) {
                 return api_error(StatusCode::CONFLICT, "HEAD_SHA_MISMATCH");
             }
@@ -424,12 +492,45 @@ async fn single_run_endpoint(
     }
 }
 
+async fn jobs_endpoint(
+    HttpPath(run_id): HttpPath<i64>,
+    HttpState(state): HttpState<Arc<BridgeState>>, Query(scope): Query<Scope>,
+) -> Response {
+    if run_id<=0 { return api_error(StatusCode::BAD_REQUEST,"INVALID_RUN_ID"); }
+    if let Err(err) = validate_scope(&scope,true) { return err; }
+    if scope.head_sha.is_none() || scope.attempt.is_none() || scope.pr_number.is_none() {
+        return api_error(StatusCode::BAD_REQUEST,"EXACT_RUN_SCOPE_REQUIRED");
+    }
+    let mut lookup = scope.clone();
+    lookup.head_sha = None;
+    lookup.pr_number = None;
+    let run = match read_connection(&state.db_path).and_then(|c|query_runs(&c,&lookup,Some(run_id))) {
+        Ok(mut runs) => match runs.pop(){
+            Some(run)=>run,
+            None=>return api_error(StatusCode::NOT_FOUND,"RUN_NOT_FOUND"),
+        },
+        Err(_)=>return api_error(StatusCode::SERVICE_UNAVAILABLE,"DATABASE_UNAVAILABLE"),
+    };
+    if run.pr_number != scope.pr_number { return api_error(StatusCode::CONFLICT,"PR_NUMBER_MISMATCH"); }
+    if scope.head_sha.as_ref()!=Some(&run.head_sha) { return api_error(StatusCode::CONFLICT,"HEAD_SHA_MISMATCH"); }
+    if scope.attempt!=Some(run.run_attempt) || run.latest_known_attempt!=run.run_attempt {
+        return api_error(StatusCode::CONFLICT,"RUN_ATTEMPT_MISMATCH");
+    }
+    if run.decision_state=="CONFLICT" { return api_error(StatusCode::CONFLICT,"ATTRIBUTION_CONFLICT"); }
+    if run.evidence_state!="FRESH" { return api_error(StatusCode::SERVICE_UNAVAILABLE,"EVIDENCE_NOT_FRESH"); }
+    match job_telemetry::fetch_jobs(&run.repository,run_id,run.run_attempt).await {
+        Ok(jobs)=>response(json!({"run":run,"jobs":jobs,"completeCoverage":false})),
+        Err(_)=>api_error(StatusCode::SERVICE_UNAVAILABLE,"GITHUB_JOBS_UNAVAILABLE"),
+    }
+}
+
 fn router(state: Arc<BridgeState>) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/registry", get(registry_endpoint))
         .route("/v1/runs", get(runs_endpoint))
         .route("/v1/runs/:run_id", get(single_run_endpoint))
+        .route("/v1/runs/:run_id/jobs", get(jobs_endpoint))
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .with_state(state)
 }
@@ -801,5 +902,131 @@ mod tests {
         // The installed desktop's full process exit is a separate Windows live gate.
         let stopped = tokio::net::TcpStream::connect(address).await;
         assert!(stopped.is_err(), "a stopped listener must reject a new TCP connection");
+    }
+
+    #[test]
+    fn multi_pr_multi_repo_integration_observation_never_claims_baseline_verification() {
+        assert_eq!(ci_kind(Some(".github/workflows/ci.yml")),"general");
+        assert_eq!(ci_kind(Some(".github/workflows/ci-integration.yml")),"integration");
+        assert_eq!(ci_kind(Some(".github/workflows/production-calculation-container.yml")),"other");
+        assert_eq!(ci_kind(None),"unknown");
+        let a="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(integration_candidate(Some(".github/workflows/ci-integration.yml"),
+            &format!("Integration PR #123 at {a}")),Some((123,a.to_string())));
+        assert!(integration_candidate(Some(".github/workflows/ci.yml"),
+            &format!("Integration PR #123 at {a}")).is_none());
+        assert!(integration_candidate(Some(".github/workflows/ci-integration.yml"),
+            "Integration PR #0 at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_none());
+        assert!(integration_candidate(Some(".github/workflows/ci-integration.yml"),
+            "Integration PR #123 at not-a-sha").is_none());
+        let suffix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!("watchtower-ci-pr-fixture-{}-{suffix}.sqlite3",std::process::id()));
+        init_db(&path).unwrap();
+        let conn=Connection::open(&path).unwrap();
+        let now=Utc::now().to_rfc3339();
+        conn.execute("INSERT INTO projects(name,project_key,created_at,updated_at) VALUES('P','p',?,?)",
+            params![now,now]).unwrap();
+        let project_id=conn.last_insert_rowid();
+        let mut repos=Vec::new();
+        for repo in ["test/myeongha","test/saju"] {
+            conn.execute("INSERT INTO monitored_repositories(project_id,repo,enabled,created_at,updated_at,last_polled_at,last_successful_poll_at)
+                VALUES(?,?,1,?,?,?,?)",params![project_id,repo,now,now,now,now]).unwrap();
+            repos.push(conn.last_insert_rowid());
+        }
+        let c="cccccccccccccccccccccccccccccccccccccccc";
+        let b="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut run = |id:i64,repo:i64,workflow:&str,title:&str,head:&str,
+                        prs:Vec<i64>,attempt:i64,status:&str,conclusion:Option<&str>| {
+            let github = GithubRun {
+                id,workflow_id:if workflow.contains("integration") { 2 } else { 1 },
+                name:if workflow.contains("integration") { "CI Integration".into() } else { "CI".into() },
+                path:Some(format!(".github/workflows/{workflow}")),display_title:Some(title.into()),
+                event:if workflow.contains("integration") { "workflow_dispatch".into() } else { "pull_request".into() },
+                head_branch:Some("main".into()),head_sha:head.into(),run_number:1,
+                run_attempt:attempt,status:status.into(),conclusion:conclusion.map(str::to_string),
+                html_url:format!("https://example.invalid/runs/{id}"),
+                created_at:now.clone(),run_started_at:Some(now.clone()),updated_at:now.clone(),
+                pull_requests:prs.into_iter().map(|number| GithubPullRef { number }).collect()
+            };
+            upsert_run(&conn,repo,&github,&now).unwrap();
+        };
+        run(91001,repos[0],"ci.yml","CI #123",a,vec![123],1,"completed",Some("success"));
+        run(91002,repos[0],"ci-integration.yml",&format!("Integration PR #123 at {a}"),
+            c,vec![],1,"completed",Some("success"));
+        run(91003,repos[0],"ci-integration.yml",&format!("Integration PR #124 at {b}"),
+            c,vec![],1,"queued",None);
+        run(91004,repos[0],"ci.yml","CI #123 rerun",a,vec![123],2,"completed",Some("failure"));
+        conn.execute("INSERT INTO run_attempts(run_id,run_attempt,status,conclusion,updated_at)
+            VALUES(91004,1,'completed','success',?)",params![now]).unwrap();
+        run(91005,repos[1],"ci.yml","Saju CI #123",a,vec![123],1,"completed",Some("success"));
+        run(91006,repos[0],"ci-integration.yml",&format!("Integration PR #123 at {a}"),
+            c,vec![124],1,"completed",Some("success"));
+        let read=read_connection(&path).unwrap();
+        let scope=Scope {repository_id:Some(repos[0]),pr_number:Some(123),limit:Some(100),..Scope::default()};
+        let result=query_runs(&read,&scope,None).unwrap();
+        let ids:Vec<i64>=result.iter().map(|r|r.run_id).collect();
+        assert!(ids.contains(&91001) && ids.contains(&91002) && ids.contains(&91004));
+        assert!(!ids.contains(&91003) && !ids.contains(&91005) && !ids.contains(&91006));
+        let integration=result.iter().find(|r|r.run_id==91002).unwrap();
+        assert_eq!(integration.ci_kind,"integration");
+        assert_eq!(integration.pr_number,Some(123));
+        assert_eq!(integration.head_sha,c); // dispatch run SHA is NOT the candidate PR HEAD
+        assert_eq!(integration.integration_candidate_head_sha.as_deref(),Some(a));
+        assert_eq!(integration.integration_candidate_base_sha,None);
+        assert!(!integration.integration_baseline_verified);
+        assert_eq!(integration.pr_identity_source,"integration_title");
+        assert!(!integration.safe_to_advance);
+        let general=result.iter().find(|r|r.run_id==91001).unwrap();
+        assert_eq!(general.ci_kind,"general");
+        assert_eq!(general.pr_identity_source,"github_pull_requests");
+        assert_eq!(general.responsibility_kind,"unknown"); // no ownership invented
+        assert_eq!(result.iter().find(|r|r.run_id==91004).unwrap().ci_state,"FAILURE");
+        let missing=query_runs(&read,&Scope{repository_id:Some(repos[0]),pr_number:Some(999),
+            ..Scope::default()},None).unwrap();
+        assert!(missing.is_empty()); // never treat empty as green
+        let cross=query_runs(&read,&Scope{repository_id:Some(repos[1]),pr_number:Some(123),
+            ..Scope::default()},None).unwrap();
+        assert_eq!(cross.len(),1);
+        assert_eq!(cross[0].run_id,91005);
+        let conflicted=query_runs(&read,&Scope{repository_id:Some(repos[0]),..Scope::default()},Some(91006)).unwrap();
+        assert_eq!(conflicted[0].decision_state,"CONFLICT");
+        assert_eq!(conflicted[0].pr_number,None);
+        drop(read);
+        drop(run);
+        drop(conn);
+        let _=std::fs::remove_file(&path);
+        let _=std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _=std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn scoped_job_endpoint_requires_pr_sha_attempt_and_never_fetches_unscoped() {
+        use tower::ServiceExt;
+        let app=router(Arc::new(BridgeState {
+            db_path:PathBuf::from("not-accessed-for-invalid-scope.sqlite3"),
+            token:"test-token".into()
+        }));
+        for uri in [
+            "/v1/runs/100/jobs",
+            "/v1/runs/100/jobs?repository_id=1",
+            "/v1/runs/100/jobs?repository_id=1&head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&attempt=1",
+        ] {
+            let resp=app.clone().oneshot(axum::http::Request::builder().uri(uri)
+                .header(HOST,format!("127.0.0.1:{PORT}"))
+                .header(AUTHORIZATION,"Bearer test-token")
+                .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(resp.status(),StatusCode::BAD_REQUEST, "{uri}");
+        }
+        let skipped:job_telemetry::GithubJob = serde_json::from_value(json!({
+            "id":8,"name":"CI Tests (2/16)","status":"completed","conclusion":"skipped",
+            "started_at":null,"completed_at":null,"runner_id":null,"runner_name":null,
+            "steps":[{"name":"Test","number":1,"status":"completed","conclusion":"skipped",
+                      "started_at":null,"completed_at":null}]
+        })).unwrap();
+        let value=serde_json::to_value(skipped).unwrap();
+        assert_eq!(value["conclusion"],"skipped");
+        assert_eq!(value["steps"][0]["conclusion"],"skipped");
+        assert_ne!(value["conclusion"],"success");
     }
 }
