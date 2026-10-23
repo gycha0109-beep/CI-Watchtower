@@ -291,6 +291,12 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
     )?;
     let freshness_limit_seconds = (active.max(idle).max(60) * 3).clamp(180, 3600);
     let limit = if exact_run_id.is_some() { 1 } else { scope.limit.unwrap_or(DEFAULT_LIMIT) };
+    // PR identity conflicts are rejected after the SQL query. A SQL LIMIT here
+    // could let a newer conflicted run hide valid PR evidence further down.
+    // The iterator is lazy: stop once enough verified matches have been found.
+    let sql_limit = if scope.pr_number.is_some() && exact_run_id.is_none() {
+        i64::MAX
+    } else { limit };
     let mut stmt = conn.prepare(
         "SELECT wr.run_id,mr.project_id,p.project_key,mr.id,mr.repo,mr.enabled,
                 wr.workflow_id,wr.workflow_name,wr.workflow_path,wr.head_sha,wr.head_branch,
@@ -331,7 +337,7 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
     let candidate_title_prefix = scope.pr_number.map(|pr| format!("Integration PR #{pr} at %"));
     let rows = stmt.query_map(
         params![scope.repository_id, scope.project_id, exact_run_id, scope.head_sha,
-                scope.track_key, scope.pr_number, candidate_title_prefix, limit],
+                scope.track_key, scope.pr_number, candidate_title_prefix, sql_limit],
         |r| {
             Ok((
                 r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,
@@ -433,6 +439,7 @@ fn query_runs(conn: &Connection, scope: &Scope, exact_run_id: Option<i64>) -> Re
                 && latest_known_attempt == run_attempt,
             safe_to_advance:false,
         });
+        if out.len() >= limit as usize { break; }
     }
     Ok(out)
 }
@@ -968,6 +975,13 @@ mod tests {
         let ids:Vec<i64>=result.iter().map(|r|r.run_id).collect();
         assert!(ids.contains(&91001) && ids.contains(&91002) && ids.contains(&91004));
         assert!(!ids.contains(&91003) && !ids.contains(&91005) && !ids.contains(&91006));
+        // The newest SQL candidate (91006) claims both PRs inconsistently.
+        // Filtering that conflict must not make a limit=1 PR query look empty.
+        let first=query_runs(&read,&Scope{limit:Some(1),..scope.clone()},None).unwrap();
+        assert_eq!(first.len(),1);
+        assert_eq!(first[0].run_id,91004);
+        let first_two=query_runs(&read,&Scope{limit:Some(2),..scope.clone()},None).unwrap();
+        assert_eq!(first_two.iter().map(|r|r.run_id).collect::<Vec<_>>(),vec![91004,91002]);
         let integration=result.iter().find(|r|r.run_id==91002).unwrap();
         assert_eq!(integration.ci_kind,"integration");
         assert_eq!(integration.pr_number,Some(123));
