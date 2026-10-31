@@ -84,7 +84,8 @@ fn limit_runs(mut raw:Vec<GithubRun>,limit:usize)->Vec<ScannedRun>{
         dedup.insert(run.id,run);
     }
     let mut runs:Vec<GithubRun>=dedup.into_values().collect();
-    runs.sort_by(|a,b|b.created_at.cmp(&a.created_at).then_with(||b.id.cmp(&a.id)));
+    runs.sort_by(|a,b|ACTIVE.contains(&b.status.as_str()).cmp(&ACTIVE.contains(&a.status.as_str()))
+        .then_with(||b.created_at.cmp(&a.created_at)).then_with(||b.id.cmp(&a.id)));
     runs.into_iter().take(limit).map(|r|{
         let candidate=integration_candidate(r.path.as_deref(),r.display_title.as_deref().unwrap_or(&r.name));
         ScannedRun{
@@ -186,6 +187,17 @@ mod tests{
         assert_eq!(selected.ci_state,"RUNNING");
         assert!(!selected.target_verified);
         assert!(!selected.safe_to_advance);
+    }
+    #[test]
+    fn long_running_workflow_survives_recent_completed_run_window(){
+        let mut old=run(7,1,"in_progress",None);
+        old.created_at="2020-01-01T00:00:00Z".into();
+        let recent=run(8,1,"completed",Some("success"));
+        let rows=limit_runs(vec![old,recent],1);
+        assert_eq!(rows.len(),1);
+        assert_eq!(rows[0].run_id,7);
+        assert_eq!(rows[0].ci_state,"RUNNING");
+        assert!(!rows[0].safe_to_advance);
     }
     #[test]
     fn refuse_token_leaking_status_diagnostics(){
