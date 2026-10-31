@@ -1,7 +1,11 @@
-//! Pure CI evidence decisions. This crate has no Tauri, credential, database,
-//! network, or process lifecycle dependencies. Observations are not permissions.
+//! Shared CI evidence decisions and GitHub Actions collection without Tauri.
+//! Credential acquisition, database writes, process lifetime, and approvals remain with the host.
+//! Observations are not permissions.
 
 use chrono::{DateTime, Duration, Utc};
+
+pub mod github;
+pub use github::{GithubRunsResponse, GithubRun, GithubPullRef, github_client, github_repository_runs, fetch_json, validate_repo};
 
 /// Map raw GitHub Actions status/conclusion to an observed CI state.
 pub fn ci_state(status: &str, conclusion: Option<&str>) -> &'static str {

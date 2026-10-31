@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use ci_watchtower_core::{fetch_json, github_client, github_repository_runs, validate_repo, GithubRunsResponse, GithubPullRef, GithubRun};
 use chrono::{DateTime, Utc};
 use keyring::Entry;
 use reqwest::{header, Client};
@@ -522,43 +523,6 @@ struct ProducerContractRun {
     contract_compliant: bool,
     responsibility_declared: bool,
     is_current_producer_run: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct GithubRunsResponse {
-    workflow_runs: Vec<GithubRun>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct GithubRun {
-    id: i64,
-    workflow_id: i64,
-    name: String,
-    path: Option<String>,
-    display_title: Option<String>,
-    event: String,
-    head_branch: Option<String>,
-    head_sha: String,
-    run_number: i64,
-    #[serde(default = "default_attempt")]
-    run_attempt: i64,
-    status: String,
-    conclusion: Option<String>,
-    html_url: String,
-    created_at: String,
-    run_started_at: Option<String>,
-    updated_at: String,
-    #[serde(default)]
-    pull_requests: Vec<GithubPullRef>,
-}
-
-fn default_attempt() -> i64 {
-    1
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct GithubPullRef {
-    number: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1258,46 +1222,6 @@ fn token_configured() -> bool {
         .and_then(|e| e.get_password().map_err(|err| anyhow!(err.to_string())))
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false)
-}
-
-fn github_client(token: &str) -> Result<Client> {
-    let mut headers = header::HeaderMap::new();
-    headers.insert(
-        header::ACCEPT,
-        header::HeaderValue::from_static("application/vnd.github+json"),
-    );
-    headers.insert(
-        "X-GitHub-Api-Version",
-        header::HeaderValue::from_static("2022-11-28"),
-    );
-    headers.insert(
-        header::AUTHORIZATION,
-        header::HeaderValue::from_str(&format!("Bearer {token}"))?,
-    );
-    Ok(Client::builder()
-        .default_headers(headers)
-        .user_agent("ci-watchtower/0.3.28")
-        .timeout(Duration::from_secs(20))
-        .build()?)
-}
-
-fn validate_repo(repo: &str) -> Result<()> {
-    let mut parts = repo.split('/');
-    let owner = parts.next().unwrap_or_default();
-    let name = parts.next().unwrap_or_default();
-    if owner.is_empty() || name.is_empty() || parts.next().is_some() {
-        return Err(anyhow!("Repository는 owner/name 형식이어야 합니다."));
-    }
-    if !owner
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    {
-        return Err(anyhow!("Repository 이름에 허용되지 않은 문자가 있습니다."));
-    }
-    Ok(())
 }
 
 fn validate_track_key(key: &str) -> Result<()> {
@@ -3159,34 +3083,6 @@ fn build_dashboard_with_token_status(
         project_runs,
         unassigned_runs,
     })
-}
-
-async fn fetch_json<T: for<'de> Deserialize<'de>>(
-    client: &Client,
-    url: String,
-    label: &str,
-) -> Result<T> {
-    let response = client.get(url).send().await?;
-    if !response.status().is_success() {
-        return Err(anyhow!("{label}: HTTP {}", response.status()));
-    }
-    Ok(response.json().await?)
-}
-
-async fn github_repository_runs(client: &Client, repo: &str) -> Result<Vec<GithubRun>> {
-    let url = format!("https://api.github.com/repos/{repo}/actions/runs?per_page=100");
-    let data: GithubRunsResponse = fetch_json(client, url, "GitHub Actions 조회 실패").await?;
-    let mut runs: HashMap<i64, GithubRun> = data.workflow_runs.into_iter().map(|run| (run.id, run)).collect();
-    // Old active runs must not disappear merely because 100 newer completed runs exist.
-    for status in ["queued", "in_progress", "waiting", "pending", "requested"] {
-        for page in 1..=10 {
-            let data: GithubRunsResponse = fetch_json(client, format!("https://api.github.com/repos/{repo}/actions/runs?status={status}&per_page=100&page={page}"), "Active Actions 조회 실패").await?;
-            let count = data.workflow_runs.len();
-            for run in data.workflow_runs { runs.insert(run.id, run); }
-            if count < 100 { break; }
-        }
-    }
-    Ok(runs.into_values().collect())
 }
 
 async fn github_commit_message(
