@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::Duration};
 
 #[derive(Debug, Clone, Deserialize)]
-struct GithubRunsResponse {
+pub struct GithubRunsResponse {
     pub workflow_runs: Vec<GithubRun>,
 }
 
