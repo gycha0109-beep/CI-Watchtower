@@ -1,5 +1,6 @@
-//! Pure CI evidence decisions. This crate has no Tauri, credential, database,
-//! network, or process lifecycle dependencies. Observations are not permissions.
+//! Shared CI evidence decisions and GitHub Actions collection without Tauri.
+//! Credential acquisition, database writes, process lifetime, and approvals remain with the host.
+//! Observations are not permissions.
 
 use chrono::{DateTime, Duration, Utc};
 
