@@ -240,7 +240,9 @@ mod tests{
         {let c=Connection::open(&src).unwrap();schema(&c);}
         let conn=source_connection(&src).unwrap();
         assert!(stage_backup(&conn,&src).is_err());
-        conn.execute("SELECT 1",[]).unwrap();
+        let alive:i64=conn.query_row("SELECT 1",[],|r|r.get(0)).unwrap();
+        assert_eq!(alive,1);
+        conn.execute("UPDATE monitored_repositories SET enabled=0 WHERE id=3",[]).unwrap_err();
         drop(conn);
         std::fs::remove_file(src).unwrap();
     }
