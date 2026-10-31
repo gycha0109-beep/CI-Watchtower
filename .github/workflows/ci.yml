@@ -70,6 +70,15 @@ jobs:
           & .\src-tauri\crates\ci-core\target\debug\ci-core-registry.exe --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Build read-only CI history preview
+        run: cargo build --manifest-path src-tauri/crates/ci-core/Cargo.toml --bin ci-core-history
+
+      - name: Inspect history CLI without database
+        shell: pwsh
+        run: |
+          & .\src-tauri\crates\ci-core\target\debug\ci-core-history.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
@@ -121,6 +130,7 @@ jobs:
           path: |
             src-tauri/crates/ci-core/target/debug/ci-core-inspect.exe
             src-tauri/crates/ci-core/target/debug/ci-core-registry.exe
+            src-tauri/crates/ci-core/target/debug/ci-core-history.exe
           if-no-files-found: error
 
       - name: Upload installer artifacts
