@@ -61,6 +61,15 @@ jobs:
           & .\src-tauri\crates\ci-core\target\debug\ci-core-inspect.exe --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Build read-only CI registry preview
+        run: cargo build --manifest-path src-tauri/crates/ci-core/Cargo.toml --bin ci-core-registry
+
+      - name: Inspect registry CLI without database
+        shell: pwsh
+        run: |
+          & .\src-tauri\crates\ci-core\target\debug\ci-core-registry.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
@@ -109,7 +118,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ci-core-headless-preview
-          path: src-tauri/crates/ci-core/target/debug/ci-core-inspect.exe
+          path: |
+            src-tauri/crates/ci-core/target/debug/ci-core-inspect.exe
+            src-tauri/crates/ci-core/target/debug/ci-core-registry.exe
           if-no-files-found: error
 
       - name: Upload installer artifacts
