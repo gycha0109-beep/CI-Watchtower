@@ -12,6 +12,7 @@ pub(super) fn run(args: &[String]) -> Result<bool> {
         || output_path == db_path || output_path == snapshot_path {
         return Err(anyhow!("Import requires distinct absolute paths and an existing database"));
     }
+    let _writer_lease=ci_watchtower_core::writer_lease::WriterLease::try_acquire(&db_path)?;
     let snapshots: Vec<producer_sync::ProducerSnapshot> = serde_json::from_slice(&std::fs::read(snapshot_path)?)?;
     let backup = db_path.with_extension("before-producer-v038.sqlite3");
     if !backup.exists() {
