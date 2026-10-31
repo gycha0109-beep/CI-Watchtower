@@ -13,6 +13,7 @@ use rusqlite::OpenFlags;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
+use ci_watchtower_core::{ci_kind, ci_state, freshness, integration_candidate};
 
 const PORT: u16 = 48765;
 const CONTRACT_VERSION: &str = "1.0";
@@ -228,66 +229,7 @@ fn registry(conn: &Connection, scope: &Scope) -> Result<Value> {
     Ok(json!({"projects":projects,"repositories":repositories,"tracks":tracks}))
 }
 
-fn ci_state(status: &str, conclusion: Option<&str>) -> &'static str {
-    match status {
-        "in_progress" => "RUNNING",
-        "queued" | "requested" | "pending" | "waiting" => "QUEUED",
-        "completed" => match conclusion {
-            Some("success") => "SUCCESS",
-            Some("failure" | "timed_out" | "startup_failure") => "FAILURE",
-            Some(_) => "OTHER_TERMINAL",
-            None => "UNKNOWN",
-        },
-        _ => "UNKNOWN",
-    }
-}
-
-// A CI class is established by the workflow file, never just the human-readable name.
-// Producers with other naming conventions remain "other" instead of guessed integration.
-fn ci_kind(path: Option<&str>) -> &'static str {
-    match path.and_then(|p| p.strip_prefix(".github/workflows/")) {
-        Some("ci.yml" | "ci.yaml") => "general",
-        Some("ci-integration.yml" | "ci-integration.yaml") => "integration",
-        Some(_) => "other",
-        None => "unknown",
-    }
-}
-
-// Only the known integration workflow run-name contract may carry candidate identity.
-// Never infer a baseline SHA from today's PR base: the pinned admission base is not persisted.
-fn integration_candidate(path: Option<&str>, title: &str) -> Option<(i64, String)> {
-    if ci_kind(path) != "integration" { return None; }
-    let value = title.strip_prefix("Integration PR #")?;
-    let (number, head) = value.split_once(" at ")?;
-    if number.starts_with('0') || !number.bytes().all(|b| b.is_ascii_digit()) { return None; }
-    let number = number.parse::<i64>().ok().filter(|v| *v > 0)?;
-    if head.len()!=40 || !head.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
-    Some((number, head.to_ascii_lowercase()))
-}
-
-fn freshness(
-    now: DateTime<Utc>,
-    enabled: bool,
-    last_success: Option<&str>,
-    last_error: Option<&str>,
-    last_seen: &str,
-    limit_seconds: i64,
-    latest_attempt_matches: bool,
-) -> &'static str {
-    if !enabled { return "UNKNOWN"; }
-    if last_error.is_some() { return "POLL_ERROR"; }
-    let parse = |s: &str| DateTime::parse_from_rfc3339(s).ok().map(|v| v.with_timezone(&Utc));
-    let Some(success) = last_success.and_then(parse) else { return "UNKNOWN"; };
-    let Some(seen) = parse(last_seen) else { return "UNKNOWN"; };
-    if !latest_attempt_matches || success > now + chrono::Duration::seconds(10)
-        || seen > now + chrono::Duration::seconds(10)
-        || (now-success).num_seconds() > limit_seconds
-        || (now-seen).num_seconds() > limit_seconds {
-        return "STALE";
-    }
-    "FRESH"
-}
-
+// Classification and freshness rules come from the reusable UI-independent crate.
 // This is a relation between immutable historical records, not a CI conclusion.
 // Run lists are bounded and can never establish the complete required-check set.
 fn supersession_candidate(run: &BridgeRun) -> Option<&str> {
