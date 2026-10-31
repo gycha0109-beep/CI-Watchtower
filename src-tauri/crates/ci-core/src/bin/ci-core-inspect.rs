@@ -1,10 +1,11 @@
 //! One-shot, read-only headless GitHub CI inspection.
 //! No WatchTower UI, SQLite mutations, webhook, merge or automatic resume.
-use ci_watchtower_core::{ci_kind, ci_state, fetch_json, github_client, integration_candidate, validate_repo, GithubRun};
+use ci_watchtower_core::{ci_kind, ci_state, github_client, integration_candidate, validate_repo, GithubRun};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use keyring::Entry;
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
+use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -121,6 +122,32 @@ fn assess(target: &Target, before:&GithubPr, after:&GithubPr, run:&GithubRun) ->
     })
 }
 
+// Return only fixed, non-sensitive error codes. Never disclose the PAT,
+// HTTP response body, request headers or GitHub's diagnostic text.
+fn github_error(status:StatusCode, remaining:Option<&str>, retry_after:bool)->&'static str{
+    match status.as_u16(){
+        401=>"GITHUB_UNAUTHORIZED",
+        403 if remaining==Some("0")=>"GITHUB_RATE_LIMITED",
+        403 if retry_after=>"GITHUB_THROTTLED",
+        403=>"GITHUB_FORBIDDEN",
+        404=>"GITHUB_NOT_FOUND",
+        429=>"GITHUB_THROTTLED",
+        _=>"GITHUB_UNAVAILABLE"
+    }
+}
+
+async fn read_github<T:DeserializeOwned>(client:&Client,url:String)->Result<T>{
+    let reply=client.get(url).send().await
+        .map_err(|_|anyhow!("GITHUB_TRANSPORT_UNAVAILABLE"))?;
+    if !reply.status().is_success(){
+        let code=github_error(reply.status(),
+            reply.headers().get("x-ratelimit-remaining").and_then(|v|v.to_str().ok()),
+            reply.headers().contains_key("retry-after"));
+        return Err(anyhow!(code));
+    }
+    reply.json::<T>().await.map_err(|_|anyhow!("GITHUB_RESPONSE_INVALID"))
+}
+
 async fn inspect(target:&Target)->Result<Value>{
     let token=Entry::new(SERVICE,ACCOUNT).map_err(|_|anyhow!("CREDENTIAL_UNAVAILABLE"))?
         .get_password().map_err(|_|anyhow!("CREDENTIAL_UNAVAILABLE"))?;
@@ -130,12 +157,9 @@ async fn inspect(target:&Target)->Result<Value>{
     let pr_url=format!("{base}/pulls/{}",target.pr);
     let run_url=format!("{base}/actions/runs/{}",target.run_id);
     // Read twice around run retrieval to reject a moving PR head.
-    let before:GithubPr=fetch_json(&client,pr_url.clone(),"PR verification").await
-        .map_err(|_|anyhow!("GITHUB_UNAVAILABLE"))?;
-    let run:GithubRun=fetch_json(&client,run_url,"CI run verification").await
-        .map_err(|_|anyhow!("GITHUB_UNAVAILABLE"))?;
-    let after:GithubPr=fetch_json(&client,pr_url,"PR re-verification").await
-        .map_err(|_|anyhow!("GITHUB_UNAVAILABLE"))?;
+    let before:GithubPr=read_github(&client,pr_url.clone()).await?;
+    let run:GithubRun=read_github(&client,run_url).await?;
+    let after:GithubPr=read_github(&client,pr_url).await?;
     Ok(assess(target,&before,&after,&run))
 }
 
@@ -156,6 +180,13 @@ async fn main(){
             let code=match error.to_string().as_str(){
                 "INVALID_TARGET"=>"INVALID_TARGET",
                 "CREDENTIAL_UNAVAILABLE"=>"CREDENTIAL_UNAVAILABLE",
+                "GITHUB_UNAUTHORIZED"=>"GITHUB_UNAUTHORIZED",
+                "GITHUB_FORBIDDEN"=>"GITHUB_FORBIDDEN",
+                "GITHUB_RATE_LIMITED"=>"GITHUB_RATE_LIMITED",
+                "GITHUB_THROTTLED"=>"GITHUB_THROTTLED",
+                "GITHUB_NOT_FOUND"=>"GITHUB_NOT_FOUND",
+                "GITHUB_TRANSPORT_UNAVAILABLE"=>"GITHUB_TRANSPORT_UNAVAILABLE",
+                "GITHUB_RESPONSE_INVALID"=>"GITHUB_RESPONSE_INVALID",
                 _=>"GITHUB_UNAVAILABLE"
             };
             println!("{}",json!({"contractVersion":CONTRACT,"error":{"code":code}}));
@@ -183,6 +214,16 @@ mod tests{
             "created_at":"2026-11-01T00:00:00Z","run_started_at":null,
             "updated_at":"2026-11-01T00:01:00Z","pull_requests":[{"number":9}]
         })).unwrap()
+    }
+    #[test]
+    fn classify_http_without_logging_credentials_or_github_response(){
+        assert_eq!(github_error(StatusCode::UNAUTHORIZED,None,false),"GITHUB_UNAUTHORIZED");
+        assert_eq!(github_error(StatusCode::FORBIDDEN,Some("0"),false),"GITHUB_RATE_LIMITED");
+        assert_eq!(github_error(StatusCode::FORBIDDEN,Some("50"),true),"GITHUB_THROTTLED");
+        assert_eq!(github_error(StatusCode::FORBIDDEN,Some("50"),false),"GITHUB_FORBIDDEN");
+        assert_eq!(github_error(StatusCode::NOT_FOUND,None,false),"GITHUB_NOT_FOUND");
+        assert_eq!(github_error(StatusCode::TOO_MANY_REQUESTS,None,false),"GITHUB_THROTTLED");
+        assert_eq!(github_error(StatusCode::BAD_GATEWAY,None,false),"GITHUB_UNAVAILABLE");
     }
     #[test]
     fn malformed_scope_or_duplicate_flags_never_start_network(){
