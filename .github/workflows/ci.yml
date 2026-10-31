@@ -13,6 +13,29 @@ permissions:
   contents: read
 
 jobs:
+  core-staged-preview:
+    name: Core staging preview (independent Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test atomic storage and isolated database staging
+        run: cargo test --manifest-path src-tauri/crates/ci-core/Cargo.toml
+      - name: Build standalone staging executable
+        run: cargo build --manifest-path src-tauri/crates/ci-core/Cargo.toml --bin ci-core-stage
+      - name: Verify standalone CLI without credentials
+        shell: pwsh
+        run: |
+          & .\src-tauri\crates\ci-core\target\debug\ci-core-stage.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload isolated staging executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-core-staged-standalone-preview
+          path: src-tauri/crates/ci-core/target/debug/ci-core-stage.exe
+          if-no-files-found: error
+
   windows-build:
     name: Windows build + tests
     runs-on: windows-latest
@@ -88,6 +111,15 @@ jobs:
           & .\src-tauri\crates\ci-core\target\debug\ci-core-scan.exe --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Build isolated Core staging writer preview
+        run: cargo build --manifest-path src-tauri/crates/ci-core/Cargo.toml --bin ci-core-stage
+
+      - name: Inspect staging-only CLI without credentials
+        shell: pwsh
+        run: |
+          & .\src-tauri\crates\ci-core\target\debug\ci-core-stage.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
@@ -141,6 +173,7 @@ jobs:
             src-tauri/crates/ci-core/target/debug/ci-core-registry.exe
             src-tauri/crates/ci-core/target/debug/ci-core-history.exe
             src-tauri/crates/ci-core/target/debug/ci-core-scan.exe
+            src-tauri/crates/ci-core/target/debug/ci-core-stage.exe
           if-no-files-found: error
 
       - name: Upload installer artifacts
