@@ -1,0 +1,9 @@
+[package]
+name = "ci-watchtower-core"
+version = "0.1.0"
+edition = "2021"
+description = "Reusable, UI-independent CI evidence decisions for WatchTower consumers"
+publish = false
+
+[dependencies]
+chrono = "0.4"
