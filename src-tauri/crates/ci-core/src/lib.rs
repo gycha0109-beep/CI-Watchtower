@@ -5,7 +5,7 @@
 use chrono::{DateTime, Duration, Utc};
 
 pub mod github;
-pub use github::{GithubRun, GithubPullRef, github_client, github_repository_runs, fetch_json, validate_repo};
+pub use github::{GithubRunsResponse, GithubRun, GithubPullRef, github_client, github_repository_runs, fetch_json, validate_repo};
 
 /// Map raw GitHub Actions status/conclusion to an observed CI state.
 pub fn ci_state(status: &str, conclusion: Option<&str>) -> &'static str {
