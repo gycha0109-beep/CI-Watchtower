@@ -52,6 +52,15 @@ jobs:
       - name: Rust Core independent tests
         run: cargo test --manifest-path src-tauri/crates/ci-core/Cargo.toml
 
+      - name: Build headless CI inspector (preview)
+        run: cargo build --manifest-path src-tauri/crates/ci-core/Cargo.toml --bin ci-core-inspect
+
+      - name: Inspect headless CLI without credentials
+        shell: pwsh
+        run: |
+          & .\src-tauri\crates\ci-core\target\debug\ci-core-inspect.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
@@ -94,6 +103,14 @@ jobs:
             -Executable 'src-tauri/target/release/ci-watchtower.exe' `
             -SmokeScript 'tools/Test-WatchTowerBridge.ps1'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload headless CI inspector preview
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-core-headless-preview
+          path: src-tauri/crates/ci-core/target/debug/ci-core-inspect.exe
+          if-no-files-found: error
 
       - name: Upload installer artifacts
         if: success()
