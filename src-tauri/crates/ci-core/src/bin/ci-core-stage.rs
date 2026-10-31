@@ -5,6 +5,7 @@ use anyhow::{anyhow,Result};
 use chrono::Utc;
 use ci_watchtower_core::{fetch_json,github_client,validate_repo,GithubRun,GithubRunsResponse};
 use ci_watchtower_core::storage::upsert_run;
+use ci_watchtower_core::writer_lease::WriterLease;
 use keyring::Entry;
 use rusqlite::{backup::Backup,params,Connection,OpenFlags};
 use serde_json::{json,Value};
@@ -129,6 +130,7 @@ async fn execute(args:&Args)->Result<Value>{
     let url=format!("https://api.github.com/repos/{repository}/actions/runs?per_page={}&page=1",args.limit);
     let response:GithubRunsResponse=fetch_json(&client,url,"staging GitHub GET").await
         .map_err(|_|anyhow!("GITHUB_UNAVAILABLE"))?;
+    let _writer_lease=WriterLease::try_acquire(&args.stage)?;
     let mut copy=stage_backup(&source,&args.stage)?;
     let now=Utc::now().to_rfc3339();
     let (written,skipped)=ingest(&copy,args.repository_id,&response.workflow_runs,args.limit,&now)?;
