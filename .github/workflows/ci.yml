@@ -49,6 +49,9 @@ jobs:
       - name: Frontend build
         run: npm run build
 
+      - name: Rust Core independent tests
+        run: cargo test --manifest-path src-tauri/crates/ci-core/Cargo.toml
+
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
