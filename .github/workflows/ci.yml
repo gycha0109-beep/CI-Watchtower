@@ -88,6 +88,15 @@ jobs:
           & .\src-tauri\crates\ci-core\target\debug\ci-core-scan.exe --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Build isolated Core staging writer preview
+        run: cargo build --manifest-path src-tauri/crates/ci-core/Cargo.toml --bin ci-core-stage
+
+      - name: Inspect staging-only CLI without credentials
+        shell: pwsh
+        run: |
+          & .\src-tauri\crates\ci-core\target\debug\ci-core-stage.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
@@ -141,6 +150,7 @@ jobs:
             src-tauri/crates/ci-core/target/debug/ci-core-registry.exe
             src-tauri/crates/ci-core/target/debug/ci-core-history.exe
             src-tauri/crates/ci-core/target/debug/ci-core-scan.exe
+            src-tauri/crates/ci-core/target/debug/ci-core-stage.exe
           if-no-files-found: error
 
       - name: Upload installer artifacts
