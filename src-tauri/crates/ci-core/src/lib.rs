@@ -6,6 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 
 pub mod github;
 pub mod storage;
+pub mod writer_lease;
 pub use github::{GithubRunsResponse, GithubRun, GithubPullRef, github_client, github_repository_runs, fetch_json, validate_repo};
 
 /// Map raw GitHub Actions status/conclusion to an observed CI state.
