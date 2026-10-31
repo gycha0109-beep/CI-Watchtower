@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use ci_watchtower_core::{fetch_json, github_client, github_repository_runs, validate_repo, GithubPullRef, GithubRun};
+use ci_watchtower_core::{fetch_json, github_client, github_repository_runs, validate_repo, GithubRunsResponse, GithubPullRef, GithubRun};
 use chrono::{DateTime, Utc};
 use keyring::Entry;
 use reqwest::{header, Client};
