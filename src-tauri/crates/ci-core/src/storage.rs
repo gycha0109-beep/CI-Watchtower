@@ -6,7 +6,21 @@ use rusqlite::{params,Connection};
 use crate::github::GithubRun;
 
 pub fn upsert_run(conn: &Connection, repository_id: i64, run: &GithubRun, now: &str) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
+    // A SAVEPOINT also works inside a transaction started by the Tauri producer.
+    // Each Run + Attempt pair is atomic without attempting a nested BEGIN.
+    conn.execute_batch("SAVEPOINT ci_core_run_attempt")?;
+    match upsert_run_inner(conn,repository_id,run,now) {
+        Ok(())=>{
+            conn.execute_batch("RELEASE SAVEPOINT ci_core_run_attempt")?;
+            Ok(())
+        },
+        Err(original)=>{
+            conn.execute_batch("ROLLBACK TO SAVEPOINT ci_core_run_attempt; RELEASE SAVEPOINT ci_core_run_attempt")?;
+            Err(original)
+        }
+    }
+}
+fn upsert_run_inner(conn: &Connection, repository_id: i64, run: &GithubRun, now: &str) -> Result<()> {
     let title = run
         .display_title
         .clone()
@@ -15,7 +29,7 @@ pub fn upsert_run(conn: &Connection, repository_id: i64, run: &GithubRun, now: &
     pr_numbers.sort_unstable();
     pr_numbers.dedup();
     let pr_numbers_json = serde_json::to_string(&pr_numbers)?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO workflow_runs(run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,created_at,run_started_at,updated_at,last_seen_at,pr_numbers_json)
          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(run_id) DO UPDATE SET
@@ -47,7 +61,7 @@ pub fn upsert_run(conn: &Connection, repository_id: i64, run: &GithubRun, now: &
             pr_numbers_json
         ],
     )?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO run_attempts(run_id,run_attempt,status,conclusion,started_at,updated_at)
          VALUES(?,?,?,?,?,?)
          ON CONFLICT(run_id,run_attempt) DO UPDATE SET status=excluded.status,conclusion=excluded.conclusion,started_at=excluded.started_at,updated_at=excluded.updated_at",
@@ -60,7 +74,6 @@ pub fn upsert_run(conn: &Connection, repository_id: i64, run: &GithubRun, now: &
             run.updated_at
         ],
     )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -124,6 +137,29 @@ mod tests{
         let runs:i64=c.query_row("SELECT count(*) FROM workflow_runs",[],|r|r.get(0)).unwrap();
         let attempts:i64=c.query_row("SELECT count(*) FROM run_attempts",[],|r|r.get(0)).unwrap();
         assert_eq!((runs,attempts),(1,1));
+    }
+    #[test]
+    fn nested_producer_transaction_can_upsert_without_implicit_begin(){
+        let c=Connection::open_in_memory().unwrap();schema(&c);
+        let outer=c.unchecked_transaction().unwrap();
+        upsert_run(&outer,3,&run(1,"completed",Some("success"),true),"2026-11-01T00:05:00Z").unwrap();
+        upsert_run(&outer,3,&run(2,"queued",None,true),"2026-11-01T00:06:00Z").unwrap();
+        outer.commit().unwrap();
+        let attempts:i64=c.query_row("SELECT count(*) FROM run_attempts WHERE run_id=551",[],|r|r.get(0)).unwrap();
+        assert_eq!(attempts,2);
+    }
+    #[test]
+    fn inner_failure_rolls_back_only_its_savepoint_not_outer_producer_work(){
+        let c=Connection::open_in_memory().unwrap();schema(&c);
+        let outer=c.unchecked_transaction().unwrap();
+        outer.execute("INSERT INTO run_assignments VALUES(991,22,'manual',1)",[]).unwrap();
+        outer.execute_batch("CREATE TRIGGER deny_attempt BEFORE INSERT ON run_attempts
+            BEGIN SELECT RAISE(ABORT,'injected test failure'); END;").unwrap();
+        assert!(upsert_run(&outer,3,&run(1,"completed",Some("success"),true),"2026-11-01T00:05:00Z").is_err());
+        outer.commit().unwrap();
+        let assigned:i64=c.query_row("SELECT count(*) FROM run_assignments WHERE run_id=991",[],|r|r.get(0)).unwrap();
+        let runs:i64=c.query_row("SELECT count(*) FROM workflow_runs",[],|r|r.get(0)).unwrap();
+        assert_eq!((assigned,runs),(1,0));
     }
     #[test]
     fn failed_attempt_write_rolls_back_prior_run_insert(){
