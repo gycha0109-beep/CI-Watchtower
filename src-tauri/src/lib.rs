@@ -6279,7 +6279,10 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let db_path = app.path().app_data_dir()?.join("ci-watchtower.sqlite3");
+            std::fs::create_dir_all(db_path.parent().ok_or_else(|| anyhow!("WRITER_PATH_INVALID"))?)?;
+            let writer_lease=ci_watchtower_core::writer_lease::WriterLease::try_acquire(&db_path)?;
             init_db(&db_path)?;
+            app.manage(writer_lease);
             autopilot_bridge::start(db_path.clone());
             app.manage(AppState {
                 db_path,
