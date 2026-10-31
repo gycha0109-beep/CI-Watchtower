@@ -30,7 +30,7 @@ struct Args{
 }
 fn parse(args:&[String])->Result<Args>{
     if !(args.len()==4||args.len()==6){return Err(anyhow!("INVALID_TARGET"));}
-    let mut db=None;let mut repository_id=None;let mut limit=30_i64;
+    let mut db=None;let mut repository_id=None;let mut limit=30_i64;let mut limit_seen=false;
     for pair in args.chunks_exact(2){
         match pair[0].as_str(){
             "--db" if db.is_none()=>{
@@ -43,7 +43,8 @@ fn parse(args:&[String])->Result<Args>{
                 if id<1 || pair[1].starts_with('0'){return Err(anyhow!("INVALID_TARGET"));}
                 repository_id=Some(id);
             }
-            "--limit" if limit==30 && pair[1]!="30"=>{
+            "--limit" if !limit_seen=>{
+                limit_seen=true;
                 let n=pair[1].parse::<i64>().map_err(|_|anyhow!("INVALID_TARGET"))?;
                 if !(1..=100).contains(&n)||pair[1].starts_with('0'){return Err(anyhow!("INVALID_TARGET"));}
                 limit=n;
