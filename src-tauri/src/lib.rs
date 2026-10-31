@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use ci_watchtower_core::{fetch_json, github_client, github_repository_runs, validate_repo, GithubRunsResponse, GithubPullRef, GithubRun};
+use ci_watchtower_core::storage::upsert_run;
 use chrono::{DateTime, Utc};
 use keyring::Entry;
 use reqwest::{header, Client};
@@ -3742,63 +3743,6 @@ fn persist_resolution(
     now: &str,
 ) -> Result<()> {
     persist_resolution_with_trigger(conn, run_id, resolution, now, None)
-}
-
-fn upsert_run(conn: &Connection, repository_id: i64, run: &GithubRun, now: &str) -> Result<()> {
-    let title = run
-        .display_title
-        .clone()
-        .unwrap_or_else(|| run.name.clone());
-    let mut pr_numbers: Vec<i64> = run.pull_requests.iter().map(|pr| pr.number).filter(|id| *id > 0).collect();
-    pr_numbers.sort_unstable();
-    pr_numbers.dedup();
-    let pr_numbers_json = serde_json::to_string(&pr_numbers)?;
-    conn.execute(
-        "INSERT INTO workflow_runs(run_id,repository_id,workflow_id,workflow_name,workflow_path,display_title,event,head_branch,head_sha,run_number,run_attempt,status,conclusion,html_url,created_at,run_started_at,updated_at,last_seen_at,pr_numbers_json)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT(run_id) DO UPDATE SET
-           repository_id=excluded.repository_id,workflow_id=excluded.workflow_id,workflow_name=excluded.workflow_name,
-           workflow_path=excluded.workflow_path,display_title=excluded.display_title,event=excluded.event,
-           head_branch=excluded.head_branch,head_sha=excluded.head_sha,run_number=excluded.run_number,
-           run_attempt=excluded.run_attempt,status=excluded.status,conclusion=excluded.conclusion,
-           html_url=excluded.html_url,run_started_at=excluded.run_started_at,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at,
-           pr_numbers_json=CASE WHEN excluded.pr_numbers_json!='[]' THEN excluded.pr_numbers_json ELSE workflow_runs.pr_numbers_json END",
-        params![
-            run.id,
-            repository_id,
-            run.workflow_id,
-            run.name,
-            run.path,
-            title,
-            run.event,
-            run.head_branch,
-            run.head_sha,
-            run.run_number,
-            run.run_attempt,
-            run.status,
-            run.conclusion,
-            run.html_url,
-            run.created_at,
-            run.run_started_at,
-            run.updated_at,
-            now,
-            pr_numbers_json
-        ],
-    )?;
-    conn.execute(
-        "INSERT INTO run_attempts(run_id,run_attempt,status,conclusion,started_at,updated_at)
-         VALUES(?,?,?,?,?,?)
-         ON CONFLICT(run_id,run_attempt) DO UPDATE SET status=excluded.status,conclusion=excluded.conclusion,started_at=excluded.started_at,updated_at=excluded.updated_at",
-        params![
-            run.id,
-            run.run_attempt,
-            run.status,
-            run.conclusion,
-            run.run_started_at,
-            run.updated_at
-        ],
-    )?;
-    Ok(())
 }
 
 fn load_stored_unresolved_runs(
