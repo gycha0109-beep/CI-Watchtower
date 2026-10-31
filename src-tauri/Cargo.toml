@@ -21,6 +21,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "net", "macros"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
+ci-watchtower-core = { path = "crates/ci-core" }
 keyring = { version = "3", features = ["windows-native"] }
 anyhow = "1"
 urlencoding = "2"
